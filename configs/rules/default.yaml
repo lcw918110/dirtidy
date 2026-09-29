@@ -1,0 +1,63 @@
+pack_id: default
+version: 1
+rules:
+  - id: dep_node_modules
+    action: auto_quarantine
+    match:
+      type: dir_name
+      names: ["node_modules"]
+    reason: "Node 依赖目录，可用包管理器重建"
+
+  - id: dep_venv
+    action: auto_quarantine
+    match:
+      type: dir_name
+      names: [".venv", "venv"]
+    reason: "Python 虚拟环境，可重建"
+
+  - id: dep_pycache
+    action: auto_quarantine
+    match:
+      type: dir_name
+      names: ["__pycache__"]
+    reason: "Python 字节码缓存"
+
+  - id: dep_m2
+    action: auto_quarantine
+    match:
+      type: dir_name
+      names: [".m2"]
+    reason: "Maven 本地仓库缓存"
+
+  - id: dep_gradle
+    action: auto_quarantine
+    match:
+      type: dir_name
+      names: [".gradle"]
+    reason: "Gradle 缓存目录"
+
+  - id: empty_dir
+    action: auto_quarantine
+    match:
+      type: empty_dir
+    reason: "空目录"
+
+  - id: empty_file
+    action: candidate_only
+    match:
+      type: empty_file
+    reason: "0 字节文件，需确认"
+
+  - id: log_suffix
+    action: auto_quarantine
+    match:
+      type: suffix
+      suffixes: [".log"]
+    reason: "日志文件"
+
+  - id: installer_suffix
+    action: candidate_only
+    match:
+      type: suffix
+      suffixes: [".dmg", ".msi", ".deb", ".rpm"]
+    reason: "安装包类文件，默认仅候选"

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>dirtidy 审阅</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>dirtidy</h1>
+    <p id="meta"></p>
+  </header>
+  <section class="toolbar">
+    <label>Run
+      <select id="runSelect"></select>
+    </label>
+    <button id="reloadBtn" type="button">刷新</button>
+    <button id="saveBtn" type="button">保存决策</button>
+    <button id="applyBtn" type="button">执行决策</button>
+  </section>
+  <section>
+    <h2>候选 / 建议</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>路径</th>
+          <th>来源</th>
+          <th>建议</th>
+          <th>决策</th>
+          <th>归档相对路径</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+  <section>
+    <h2>重复组（人选保留）</h2>
+    <div id="dups"></div>
+  </section>
+  <pre id="status"></pre>
+  <script src="/static/app.js"></script>
+</body>
+</html>

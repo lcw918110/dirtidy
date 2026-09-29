@@ -1,0 +1,18 @@
+# 复制为 models.yaml 后填写。勿将含密钥的文件提交入库。
+provider: openai_compatible  # 或 ollama
+
+openai_compatible:
+  base_url: "https://api.openai.com/v1"
+  api_key_env: "DIRTIDY_API_KEY"
+  model: "gpt-4o-mini"
+
+ollama:
+  host: "http://127.0.0.1:11434"
+  model: "llama3.2"
+
+summary:
+  max_text_chars: 800
+  redact_path: false
+  allow_external_content: false
+  allow_ollama_full_content: false
+  batch_size: 20

@@ -1,0 +1,24 @@
+pack_id: server_workspace
+version: 1
+extends: default
+rules:
+  - id: log_dir
+    action: auto_quarantine
+    match:
+      type: dir_name
+      names: ["logs", "log"]
+    reason: "常见日志目录"
+
+  - id: dep_target_candidate
+    action: candidate_only
+    match:
+      type: dir_name
+      names: ["target"]
+    reason: "可能为构建产物，默认仅候选以免误伤源码工程"
+
+  - id: dep_vendor
+    action: candidate_only
+    match:
+      type: dir_name
+      names: ["vendor"]
+    reason: "依赖 vendor 目录，需确认是否可重建"
