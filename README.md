@@ -6,18 +6,12 @@
 
 ## 安装
 
-建议使用工作区根 `.venv`（若在 AI 办公目录下）。若 `.venv` 同时存在 3.13/3.14，请与默认 `python` 对齐安装：
+本仓位于 `~/Desktop/git/dirtidy`（独立 Git）。建议在本目录建虚拟环境：
 
 ```bash
-cd dirtidy
-../.venv/bin/python -m pip install -e ".[dev]"
-```
-
-或本机 Python 3.11+：
-
-```bash
-python3 -m venv .venv   # 仅当不在办公仓共享环境时
-pip install -e ".[dev]"
+cd ~/Desktop/git/dirtidy
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
 ```
 
 ## 快速开始
