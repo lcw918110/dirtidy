@@ -23,8 +23,9 @@ dirtidy scan /path/to/root --rules server_workspace
 # 先问「这个路径为什么会被/不会被动」
 dirtidy explain /path/to/root src/logs --rules server_workspace
 
-# 对 pending 高置信项执行隔离（--dry-run 只预览）
+# 对 pending 高置信项执行隔离（--dry-run 只预览；--keep 本轮保留某项）
 dirtidy apply-rules /path/to/root <run_id> --dry-run
+dirtidy apply-rules /path/to/root <run_id> --keep logs/keep-me.log
 dirtidy apply-rules /path/to/root <run_id>
 
 # 或一步：扫描并隔离
@@ -36,7 +37,7 @@ dirtidy analyze /path/to/root <run_id> --mock
 # dirtidy analyze /path/to/root <run_id> --config models.yaml
 # 也可放 ./models.yaml 或 ~/.config/dirtidy/models.yaml，或用 DIRTIDY_CONFIG 指定
 
-# 本地 Web 审阅
+# 本地 Web 审阅：可看「待自动隔离」并勾选保留后直接执行，也能看受保护清单与已隔离清单
 dirtidy serve --root /path/to/root --port 8765
 ```
 
@@ -67,6 +68,7 @@ dirtidy scan /path/to/root --protect path/to/keep --protect another/dir
 - 外发模型默认只传安全摘要，且 `summary.max_targets` 给单次外发封顶
 - `apply-rules` 在搬文件前会用当前生效的保护清单**再复核一遍**，防止 pending 被改过就绕过保护
 - `scan` / `apply-rules` / `apply-decisions` 都支持 `--dry-run`：先看「会动哪些、哪些被保护拦下」再决定执行
+- 自动隔离可在执行前人工保留（CLI `--keep 相对路径` / 网页勾选「保留」）；保留项本轮不动并记入 `protection.json`，可审计追溯
 - 非 quick 扫描将文件 `path + size + mtime + sha256` 缓存在 `<root>/.dirtidy/hash_cache.sqlite`；处理敏感目录时可加 `--quick` 跳过内容 hash 与缓存
 
 ## 规模
@@ -82,7 +84,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 100 个用例
+pytest -q            # 106 个用例
 ruff check src tests
 mypy
 ```

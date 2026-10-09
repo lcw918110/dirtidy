@@ -26,3 +26,7 @@ th, td { border-bottom: 1px solid var(--line); padding: 0.45rem; text-align: lef
 select, input { padding: 0.3rem; }
 #status { background: #1c1b19; color: #d7e7df; padding: 0.75rem; min-height: 2rem; }
 .dup-group { border: 1px solid var(--line); padding: 0.75rem; margin-bottom: 0.5rem; background: rgba(255,255,255,0.65); }
+.hint { color: #6b6459; font-size: 0.85rem; margin: 0.25rem 0 0.5rem; }
+.rowline { padding: 0.25rem 0; font-size: 0.92rem; border-bottom: 1px solid var(--line); }
+.rowline code { background: rgba(47,93,80,0.08); padding: 0.05rem 0.25rem; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }

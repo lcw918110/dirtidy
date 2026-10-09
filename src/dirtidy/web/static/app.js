@@ -2,6 +2,8 @@
 
 let currentRun = null;
 const decisions = new Map();
+/* 审阅时勾选「保留」的自动隔离项：执行自动隔离时随请求发出，本轮不动它们 */
+const keptPaths = new Set();
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -28,7 +30,93 @@ function el(tag, { text, cls, attrs } = {}) {
   return node;
 }
 
+/* 待自动隔离：规则已经判定要搬走、但还没执行的项。
+   这是「不误删」的终审入口——没有它，用户在网页上根本看不到规则打算动什么。 */
+function renderPending(data) {
+  const tbody = document.getElementById("pendingRows");
+  tbody.replaceChildren();
+  const hits = data.pending_auto_hits || [];
+
+  for (const h of hits) {
+    const tr = document.createElement("tr");
+
+    const tdKeep = document.createElement("td");
+    const cb = el("input", { attrs: { type: "checkbox", "data-path": h.path } });
+    cb.checked = keptPaths.has(h.path);
+    cb.addEventListener("change", () => {
+      if (cb.checked) keptPaths.add(h.path);
+      else keptPaths.delete(h.path);
+    });
+    tdKeep.appendChild(cb);
+    tr.appendChild(tdKeep);
+
+    const tdPath = document.createElement("td");
+    tdPath.appendChild(el("code", { text: h.path }));
+    tr.appendChild(tdPath);
+
+    tr.appendChild(el("td", { text: h.rule_id }));
+    tr.appendChild(el("td", { text: h.is_dir ? "目录" : "文件" }));
+    tr.appendChild(el("td", { text: h.reason || "" }));
+    tbody.appendChild(tr);
+  }
+
+  const btn = document.getElementById("applyRulesBtn");
+  btn.disabled = hits.length === 0;
+  btn.textContent = hits.length ? `执行自动隔离（${hits.length} 项）` : "无待隔离项";
+}
+
+function renderProtection(data) {
+  const box = document.getElementById("protection");
+  box.replaceChildren();
+  const records = data.protection || [];
+  const policy = data.protect_policy || [];
+
+  if (!records.length) {
+    box.appendChild(el("div", { text: "本轮没有被保护拦下的项。" }));
+  }
+  for (const r of records) {
+    const line = el("div", { cls: "rowline" });
+    line.appendChild(el("code", { text: r.path }));
+    line.appendChild(
+      document.createTextNode(` ← ${r.protect_rule_id}（${r.protect_reason || ""}）`),
+    );
+    if (r.intended_rule_id) {
+      line.appendChild(document.createTextNode(`；原本想动它的是 ${r.intended_rule_id}`));
+    }
+    box.appendChild(line);
+  }
+  if (policy.length) {
+    box.appendChild(
+      el("div", {
+        cls: "hint",
+        text: `生效保护策略 ${policy.length} 条：${policy.map((p) => p.id).join("、")}`,
+      }),
+    );
+  }
+}
+
+function renderQuarantined(data) {
+  const box = document.getElementById("quarantined");
+  box.replaceChildren();
+  const entries = data.quarantine_manifest || [];
+  if (!entries.length) {
+    box.appendChild(el("div", { text: "尚无隔离项。" }));
+    return;
+  }
+  for (const e of entries) {
+    const line = el("div", { cls: "rowline" });
+    line.appendChild(el("code", { text: e.original_path }));
+    line.appendChild(document.createTextNode(` → ${e.quarantine_path}`));
+    if (e.rule_id) line.appendChild(document.createTextNode(`（${e.rule_id}）`));
+    box.appendChild(line);
+  }
+}
+
 function render(data) {
+  renderPending(data);
+  renderProtection(data);
+  renderQuarantined(data);
+
   const rows = document.getElementById("rows");
   rows.replaceChildren();
   const suggestions = {};
@@ -171,9 +259,23 @@ async function apply() {
   setStatus(res);
 }
 
+/* 执行规则自动隔离；勾选「保留」的项随请求发出，后端本轮不动它们并记入 protection.json */
+async function applyRules() {
+  const keep_paths = [...keptPaths];
+  const res = await api(`/api/runs/${currentRun}/apply-rules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ keep_paths }),
+  });
+  keptPaths.clear();
+  setStatus(res);
+  await loadRun(currentRun);
+}
+
 document.getElementById("reloadBtn").onclick = () =>
   loadRun(document.getElementById("runSelect").value);
 document.getElementById("saveBtn").onclick = save;
 document.getElementById("applyBtn").onclick = apply;
+document.getElementById("applyRulesBtn").onclick = applyRules;
 document.getElementById("runSelect").onchange = (e) => loadRun(e.target.value);
 loadRuns().catch((e) => setStatus(String(e)));

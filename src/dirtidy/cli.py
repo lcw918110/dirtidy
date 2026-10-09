@@ -47,7 +47,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 def cmd_apply_rules(args: argparse.Namespace) -> int:
     root = _resolve_root(args.root)
-    result = apply_pending_rules(root, args.run_id, dry_run=args.dry_run)
+    result = apply_pending_rules(root, args.run_id, dry_run=args.dry_run, keep=args.keep or ())
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
@@ -174,6 +174,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("root")
     s.add_argument("run_id")
     s.add_argument("--dry-run", action="store_true", help="只列出会搬走哪些、哪些被保护拦下")
+    s.add_argument(
+        "--keep",
+        action="append",
+        default=[],
+        metavar="相对路径",
+        help="本轮保留不隔离（可重复）；会登记进 protection.json 便于审计追溯",
+    )
     s.set_defaults(func=cmd_apply_rules)
 
     s = sub.add_parser("analyze", help="模型分析残留/候选")

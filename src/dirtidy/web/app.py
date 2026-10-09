@@ -14,10 +14,17 @@ from pydantic import BaseModel, Field
 
 from dirtidy.decision.store import apply_decisions, save_decisions
 from dirtidy.models import Decision, quarantine_root, read_json, run_dir, state_root
+from dirtidy.pipeline import apply_pending_rules
 
 
 class DecisionsBody(BaseModel):
     decisions: list[dict] = Field(default_factory=list)
+
+
+class ApplyRulesBody(BaseModel):
+    """执行自动隔离时可带一组「人工保留」路径，这些路径本轮不动。"""
+
+    keep_paths: list[str] = Field(default_factory=list)
 
 
 def create_app(*, default_root: Path, default_run_id: str | None = None) -> FastAPI:
@@ -94,5 +101,12 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
         rdir = _run_path(run_id)
         qdir = quarantine_root(default_root, run_id)
         return apply_decisions(default_root, run_id, rdir, qdir)
+
+    @app.post("/api/runs/{run_id}/apply-rules")
+    def post_apply_rules(run_id: str, body: ApplyRulesBody | None = None) -> dict:
+        """执行规则自动隔离。body.keep_paths 里的路径本轮保留，并登记进 protection.json。"""
+        _run_path(run_id)
+        keep = body.keep_paths if body else []
+        return apply_pending_rules(default_root, run_id, keep=keep)
 
     return app

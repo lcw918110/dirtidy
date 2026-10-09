@@ -304,3 +304,59 @@ def test_scan_dry_run_still_writes_preview(tmp_path: Path) -> None:
     meta = create_run(root, rules="default", quick=True, apply=False)
     assert meta["applied"] is False
     assert (root / "node_modules").exists()
+
+
+# ------------------------------------------------------------------ 人工保留
+
+def test_apply_pending_rules_keep_preserves_and_records(tmp_path: Path) -> None:
+    """保留项本轮不隔离，并登记进 protection.json 以便审计追溯。
+
+    「用户不想动它」与「内置清单保护它」在结果上是同一件事，所以走同一份记录。
+    """
+    root = _ws(tmp_path)
+    (root / "node_modules").mkdir()
+    (root / "__pycache__").mkdir()
+    (root / "old.tmp").write_text("x", encoding="utf-8")
+
+    meta = create_run(root, rules="default", quick=True, apply=False)
+    rdir = run_dir(root, meta["run_id"])
+
+    result = apply_pending_rules(root, meta["run_id"], keep=["old.tmp"])
+    assert result["kept_by_user"] == 1
+    assert (root / "old.tmp").exists(), "保留项不得被搬走"
+    assert not (root / "node_modules").exists(), "未保留项照常隔离"
+    assert not (root / "__pycache__").exists()
+
+    records = read_json(rdir / "protection.json")
+    assert any(
+        r["path"] == "old.tmp" and r["protect_rule_id"] == "user_kept" for r in records
+    ), "保留项应记入 protection.json"
+
+
+def test_apply_pending_rules_keep_in_dry_run(tmp_path: Path) -> None:
+    root = _ws(tmp_path)
+    (root / "node_modules").mkdir()
+    (root / "old.tmp").write_text("x", encoding="utf-8")
+    meta = create_run(root, rules="default", quick=True, apply=False)
+
+    res = apply_pending_rules(root, meta["run_id"], dry_run=True, keep=["old.tmp"])
+    assert res["dry_run"] is True
+    assert res["kept_by_user"] == 1
+    assert res["kept_paths"] == ["old.tmp"]
+    assert "old.tmp" not in res["paths"], "保留项不应出现在「会搬走」列表里"
+    assert (root / "old.tmp").exists()
+
+
+def test_cli_apply_rules_keep_option(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from dirtidy.cli import main
+
+    root = _ws(tmp_path)
+    (root / "node_modules").mkdir()
+    (root / "old.tmp").write_text("x", encoding="utf-8")
+    meta = create_run(root, rules="default", quick=True, apply=False)
+
+    assert main(["apply-rules", str(root), meta["run_id"], "--keep", "old.tmp"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["kept_by_user"] == 1
+    assert (root / "old.tmp").exists()
+    assert not (root / "node_modules").exists()

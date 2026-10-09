@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -163,13 +163,23 @@ def _append_protection_records(rdir: Path, records: list[dict]) -> list[dict]:
     return merged
 
 
-def apply_pending_rules(root: Path, run_id: str, *, dry_run: bool = False) -> dict[str, Any]:
+def apply_pending_rules(
+    root: Path,
+    run_id: str,
+    *,
+    dry_run: bool = False,
+    keep: Collection[str] = (),
+) -> dict[str, Any]:
     """对已有 run 的 pending_auto_hits 执行隔离，并刷新 audit.md。
 
     隔离前会**再用当前生效的保护清单复核一遍**：pending 列表可能是在旧规则包、
     或人工编辑过的状态下生成的，复核可以保证「保护」不会因为中间环节被绕过。
 
     dry_run=True 时只报告「会搬走哪些、哪些被保护拦下」，不改动任何文件与清单。
+
+    keep 是「人工保留」的路径集合（Web 审阅页勾选、或调用方指定）。这些路径
+    本轮不隔离，并登记进 protection.json（protect_rule_id=user_kept）以便审计追溯
+    —— 「用户不想动它」和「内置清单保护它」在结果上是同一件事。
     """
     root = root.resolve()
     rdir = run_dir(root, run_id)
@@ -178,6 +188,28 @@ def apply_pending_rules(root: Path, run_id: str, *, dry_run: bool = False) -> di
         return {"quarantined": 0, "message": "无 pending_auto_hits"}
 
     hits = [RuleHit(**h) for h in read_json(pending_path)]
+
+    keep_set = {str(p).strip().strip("/") for p in (keep or ()) if str(p).strip()}
+    user_kept: list[dict] = []
+    if keep_set:
+        survivors: list[RuleHit] = []
+        for h in hits:
+            if h.path in keep_set:
+                user_kept.append(
+                    {
+                        "path": h.path,
+                        "protect_rule_id": "user_kept",
+                        "protect_reason": "人工保留（审阅时选择不动它）",
+                        "intended_rule_id": h.rule_id,
+                        "intended_action": "auto_quarantine",
+                        "is_dir": h.is_dir,
+                        "blocked_at": "user_keep",
+                    }
+                )
+            else:
+                survivors.append(h)
+        hits = survivors
+
     inv_path = rdir / "inventory.json"
     wanted = {h.path for h in hits}
     hash_map: dict[str, str | None] = {}
@@ -221,10 +253,12 @@ def apply_pending_rules(root: Path, run_id: str, *, dry_run: bool = False) -> di
             "paths": [h.path for h in kept],
             "blocked_by_protect": len(blocked),
             "blocked_paths": [b["path"] for b in blocked],
+            "kept_by_user": len(user_kept),
+            "kept_paths": [u["path"] for u in user_kept],
         }
 
-    if blocked:
-        _append_protection_records(rdir, blocked)
+    if blocked or user_kept:
+        _append_protection_records(rdir, [*blocked, *user_kept])
 
     qdir = quarantine_root(root, run_id)
     qdir.mkdir(parents=True, exist_ok=True)
@@ -251,4 +285,9 @@ def apply_pending_rules(root: Path, run_id: str, *, dry_run: bool = False) -> di
         if (rdir / "protect_policy.json").exists()
         else protect_policy(pack, extra),
     )
-    return {"quarantined": len(entries), "blocked_by_protect": len(blocked), "run_id": run_id}
+    return {
+        "quarantined": len(entries),
+        "blocked_by_protect": len(blocked),
+        "kept_by_user": len(user_kept),
+        "run_id": run_id,
+    }
