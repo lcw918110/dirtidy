@@ -25,7 +25,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_rule_pack(name_or_path: str | Path) -> dict[str, Any]:
-    """按包名（configs/rules/<name>.yaml）或绝对/相对路径加载；支持 extends 合并。"""
+    """按包名（dirtidy/rules/packs/<name>.yaml）或绝对/相对路径加载；支持 extends 合并。"""
     p = Path(name_or_path)
     if not p.exists():
         p = default_rules_dir() / f"{name_or_path}.yaml"
@@ -110,13 +110,13 @@ def match_rules(
         for path in matched_paths:
             if path in claimed:
                 continue
-            item = by_path.get(path)
+            found = by_path.get(path)
             hit = RuleHit(
                 path=path,
                 rule_id=rule_id,
                 action=action,
                 reason=reason,
-                is_dir=bool(item.is_dir) if item else False,
+                is_dir=bool(found.is_dir) if found else False,
             )
             if action == "auto_quarantine":
                 hits.append(hit)

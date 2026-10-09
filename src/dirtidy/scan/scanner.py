@@ -37,7 +37,11 @@ def hash_cache_path(root: Path) -> Path:
 def _load_hash_cache(path: Path) -> dict:
     if not path.exists():
         return {}
-    data = read_json(path)
+    try:
+        data = read_json(path)
+    except (OSError, ValueError):
+        # 缓存损坏/不可读时静默降级为「无缓存」，不让整次扫描失败
+        return {}
     return data if isinstance(data, dict) else {}
 
 
@@ -148,7 +152,6 @@ def scan_tree(
                 if on_progress:
                     on_progress(done, total)
 
-    by_rel = {job[0]: job for job in to_hash}
     for item in items:
         if item.path in digests:
             item.sha256 = digests[item.path]
@@ -161,7 +164,12 @@ def scan_tree(
         # 丢弃已不在本次 inventory 中的旧键，避免缓存无限膨胀
         live = {i.path for i in items if not i.is_dir}
         cache = {k: v for k, v in cache.items() if k in live}
-        write_json(cache_path, cache)
+        try:
+            write_json(cache_path, cache)
+        except OSError as e:
+            # 只读根 / 无写权限：缓存写不进去不应作废已完成的扫描成果
+            import sys
 
-    del by_rel
+            print(f"警告: 无法写入 hash 缓存 {cache_path}: {e}", file=sys.stderr)
+
     return items, errors

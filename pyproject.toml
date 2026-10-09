@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]
 
 [project.scripts]
 dirtidy = "dirtidy.cli:main"
@@ -25,8 +25,21 @@ dirtidy = "dirtidy.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-dirtidy = ["web/static/*"]
+dirtidy = ["web/static/*", "rules/packs/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
+files = ["src/dirtidy"]

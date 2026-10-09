@@ -26,6 +26,18 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+    # 安全响应头：审阅页不加载任何外部资源，用严格 CSP 兜底 XSS
+    @app.middleware("http")
+    async def _security_headers(request, call_next):
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; script-src 'self'; style-src 'self'; "
+            "connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'"
+        )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
     @app.get("/", response_class=HTMLResponse)
     def index() -> FileResponse:
         index_path = static_dir / "index.html"

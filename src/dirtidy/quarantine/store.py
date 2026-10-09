@@ -10,13 +10,16 @@ import shutil
 import uuid
 from pathlib import Path
 
-from dirtidy.models import QuarantineEntry, RuleHit, read_json, utc_now_iso, write_json
+from dirtidy.models import QuarantineEntry, RuleHit, read_json, resolve_under, utc_now_iso, write_json
 from dirtidy.scan.scanner import file_sha256
 
 
 def _safe_dest(quarantine_dir: Path, original_rel: str) -> Path:
-    """在隔离区内生成不冲突的目标路径；冲突时加 .__qN 后缀。"""
-    dest = quarantine_dir / original_rel
+    """在隔离区内生成不冲突的目标路径；冲突时加 .__qN 后缀。
+
+    先经 resolve_under 校验，保证隔离目标不会因 `..` 逃出隔离目录。
+    """
+    dest = resolve_under(quarantine_dir, original_rel)
     if not dest.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
         return dest
@@ -58,10 +61,14 @@ def quarantine_hits(
     for hit in ordered:
         if hit.path in seen_orig:
             continue
-        src = root / hit.path
+        try:
+            src = resolve_under(root, hit.path)
+            dest = _safe_dest(quarantine_dir, hit.path)
+        except ValueError:
+            # 越界路径（外部输入的 .. / 绝对路径）直接跳过，不搬动任何根外文件
+            continue
         if not src.exists():
             continue
-        dest = _safe_dest(quarantine_dir, hit.path)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dest))
         size = 0
@@ -118,7 +125,12 @@ def restore_entries(
             continue
         qpath = Path(item["quarantine_path"])
         src = qpath if qpath.is_absolute() else state / qpath
-        dest = root / item["original_path"]
+        try:
+            dest = resolve_under(root, item["original_path"])
+        except ValueError:
+            # 原始路径越界（历史脏数据/被篡改的 manifest）：拒绝还原，保留在清单里
+            remaining.append(item)
+            continue
         if not src.exists():
             remaining.append(item)
             continue

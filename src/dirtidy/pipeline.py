@@ -37,7 +37,13 @@ def create_run(
     run_id = utc_now_iso().replace(":", "").replace("+00:00", "Z") + "-" + uuid.uuid4().hex[:6]
     rdir = run_dir(root, run_id)
     qdir = quarantine_root(root, run_id)
-    rdir.mkdir(parents=True, exist_ok=True)
+    try:
+        rdir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise PermissionError(
+            f"无法在目标根下创建状态目录 {rdir}: {e}。"
+            "目标目录可能只读；可设置环境变量 DIRTIDY_STATE_DIR 指向一个可写目录后重试。"
+        ) from e
 
     items, errors = scan_tree(root, quick=quick, workers=workers, on_progress=on_progress)
     pack = load_rule_pack(rules)

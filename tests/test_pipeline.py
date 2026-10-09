@@ -10,7 +10,6 @@ from dirtidy.models import read_json, run_dir
 from dirtidy.pipeline import apply_pending_rules, create_run
 from dirtidy.quarantine.store import restore_entries
 
-
 FIXTURE_SRC = Path(__file__).parent / "fixtures" / "sample_workspace"
 
 

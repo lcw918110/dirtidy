@@ -6,7 +6,7 @@
 
 ## 安装
 
-本仓位于 `~/Desktop/git/dirtidy`（独立 Git）。建议在本目录建虚拟环境：
+本仓位于 `~/Desktop/git/dirtidy`（独立 Git）。需要 Python >=3.11（若系统默认 python3 低于 3.11，如 3.9，请改用 3.11+ 的解释器）。建议在本目录建虚拟环境：
 
 ```bash
 cd ~/Desktop/git/dirtidy
@@ -30,6 +30,7 @@ dirtidy scan /path/to/root --rules default --apply
 dirtidy analyze /path/to/root <run_id> --mock
 # 真实模型：复制 configs/models.example.yaml → models.yaml 后
 # dirtidy analyze /path/to/root <run_id> --config models.yaml
+# 也可放 ./models.yaml 或 ~/.config/dirtidy/models.yaml，或用 DIRTIDY_CONFIG 指定
 
 # 本地 Web 审阅
 dirtidy serve --root /path/to/root --port 8765
@@ -44,9 +45,14 @@ dirtidy serve --root /path/to/root --port 8765
 - 默认隔离，不直接抹盘；`purge-quarantine --yes` 才彻底删隔离副本
 - 重复文件与解压残留（hash 对照）默认仅候选
 - 外发模型默认只传安全摘要
+- 非 quick 扫描将文件 `path + size + mtime + sha256` 缓存在 `<root>/.dirtidy/hash_cache.json`；处理敏感目录时可加 `--quick` 跳过内容 hash 与缓存
 
 ## 测试
 
 ```bash
-pytest -q
+pytest -q            # 33 个用例
+ruff check src tests
+mypy
 ```
+
+三平台矩阵（ubuntu / macos / windows × Python 3.11、3.12）由 `.github/workflows/ci.yml` 覆盖，推送到 GitHub 后生效。

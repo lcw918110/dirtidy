@@ -54,3 +54,31 @@ def test_web_save_and_apply(workspace: Path) -> None:
     assert applied.status_code == 200
     assert applied.json()["quarantined"] == 1
     assert not (workspace / "zero.txt").exists()
+
+
+def test_security_headers_present(workspace: Path) -> None:
+    """审阅页必须带严格 CSP 等安全响应头，兜底 XSS。"""
+    meta = create_run(workspace, rules="default", quick=True, apply=False)
+    app = create_app(default_root=workspace, default_run_id=meta["run_id"])
+    client = TestClient(app)
+
+    resp = client.get("/")
+    assert resp.status_code == 200
+    csp = resp.headers.get("content-security-policy", "")
+    assert "default-src 'none'" in csp
+    assert "script-src 'self'" in csp
+    assert resp.headers.get("x-content-type-options") == "nosniff"
+
+
+def test_frontend_avoids_innerhtml() -> None:
+    """静态守护：前端不得用 innerHTML 拼文件名，防止 XSS 回归。"""
+    js = (
+        Path(__file__).resolve().parent.parent
+        / "src"
+        / "dirtidy"
+        / "web"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+    assert "innerHTML" not in js, "app.js 不应再用 innerHTML 拼接外部数据"
+    assert "textContent" in js

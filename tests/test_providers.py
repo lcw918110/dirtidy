@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from dirtidy.ai.providers import OllamaProvider, OpenAICompatibleProvider
-from dirtidy.hashing.content import _probe_archive_kind
+from dirtidy.ai.providers import OllamaProvider, OpenAICompatibleProvider, load_model_config
+from dirtidy.hashing.content import _probe_archive_kind, iter_archive_members
 
 
 class _Resp:
@@ -97,3 +97,66 @@ def test_ollama_parses_response(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_archive_member_names_mark_installer() -> None:
     assert _probe_archive_kind(["Setup/setup.exe", "Setup/readme.txt"]) == "installer_like"
     assert _probe_archive_kind(["src/main.py", "pyproject.toml", "README.md"]) == "source_like"
+
+
+def test_iter_archive_members_returns_error_for_not_implemented(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """加密 zip 会抛 NotImplementedError：应返回错误而非冒泡使 scan 崩溃。"""
+    import zipfile
+
+    archive = tmp_path / "enc.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("a.txt", "hello")
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise NotImplementedError("That compression method is not supported")
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", _raise)
+    members, err = iter_archive_members(archive)
+    assert members == []
+    assert err is not None
+    assert "not supported" in err
+
+
+def test_load_model_config_raises_when_only_example_exists(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """仅有 models.example.yaml 时不得静默回退：应抛 FileNotFoundError。"""
+    example = tmp_path / "models.example.yaml"
+    example.write_text("provider: mock\n", encoding="utf-8")
+
+    monkeypatch.setattr("dirtidy.ai.providers.Path.cwd", lambda: tmp_path)
+    monkeypatch.setattr("dirtidy.ai.providers.package_root", lambda: tmp_path)
+    # 隔离用户级查找路径，保证结果与开发机上的 ~/.config/dirtidy 无关
+    monkeypatch.delenv("DIRTIDY_CONFIG", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    with pytest.raises(FileNotFoundError):
+        load_model_config()
+
+
+def test_load_model_config_explicit_path(tmp_path) -> None:
+    """显式传入路径时只认该路径。"""
+    cfg = tmp_path / "m.yaml"
+    cfg.write_text("provider: ollama\n", encoding="utf-8")
+    assert load_model_config(cfg)["provider"] == "ollama"
+
+
+def test_load_model_config_respects_dirtidy_config_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """$DIRTIDY_CONFIG 优先，且不依赖 cwd / 源码树。"""
+    cfg = tmp_path / "custom.yaml"
+    cfg.write_text("provider: mock\n", encoding="utf-8")
+    monkeypatch.setenv("DIRTIDY_CONFIG", str(cfg))
+    monkeypatch.setattr("dirtidy.ai.providers.Path.cwd", lambda: tmp_path / "nope")
+    monkeypatch.setattr("dirtidy.ai.providers.package_root", lambda: tmp_path / "nope")
+    assert load_model_config()["provider"] == "mock"
+
+
+def test_load_model_config_finds_user_config_dir(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """非 editable 安装下可用 ~/.config/dirtidy/models.yaml。"""
+    home = tmp_path / "home"
+    (home / ".config" / "dirtidy").mkdir(parents=True)
+    (home / ".config" / "dirtidy" / "models.yaml").write_text("provider: mock\n", encoding="utf-8")
+    monkeypatch.delenv("DIRTIDY_CONFIG", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("dirtidy.ai.providers.Path.cwd", lambda: tmp_path / "nope")
+    monkeypatch.setattr("dirtidy.ai.providers.package_root", lambda: tmp_path / "nope")
+    assert load_model_config()["provider"] == "mock"

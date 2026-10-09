@@ -18,6 +18,39 @@ from dirtidy.models import package_root, read_json, write_json
 
 # 这些后缀默认不抽样正文
 SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks"}
+# 文件名敏感线索：命中即完全不抽样正文（凭据/密钥类文本文件，如 credentials.json、config.secret.yaml）
+SENSITIVE_NAME_RE = re.compile(
+    r"(?i)(?:^|[/\\_.-])("
+    r"credential|credentials|secret|secrets|passwd|password|passwords|"
+    r"token|tokens|apikey|api[_-]?key|id_rsa|id_ed25519|id_dsa|"
+    r"netrc|pgpass|htpasswd|keystore|keychain|\.env|\.npmrc|\.aws|\.ssh"
+    r")(?:[/\\_.-]|$)"
+)
+# 更宽的密钥行模式：覆盖 key=value、key: value、JSON "key": "value"
+SECRET_LINE_RE = re.compile(
+    r"(?i)(api[_-]?key|secret|token|passwd|password|credential|private[_-]?key|"
+    r"access[_-]?key|auth)\s*[\"']?\s*[:=]"
+)
+# 密钥「键」部分，用于把对应的值替换掉（只截断是不行的——密钥常在开头 200 字内）
+_SECRET_KEY = (
+    r"(?:api[_-]?key|secret|token|passwd|password|credential|"
+    r"private[_-]?key|access[_-]?key|auth)"
+)
+_SECRET_QUOTED_RE = re.compile(
+    r"(?i)(" + _SECRET_KEY + r"[\"']?\s*[:=]\s*[\"'])[^\"'\n]*([\"'])"
+)
+_SECRET_BARE_RE = re.compile(
+    r"(?i)(" + _SECRET_KEY + r"[\"']?\s*[:=]\s*)([^\s\"',;}\]\n]+)"
+)
+
+
+def redact_secrets(text: str) -> str:
+    """把疑似密钥的「值」就地替换为 ***；只做截断是无效的，密钥往往就在开头。"""
+    text = _SECRET_QUOTED_RE.sub(r"\1***\2", text)
+    text = _SECRET_BARE_RE.sub(r"\1***", text)
+    return text
+
+
 TEXT_SUFFIXES = {
     ".txt",
     ".md",
@@ -45,19 +78,46 @@ TEXT_SUFFIXES = {
 }
 
 
+def default_config_candidates() -> list[Path]:
+    """models.yaml 的默认查找位置（按优先级）。
+
+    顺序：$DIRTIDY_CONFIG → ./models.yaml → ~/.config/dirtidy/models.yaml
+         → 项目 configs/（仅 editable 开发时存在，作最后兜底）。
+
+    不依赖「包在源码树里」这一前提，因此非 editable 安装（wheel 到 site-packages）
+    也能通过环境变量或用户配置目录找到配置。
+    """
+    out: list[Path] = []
+    env = os.environ.get("DIRTIDY_CONFIG")
+    if env:
+        out.append(Path(env).expanduser())
+    out.append(Path.cwd() / "models.yaml")
+    out.append(Path.home() / ".config" / "dirtidy" / "models.yaml")
+    out.append(package_root() / "configs" / "models.yaml")
+    return out
+
+
 def load_model_config(path: Path | None = None) -> dict[str, Any]:
-    """查找 models.yaml：显式路径 → cwd → 项目 configs。"""
+    """查找并加载 models.yaml。
+
+    显式传入路径时只认该路径；否则按 default_config_candidates() 顺序查找。
+    找不到就报错，不静默回退到 models.example.yaml（避免把示例当正式配置）。
+    """
     if path is None:
-        for candidate in (
-            Path.cwd() / "models.yaml",
-            package_root() / "configs" / "models.yaml",
-            package_root() / "configs" / "models.example.yaml",
-        ):
+        candidates = default_config_candidates()
+        for candidate in candidates:
             if candidate.exists():
                 path = candidate
                 break
-    if path is None or not path.exists():
-        raise FileNotFoundError("未找到 models.yaml；请复制 configs/models.example.yaml")
+        else:
+            searched = "、".join(str(p) for p in candidates)
+            raise FileNotFoundError(
+                f"未找到 models.yaml。已查找：{searched}。"
+                "可复制 configs/models.example.yaml 为 models.yaml，"
+                "或设置环境变量 DIRTIDY_CONFIG 指向配置文件。"
+            )
+    if not path.exists():
+        raise FileNotFoundError(f"未找到 models.yaml: {path}")
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
@@ -88,14 +148,18 @@ def build_summary(
         "hash_prefix": (hash_full[:16] if hash_full else None),
         "text_sample": None,
     }
-    if p.is_file() and suffix not in SENSITIVE_SUFFIXES:
+    if (
+        p.is_file()
+        and suffix not in SENSITIVE_SUFFIXES
+        and not SENSITIVE_NAME_RE.search(rel_path)
+    ):
         # 默认：仅文本类抽样；allow_full 时也只对可读文本尝试解码
         if allow_full or suffix in TEXT_SUFFIXES:
             try:
                 raw = p.read_bytes()[: max_text_chars * 4]
                 text = raw.decode("utf-8", errors="ignore")[:max_text_chars]
-                if re.search(r"(?i)(api[_-]?key|secret|password)\s*=", text):
-                    text = text[:200] + "\n[redacted possible secrets]"
+                if SECRET_LINE_RE.search(text):
+                    text = redact_secrets(text)
                 summary["text_sample"] = text
             except OSError:
                 pass
@@ -103,7 +167,8 @@ def build_summary(
 
 
 ANALYSIS_PROMPT = """你是目录整理助手。根据给定的文件安全摘要，为每个文件输出 JSON 数组。
-每个元素字段：path, asset_type, value, freshness, cluster_id, cluster_name, sensitivity, action, suggested_path, confidence, rationale。
+每个元素字段：path, asset_type, value, freshness, cluster_id, cluster_name,
+sensitivity, action, suggested_path, confidence, rationale。
 asset_type: source|doc|config|data|media|build|secret_risk|other
 value: keep|archive|discardable|needs_human
 freshness: recent|stale|unknown
@@ -224,7 +289,9 @@ def analyze_run(
     mock: bool = False,
 ) -> list[dict[str, Any]]:
     """对某次 run 的残留/候选文件跑模型，写入 ai_suggestions.json。"""
-    cfg = load_model_config(config_path) if not mock else {"provider": "mock", "summary": {}}
+    cfg: dict[str, Any] = (
+        load_model_config(config_path) if not mock else {"provider": "mock", "summary": {}}
+    )
     summary_cfg = cfg.get("summary") or {}
     provider = get_provider(cfg, mock=mock)
     inventory = read_json(run_path / "inventory.json")
@@ -239,7 +306,9 @@ def analyze_run(
     if (run_path / "quarantine_manifest.json").exists():
         quarantined = {e["original_path"] for e in read_json(run_path / "quarantine_manifest.json")}
 
-    # 优先候选；非候选仅保留浅层路径，控制 token 成本
+    # 优先候选；非候选仅保留浅层路径，控制 token 成本。
+    # 注意：不能用 `candidates_paths and ...` 短路——候选为空集时会让全量文件外发。
+    max_depth = int(summary_cfg.get("max_depth") or 3)
     targets: list[str] = []
     for item in inventory:
         if item.get("is_dir"):
@@ -247,9 +316,8 @@ def analyze_run(
         path = item["path"]
         if path in quarantined:
             continue
-        if candidates_paths and path not in candidates_paths:
-            if path.count("/") > 3:
-                continue
+        if path not in candidates_paths and path.count("/") > max_depth:
+            continue
         targets.append(path)
 
     allow_full = bool(summary_cfg.get("allow_ollama_full_content")) and cfg.get("provider") == "ollama"

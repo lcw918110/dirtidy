@@ -10,6 +10,7 @@ import tarfile
 import zipfile
 from collections import defaultdict
 from pathlib import Path
+from typing import Literal
 
 from dirtidy.models import Candidate, InventoryItem
 
@@ -68,7 +69,9 @@ def iter_archive_members(archive: Path) -> tuple[list[tuple[str, str]], str | No
             return members, None
 
         if name.endswith(".tar.gz") or name.endswith(".tgz") or name.endswith(".tar"):
-            mode = "r:gz" if (name.endswith(".tar.gz") or name.endswith(".tgz")) else "r:"
+            mode: Literal["r:gz", "r:"] = (
+                "r:gz" if (name.endswith(".tar.gz") or name.endswith(".tgz")) else "r:"
+            )
             with tarfile.open(archive, mode) as tf:
                 for member in tf.getmembers():
                     if not member.isfile():
@@ -84,7 +87,7 @@ def iter_archive_members(archive: Path) -> tuple[list[tuple[str, str]], str | No
                         h.update(chunk)
                     members.append((member.name, h.hexdigest()))
             return members, None
-    except (zipfile.BadZipFile, tarfile.TarError, OSError, RuntimeError) as e:
+    except (zipfile.BadZipFile, tarfile.TarError, OSError, RuntimeError, NotImplementedError) as e:
         return [], str(e)
 
     return [], "unsupported_archive"
