@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from dirtidy.models import write_json
+from dirtidy.models import write_json, write_json_stream
 
 
 def _fmt_values(values: list[Any], limit: int = 8) -> str:
@@ -103,18 +104,22 @@ def write_run_bundle(
     run_path: Path,
     *,
     meta: dict[str, Any],
-    inventory: list[dict],
+    inventory: Iterable[dict],
     candidates: list[dict],
     quarantined: list[dict],
     errors: list[dict],
     protection: list[dict] | None = None,
     protect_policy: list[dict] | None = None,
 ) -> None:
-    """一次写入 run 目录下的标准产物集合。"""
+    """一次写入 run 目录下的标准产物集合。
+
+    inventory 收 Iterable 而不是 list：几百万条时由 write_json_stream 边生成边写，
+    峰值内存只有一行，而不是「一份等长 dict 列表 + 一整段 JSON 文本」。
+    """
     protection = protection or []
     protect_policy = protect_policy or []
     write_json(run_path / "meta.json", meta)
-    write_json(run_path / "inventory.json", inventory)
+    write_json_stream(run_path / "inventory.json", inventory)
     write_json(run_path / "candidates.json", candidates)
     write_json(run_path / "quarantine_manifest.json", quarantined)
     write_json(run_path / "errors.json", errors)

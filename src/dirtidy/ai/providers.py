@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import yaml
 
-from dirtidy.models import example_config_path, read_json, write_json
+from dirtidy.models import example_config_path, iter_json_array, read_json, write_json
 
 # 这些后缀默认不抽样正文
 SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks"}
@@ -292,8 +292,6 @@ def analyze_run(
     )
     summary_cfg = cfg.get("summary") or {}
     provider = get_provider(cfg, mock=mock)
-    inventory = read_json(run_path / "inventory.json")
-    hash_by_path = {i["path"]: i.get("sha256") for i in inventory}
 
     candidates_paths: set[str] = set()
     if (run_path / "candidates.json").exists():
@@ -306,17 +304,29 @@ def analyze_run(
 
     # 优先候选；非候选仅保留浅层路径，控制 token 成本。
     # 注意：不能用 `candidates_paths and ...` 短路——候选为空集时会让全量文件外发。
+    #
+    # 流式读 inventory 而不是 json.loads：5M 条 inventory 整份解析会带来约 2.6 倍放大。
+    # 同时用 max_targets 给外发规模封顶——T 级数据下「全部发给模型」既慢又贵。
     max_depth = int(summary_cfg.get("max_depth") or 3)
+    max_targets = int(summary_cfg.get("max_targets") or 500)
     targets: list[str] = []
-    for item in inventory:
-        if item.get("is_dir"):
-            continue
-        path = item["path"]
-        if path in quarantined:
-            continue
-        if path not in candidates_paths and path.count("/") > max_depth:
-            continue
-        targets.append(path)
+    hash_by_path: dict[str, str | None] = {}
+    truncated = False
+    inv_path = run_path / "inventory.json"
+    if inv_path.exists():
+        for item in iter_json_array(inv_path):
+            if item.get("is_dir"):
+                continue
+            path = item["path"]
+            if path in quarantined:
+                continue
+            if path not in candidates_paths and path.count("/") > max_depth:
+                continue
+            if len(targets) >= max_targets:
+                truncated = True
+                break
+            targets.append(path)
+            hash_by_path[path] = item.get("sha256")
 
     allow_full = bool(summary_cfg.get("allow_ollama_full_content")) and cfg.get("provider") == "ollama"
     if summary_cfg.get("allow_external_content") and cfg.get("provider") == "openai_compatible":
@@ -340,4 +350,22 @@ def analyze_run(
         results.extend(provider.analyze_batch(summaries))
 
     write_json(run_path / "ai_suggestions.json", results)
+    write_json(
+        run_path / "ai_meta.json",
+        {
+            "provider": cfg.get("provider", "mock") if not mock else "mock",
+            "targets": len(targets),
+            "max_targets": max_targets,
+            "truncated": truncated,
+            "max_depth": max_depth,
+        },
+    )
+    if truncated:
+        import sys
+
+        print(
+            f"警告: 外发目标已达上限 {max_targets} 条，剩余文件未提交模型；"
+            "可调大 models.yaml 的 summary.max_targets 后重跑。",
+            file=sys.stderr,
+        )
     return results

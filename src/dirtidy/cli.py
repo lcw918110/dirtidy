@@ -9,7 +9,7 @@ from pathlib import Path
 from dirtidy import __version__
 from dirtidy.ai.providers import analyze_run
 from dirtidy.decision.store import apply_decisions, save_decisions
-from dirtidy.models import Decision, quarantine_root, run_dir
+from dirtidy.models import Decision, quarantine_root, read_json, run_dir
 from dirtidy.pipeline import apply_pending_rules, create_run
 from dirtidy.quarantine.store import purge_quarantine_dir, restore_entries
 
@@ -51,7 +51,14 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     rdir = run_dir(root, args.run_id)
     cfg = Path(args.config).resolve() if args.config else None
     results = analyze_run(root, rdir, config_path=cfg, mock=args.mock)
-    print(json.dumps({"suggestions": len(results), "run_id": args.run_id}, ensure_ascii=False, indent=2))
+    meta = read_json(rdir / "ai_meta.json") if (rdir / "ai_meta.json").exists() else {}
+    print(
+        json.dumps(
+            {"suggestions": len(results), "run_id": args.run_id, **meta},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 

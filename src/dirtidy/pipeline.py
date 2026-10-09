@@ -9,7 +9,16 @@ from typing import Any
 
 from dirtidy.audit.writer import write_audit_md, write_run_bundle
 from dirtidy.hashing.content import find_duplicate_groups, find_extracted_archives
-from dirtidy.models import RuleHit, quarantine_root, read_json, run_dir, utc_now_iso, write_json
+from dirtidy.models import (
+    RuleHit,
+    iter_json_array,
+    quarantine_root,
+    read_json,
+    run_dir,
+    select_hashes,
+    utc_now_iso,
+    write_json,
+)
 from dirtidy.quarantine.store import quarantine_hits, sweep_empty_dirs
 from dirtidy.rules.engine import (
     effective_protect_rules,
@@ -19,6 +28,12 @@ from dirtidy.rules.engine import (
 )
 from dirtidy.rules.protect import compile_protect_rules, evaluate_protect
 from dirtidy.scan.scanner import scan_tree
+
+
+def _protect_checker(pack: dict[str, Any], extra: list[dict[str, Any]]):
+    """返回一个「相对路径是否受保护」的判定函数，供隔离后扫尾使用。"""
+    matchers = compile_protect_rules(effective_protect_rules(pack, extra))
+    return lambda rel: evaluate_protect(matchers, rel, True) is not None
 
 
 def pack_sweeps_empty(pack: dict[str, Any]) -> bool:
@@ -83,7 +98,8 @@ def create_run(
         candidates.extend(find_duplicate_groups(items))
         candidates.extend(find_extracted_archives(root, items))
 
-    hash_map = {i.path: i.sha256 for i in items}
+    hash_map = select_hashes(items, {h.path for h in hits})
+    is_protected = _protect_checker(pack, extra_protect)
     quarantined: list[dict] = []
     if apply and hits:
         qdir.mkdir(parents=True, exist_ok=True)
@@ -96,7 +112,9 @@ def create_run(
             known_hashes=hash_map,
         )
         if pack_sweeps_empty(pack):
-            entries = sweep_empty_dirs(root, run_id, qdir, rdir / "quarantine_manifest.json")
+            entries = sweep_empty_dirs(
+                root, run_id, qdir, rdir / "quarantine_manifest.json", is_protected=is_protected
+            )
         quarantined = [e.to_dict() for e in entries]
     else:
         write_json(rdir / "pending_auto_hits.json", [h.to_dict() for h in hits])
@@ -117,7 +135,8 @@ def create_run(
     write_run_bundle(
         rdir,
         meta=meta,
-        inventory=[i.to_dict() for i in items],
+        # 生成器：交给写盘逻辑流式消费，不再先构造一份等长的 dict 列表
+        inventory=(i.to_dict() for i in items),
         candidates=[c.to_dict() for c in candidates],
         quarantined=quarantined,
         errors=errors,
@@ -157,8 +176,17 @@ def apply_pending_rules(root: Path, run_id: str) -> dict[str, Any]:
         return {"quarantined": 0, "message": "无 pending_auto_hits"}
 
     hits = [RuleHit(**h) for h in read_json(pending_path)]
-    inv = read_json(rdir / "inventory.json") if (rdir / "inventory.json").exists() else []
-    hash_map = {i["path"]: i.get("sha256") for i in inv}
+    inv_path = rdir / "inventory.json"
+    wanted = {h.path for h in hits}
+    hash_map: dict[str, str | None] = {}
+    if inv_path.exists():
+        # 流式读 inventory，只留下待隔离条目的 hash，不再整份 json.loads
+        for row in iter_json_array(inv_path):
+            p = row.get("path")
+            if p in wanted:
+                hash_map[p] = row.get("sha256")
+                if len(hash_map) == len(wanted):
+                    break
     meta_early = read_json(rdir / "meta.json")
     pack = load_rule_pack(meta_early.get("rules") or "default")
 
@@ -190,7 +218,9 @@ def apply_pending_rules(root: Path, run_id: str) -> dict[str, Any]:
     manifest = rdir / "quarantine_manifest.json"
     entries = quarantine_hits(root, run_id, kept, qdir, manifest, known_hashes=hash_map)
     if pack_sweeps_empty(pack):
-        entries = sweep_empty_dirs(root, run_id, qdir, manifest)
+        entries = sweep_empty_dirs(
+            root, run_id, qdir, manifest, is_protected=_protect_checker(pack, extra)
+        )
     pending_path.unlink(missing_ok=True)
 
     meta = meta_early

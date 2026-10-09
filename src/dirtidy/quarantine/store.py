@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import shutil
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from dirtidy.models import QuarantineEntry, RuleHit, read_json, resolve_under, utc_now_iso, write_json
@@ -151,6 +152,26 @@ def purge_quarantine_dir(quarantine_dir: Path) -> None:
         shutil.rmtree(quarantine_dir)
 
 
+def _read_manifest(manifest_path: Path) -> list[dict]:
+    if not manifest_path.exists():
+        return []
+    data = read_json(manifest_path)
+    return data if isinstance(data, list) else []
+
+
+def _parent_rel(rel: str) -> str | None:
+    """父目录相对路径；顶层条目返回 None（目标根本身不处理）。"""
+    idx = rel.rfind("/")
+    return rel[:idx] if idx > 0 else None
+
+
+def _is_skipped_rel(rel: str) -> bool:
+    from dirtidy.scan.scanner import SKIP_DIR_NAMES
+
+    parts = rel.split("/")
+    return any(p in SKIP_DIR_NAMES for p in parts)
+
+
 def sweep_empty_dirs(
     root: Path,
     run_id: str,
@@ -158,34 +179,44 @@ def sweep_empty_dirs(
     manifest_path: Path,
     *,
     max_rounds: int = 8,
+    is_protected: Callable[[str], bool] | None = None,
 ) -> list[QuarantineEntry]:
     """隔离子项后，多轮把新变成空的父目录也隔离，直到稳定或达到轮数上限。
 
     扫描阶段的 empty_dir 规则看不到「子项搬走之后才空」的目录，所以在隔离之后补这一步。
-    不会处理目标根本身，也不会进入 `.dirtidy`。
+
+    实现上只在**被隔离条目的祖先目录**上展开，不再整棵树 `os.walk`：
+    原实现最多 8 轮全树遍历，几百万文件时开销是灾难性的；现在代价与隔离条目数成正比。
     """
-    import os
-
-    from dirtidy.scan.scanner import SKIP_DIR_NAMES
-
     quarantine_dir.mkdir(parents=True, exist_ok=True)
+    manifest = _read_manifest(manifest_path)
+    if not manifest:
+        return []
+
+    done = {e.get("original_path", "") for e in manifest}
+    frontier: set[str] = set()
+    for entry in manifest:
+        parent = _parent_rel(str(entry.get("original_path", "")))
+        if parent:
+            frontier.add(parent)
+
     for _ in range(max_rounds):
         empties: list[str] = []
-        for dirpath, dirnames, _filenames in os.walk(root, topdown=False, followlinks=False):
-            current = Path(dirpath)
-            if current == root or current.name in SKIP_DIR_NAMES:
-                dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
+        for rel in sorted(frontier):
+            if rel in done or _is_skipped_rel(rel):
                 continue
-            if ".dirtidy" in current.parts:
+            if is_protected is not None and is_protected(rel):
                 continue
+            p = root / rel
             try:
-                if any(current.iterdir()):
+                if not p.is_dir() or next(p.iterdir(), None) is not None:
                     continue
             except OSError:
                 continue
-            empties.append(current.relative_to(root).as_posix())
+            empties.append(rel)
         if not empties:
             break
+
         hits = [
             RuleHit(
                 path=rel,
@@ -196,14 +227,12 @@ def sweep_empty_dirs(
             )
             for rel in empties
         ]
-        before = 0
-        if manifest_path.exists():
-            before = len(read_json(manifest_path))
+        before = len(_read_manifest(manifest_path))
         quarantine_hits(root, run_id, hits, quarantine_dir, manifest_path)
-        after = len(read_json(manifest_path)) if manifest_path.exists() else before
+        after = len(_read_manifest(manifest_path))
+        done.update(empties)
+        frontier = {p for p in (_parent_rel(r) for r in empties) if p and p not in done}
         if after == before:
             break
 
-    if not manifest_path.exists():
-        return []
-    return [QuarantineEntry(**e) for e in read_json(manifest_path)]
+    return [QuarantineEntry(**e) for e in _read_manifest(manifest_path)]

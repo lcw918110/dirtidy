@@ -10,7 +10,7 @@ import tarfile
 import zipfile
 from collections import defaultdict
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from dirtidy.models import Candidate, InventoryItem
 
@@ -47,25 +47,61 @@ _SOURCE_NAME_HINTS = (
 )
 _INSTALLER_SUFFIXES = (".msi", ".dmg", ".exe", ".deb", ".rpm", ".pkg")
 
+#: 归档解析预算：单个归档最多读这么多成员 / 这么多解压后字节。
+#: 没有上限时，一个 50 GB 的 tar 会把内存和 IO 全吃掉——而它顶多是个「候选」。
+MAX_ARCHIVE_MEMBERS = 20_000
+MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+#: 单个归档文件本身超过这个大小就跳过成员对照（标为待人工确认）。
+MAX_ARCHIVE_FILE_BYTES = 4 * 1024 * 1024 * 1024
+#: 单个重复组最多登记多少条路径，避免极端情况下候选文件无限膨胀。
+MAX_DUPLICATE_PATHS = 1000
 
-def iter_archive_members(archive: Path) -> tuple[list[tuple[str, str]], str | None]:
-    """读取归档各文件成员，返回 [(成员路径, 内容sha256), ...]；失败时第二项为错误信息。"""
+
+def iter_archive_members(
+    archive: Path,
+    *,
+    max_members: int = MAX_ARCHIVE_MEMBERS,
+    max_bytes: int = MAX_ARCHIVE_BYTES,
+) -> tuple[list[tuple[str, str]], str | None]:
+    """读取归档各文件成员，返回 [(成员路径, 内容sha256), ...]；失败时第二项为错误信息。
+
+    超过 max_members / max_bytes 时停止并返回错误串：调用方会把它标成
+    `archive_review`（待人工），而不是继续把一个巨型归档读完。
+    """
     members: list[tuple[str, str]] = []
+    consumed = 0
+    truncated = False
     name = archive.name.lower()
+
+    def _digest(fp: Any) -> str:
+        nonlocal consumed, truncated
+        h = hashlib.sha256()
+        while True:
+            chunk = fp.read(1024 * 1024)
+            if not chunk:
+                break
+            consumed += len(chunk)
+            if consumed > max_bytes:
+                truncated = True
+                break
+            h.update(chunk)
+        return h.hexdigest()
+
     try:
         if name.endswith(".zip"):
             with zipfile.ZipFile(archive, "r") as zf:
                 for info in zf.infolist():
                     if info.is_dir():
                         continue
-                    h = hashlib.sha256()
+                    if len(members) >= max_members:
+                        truncated = True
+                        break
                     with zf.open(info, "r") as fp:
-                        while True:
-                            chunk = fp.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            h.update(chunk)
-                    members.append((info.filename, h.hexdigest()))
+                        members.append((info.filename, _digest(fp)))
+                    if truncated:
+                        break
+            if truncated:
+                return members, f"归档超出解析预算（成员 {len(members)}，已读 {consumed} 字节）"
             return members, None
 
         if name.endswith(".tar.gz") or name.endswith(".tgz") or name.endswith(".tar"):
@@ -76,16 +112,17 @@ def iter_archive_members(archive: Path) -> tuple[list[tuple[str, str]], str | No
                 for member in tf.getmembers():
                     if not member.isfile():
                         continue
+                    if len(members) >= max_members:
+                        truncated = True
+                        break
                     f = tf.extractfile(member)
                     if f is None:
                         continue
-                    h = hashlib.sha256()
-                    while True:
-                        chunk = f.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        h.update(chunk)
-                    members.append((member.name, h.hexdigest()))
+                    members.append((member.name, _digest(f)))
+                    if truncated:
+                        break
+            if truncated:
+                return members, f"归档超出解析预算（成员 {len(members)}，已读 {consumed} 字节）"
             return members, None
     except (zipfile.BadZipFile, tarfile.TarError, OSError, RuntimeError, NotImplementedError) as e:
         return [], str(e)
@@ -94,23 +131,34 @@ def iter_archive_members(archive: Path) -> tuple[list[tuple[str, str]], str | No
 
 
 def find_duplicate_groups(items: list[InventoryItem]) -> list[Candidate]:
-    """相同内容 hash 且份数≥2 → duplicate_group；保留哪份一律人工选。"""
+    """相同内容 hash 且份数≥2 → duplicate_group；保留哪份一律人工选。
+
+    单个组超过 MAX_DUPLICATE_PATHS 时截断并标记，避免一个「全盘同内容」的组
+    把候选文件和审计报告撑爆。
+    """
     groups: dict[str, list[str]] = defaultdict(list)
+    overflow: dict[str, int] = defaultdict(int)  # 只对超限的组计数，避免多背一个全量字典
     for item in items:
         if item.is_dir or not item.sha256 or item.error:
             continue
-        groups[item.sha256].append(item.path)
+        bucket = groups[item.sha256]
+        if len(bucket) < MAX_DUPLICATE_PATHS:
+            bucket.append(item.path)
+        else:
+            overflow[item.sha256] += 1
     out: list[Candidate] = []
     for digest, paths in groups.items():
         if len(paths) < 2:
             continue
+        total = len(paths) + overflow.get(digest, 0)
+        truncated = total > len(paths)
         out.append(
             Candidate(
                 kind="duplicate_group",
                 paths=sorted(paths),
                 rule_id="duplicate_content",
-                reason="相同内容 hash，需人工选留",
-                meta={"sha256": digest},
+                reason="相同内容 hash，需人工选留" + ("（该组过大，列表已截断）" if truncated else ""),
+                meta={"sha256": digest, "count": total, "truncated": truncated},
             )
         )
     return out
@@ -144,19 +192,30 @@ def find_extracted_archives(
 
     未达阈值时仍标 archive_content（含成员结构启发式），默认仅候选。
     """
+    archives = [
+        item
+        for item in items
+        if not item.is_dir
+        and item.path.lower().endswith((".zip", ".tar", ".tar.gz", ".tgz"))
+    ]
+    if not archives:
+        # 没有归档就不必建磁盘 hash 集合：5M 文件下这是一份约 500 MB 的 set
+        return []
+
     disk_hashes = {i.sha256 for i in items if i.sha256 and not i.is_dir}
     out: list[Candidate] = []
 
-    for item in items:
-        if item.is_dir:
-            continue
-        lower = item.path.lower()
-        if not (
-            lower.endswith(".zip")
-            or lower.endswith(".tar")
-            or lower.endswith(".tar.gz")
-            or lower.endswith(".tgz")
-        ):
+    for item in archives:
+        if item.size > MAX_ARCHIVE_FILE_BYTES:
+            out.append(
+                Candidate(
+                    kind="archive_review",
+                    paths=[item.path],
+                    rule_id="archive_too_large",
+                    reason=f"归档体积 {item.size} 字节，超过成员对照上限，交人工确认",
+                    meta={"size": item.size},
+                )
+            )
             continue
         members, err = iter_archive_members(root / item.path)
         if err:

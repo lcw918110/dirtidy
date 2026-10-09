@@ -16,3 +16,7 @@ summary:
   allow_external_content: false
   allow_ollama_full_content: false
   batch_size: 20
+  # 非候选文件只保留前 max_depth 层，控制 token 成本
+  max_depth: 3
+  # 单次 analyze 最多外发多少条：T 级目录下「全量发给模型」既慢又贵，超出会告警
+  max_targets: 500
