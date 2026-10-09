@@ -28,7 +28,7 @@ dirtidy scan /path/to/root --rules default --apply
 
 # 模型分析（无密钥可用 mock）
 dirtidy analyze /path/to/root <run_id> --mock
-# 真实模型：复制 configs/models.example.yaml → models.yaml 后
+# 真实模型：复制包内 src/dirtidy/configs/models.example.yaml → models.yaml 后
 # dirtidy analyze /path/to/root <run_id> --config models.yaml
 # 也可放 ./models.yaml 或 ~/.config/dirtidy/models.yaml，或用 DIRTIDY_CONFIG 指定
 

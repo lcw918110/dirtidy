@@ -124,7 +124,6 @@ def test_load_model_config_raises_when_only_example_exists(monkeypatch: pytest.M
     example.write_text("provider: mock\n", encoding="utf-8")
 
     monkeypatch.setattr("dirtidy.ai.providers.Path.cwd", lambda: tmp_path)
-    monkeypatch.setattr("dirtidy.ai.providers.package_root", lambda: tmp_path)
     # 隔离用户级查找路径，保证结果与开发机上的 ~/.config/dirtidy 无关
     monkeypatch.delenv("DIRTIDY_CONFIG", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -146,7 +145,6 @@ def test_load_model_config_respects_dirtidy_config_env(monkeypatch: pytest.Monke
     cfg.write_text("provider: mock\n", encoding="utf-8")
     monkeypatch.setenv("DIRTIDY_CONFIG", str(cfg))
     monkeypatch.setattr("dirtidy.ai.providers.Path.cwd", lambda: tmp_path / "nope")
-    monkeypatch.setattr("dirtidy.ai.providers.package_root", lambda: tmp_path / "nope")
     assert load_model_config()["provider"] == "mock"
 
 
@@ -158,5 +156,27 @@ def test_load_model_config_finds_user_config_dir(monkeypatch: pytest.MonkeyPatch
     monkeypatch.delenv("DIRTIDY_CONFIG", raising=False)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr("dirtidy.ai.providers.Path.cwd", lambda: tmp_path / "nope")
-    monkeypatch.setattr("dirtidy.ai.providers.package_root", lambda: tmp_path / "nope")
     assert load_model_config()["provider"] == "mock"
+
+
+def test_example_config_ships_inside_package() -> None:
+    """示例配置必须随包分发，且报错信息要指得到它（不能依赖 editable 源码树）。"""
+    from dirtidy.ai.providers import default_config_candidates, example_config_path
+
+    example = example_config_path()
+    assert example.exists(), f"包内缺少示例配置: {example}"
+    assert example.parent.name == "configs" and example.parent.parent.name == "dirtidy"
+
+    candidates = default_config_candidates()
+    assert all("configs" not in str(p) for p in candidates), "不应再出现永远为假的源码树兜底候选"
+
+
+def test_missing_config_error_mentions_example_and_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.delenv("DIRTIDY_CONFIG", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("dirtidy.ai.providers.Path.cwd", lambda: tmp_path / "nope")
+    with pytest.raises(FileNotFoundError) as ei:
+        load_model_config()
+    msg = str(ei.value)
+    assert "DIRTIDY_CONFIG" in msg
+    assert "models.example.yaml" in msg

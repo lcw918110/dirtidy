@@ -157,13 +157,17 @@ def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def package_root() -> Path:
-    """项目根目录（含 configs/），editable 安装时指向源码仓根。"""
-    return Path(__file__).resolve().parents[2]
-
-
 def default_rules_dir() -> Path:
     return Path(__file__).resolve().parent / "rules" / "packs"
+
+
+def example_config_path() -> Path:
+    """包内自带的 models.example.yaml 路径。
+
+    作为 package-data 随 wheel 一起安装，因此非 editable 安装的用户也能拿到一份
+    可复制的模板；不再依赖「包位于源码树里」这一前提。
+    """
+    return Path(__file__).resolve().parent / "configs" / "models.example.yaml"
 
 
 def _root_slug(target_root: Path) -> str:

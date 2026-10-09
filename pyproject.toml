@@ -27,7 +27,7 @@ dirtidy = "dirtidy.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-dirtidy = ["web/static/*", "rules/packs/*.yaml"]
+dirtidy = ["web/static/*", "rules/packs/*.yaml", "configs/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

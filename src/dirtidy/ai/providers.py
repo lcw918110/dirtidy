@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import yaml
 
-from dirtidy.models import package_root, read_json, write_json
+from dirtidy.models import example_config_path, read_json, write_json
 
 # 这些后缀默认不抽样正文
 SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks"}
@@ -82,10 +82,9 @@ def default_config_candidates() -> list[Path]:
     """models.yaml 的默认查找位置（按优先级）。
 
     顺序：$DIRTIDY_CONFIG → ./models.yaml → ~/.config/dirtidy/models.yaml
-         → 项目 configs/（仅 editable 开发时存在，作最后兜底）。
 
-    不依赖「包在源码树里」这一前提，因此非 editable 安装（wheel 到 site-packages）
-    也能通过环境变量或用户配置目录找到配置。
+    刻意**不含**「包所在源码树里的 configs/」这类候选：wheel 安装到 site-packages 后
+    它必然不存在，留着只会让报错信息里出现一条永远为假的路径。
     """
     out: list[Path] = []
     env = os.environ.get("DIRTIDY_CONFIG")
@@ -93,7 +92,6 @@ def default_config_candidates() -> list[Path]:
         out.append(Path(env).expanduser())
     out.append(Path.cwd() / "models.yaml")
     out.append(Path.home() / ".config" / "dirtidy" / "models.yaml")
-    out.append(package_root() / "configs" / "models.yaml")
     return out
 
 
@@ -113,7 +111,7 @@ def load_model_config(path: Path | None = None) -> dict[str, Any]:
             searched = "、".join(str(p) for p in candidates)
             raise FileNotFoundError(
                 f"未找到 models.yaml。已查找：{searched}。"
-                "可复制 configs/models.example.yaml 为 models.yaml，"
+                f"可复制 {example_config_path()} 为 models.yaml，"
                 "或设置环境变量 DIRTIDY_CONFIG 指向配置文件。"
             )
     if not path.exists():
