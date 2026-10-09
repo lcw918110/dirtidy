@@ -222,3 +222,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     return int(args.func(args))
+
+
+if __name__ == "__main__":  # pragma: no cover
+    # 没有这个块时 `python -m dirtidy.cli scan ...` 只会导入模块、静默 exit 0，
+    # 让人以为命令跑成功了。标准入口是 `python -m dirtidy`（见 __main__.py），
+    # 这里补上以防误用。
+    raise SystemExit(main())

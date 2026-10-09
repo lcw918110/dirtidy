@@ -173,6 +173,35 @@ def compile_protect_rules(rules: list[dict[str, Any]]) -> list[_Matcher]:
     return matchers
 
 
+def matcher_hits(m: _Matcher, rel: str, is_dir: bool) -> bool:
+    """单条保护规则是否命中。
+
+    从 `evaluate_protect` 抽出来单独暴露，是为了让 `explain` 能逐条摊开判定明细时
+    复用**同一套**语义——若解释另写一份判定，两处迟早漂移，而漂移的解释比没有解释更危险。
+    """
+    if not rel:
+        return False
+    parts = rel.split("/")
+    basename = parts[-1]
+    ancestors = parts[:-1]
+
+    if m.kind == "dir_name":
+        # 祖先命中即保护后代：.git 被保护 ⇒ .git/objects/... 不可被自动搬走
+        return any(a in m.names for a in ancestors) or (is_dir and basename in m.names)
+    if m.kind == "file_name":
+        return not is_dir and basename in m.names
+    if m.kind == "name_glob":
+        return not is_dir and any(fnmatch.fnmatchcase(basename, g) for g in m.globs)
+    if m.kind == "suffix":
+        if is_dir:
+            return False
+        dot = basename.rfind(".")
+        return dot > 0 and basename[dot:].lower() in m.names
+    if m.kind == "path_glob":
+        return any(fnmatch.fnmatchcase(rel, p) for p in m.patterns)
+    return False
+
+
 def evaluate_protect(
     matchers: list[_Matcher],
     rel: str,
@@ -181,31 +210,11 @@ def evaluate_protect(
     """判断相对路径是否受保护；命中返回 (保护规则 id, 原因)，否则 None。
 
     rel 必须是相对目标根的 POSIX 路径（与 inventory 中的 path 同形态）。
+    语义是「先命中者胜」，因此调用方传入的 matchers 顺序即为优先级顺序。
     """
     if not rel:
         return None
-    parts = rel.split("/")
-    basename = parts[-1]
-    ancestors = parts[:-1]
-
     for m in matchers:
-        if m.kind == "dir_name":
-            if any(a in m.names for a in ancestors):
-                return m.rule_id, m.reason
-            if is_dir and basename in m.names:
-                return m.rule_id, m.reason
-        elif m.kind == "file_name":
-            if not is_dir and basename in m.names:
-                return m.rule_id, m.reason
-        elif m.kind == "name_glob":
-            if not is_dir and any(fnmatch.fnmatchcase(basename, g) for g in m.globs):
-                return m.rule_id, m.reason
-        elif m.kind == "suffix":
-            if not is_dir:
-                dot = basename.rfind(".")
-                if dot > 0 and basename[dot:].lower() in m.names:
-                    return m.rule_id, m.reason
-        elif m.kind == "path_glob":
-            if any(fnmatch.fnmatchcase(rel, p) for p in m.patterns):
-                return m.rule_id, m.reason
+        if matcher_hits(m, rel, is_dir):
+            return m.rule_id, m.reason
     return None

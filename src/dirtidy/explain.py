@@ -24,7 +24,12 @@ from dirtidy.rules.engine import (
     match_rules,
     passes_when,
 )
-from dirtidy.rules.protect import compile_protect_rules, evaluate_protect
+from dirtidy.rules.protect import (
+    builtin_protect_rules,
+    compile_protect_rules,
+    evaluate_protect,
+    matcher_hits,
+)
 from dirtidy.scan.scanner import SKIP_DIR_NAMES
 
 #: 解释目录时最多枚举多少条后代（用于 source_free 守卫判定），防止在超大目录上卡住
@@ -38,6 +43,14 @@ DECISION_LABELS = {
     "missing": "路径不存在",
 }
 
+#: 规则来源标记。内置保护清单写在代码里、规则包关不掉，因此在解释里必须与
+#: 规则包的规则区分开——否则用户看到「结论说是 builtin_xxx 保护的，列表里却找不到」。
+SOURCE_LABELS = {
+    "builtin": "内置保护",
+    "pack": "规则包",
+    "extra": "额外指定",
+}
+
 
 @dataclass(slots=True)
 class RuleTrace:
@@ -49,6 +62,7 @@ class RuleTrace:
     conditions_passed: bool
     conditions: list[str] = field(default_factory=list)
     note: str = ""
+    source: str = "pack"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -105,10 +119,18 @@ class Explanation:
             suffix = "（已达枚举上限，source_free 判定基于已枚举部分）" if self.truncated else ""
             lines.append(f"  已枚举后代: {self.enumerated_descendants} 条{suffix}")
 
-        lines.extend(["", f"生效的保护规则 {len(self.protect_policy)} 条，逐条规则判定如下：", ""])
+        protect_count = sum(1 for tr in self.traces if tr.action == "protect")
+        lines.extend(
+            [
+                "",
+                f"生效的保护规则 {protect_count} 条（内置清单 + 规则包 + 额外指定），逐条规则判定如下：",
+                "",
+            ]
+        )
         for tr in self.traces:
             mark = "命中" if tr.matched else "未命中"
-            lines.append(f"[{mark}] {tr.rule_id}  action={tr.action}")
+            src = SOURCE_LABELS.get(tr.source, tr.source)
+            lines.append(f"[{mark}] {tr.rule_id}  action={tr.action}  ({src})")
             if tr.matched:
                 lines.append(f"    when 条件: {'全部通过' if tr.conditions_passed else '有未通过项'}")
                 for c in tr.conditions:
@@ -202,14 +224,32 @@ def explain_path(
     index = PathIndex(items)
     matchers = compile_protect_rules(effective_protect_rules(pack, extra_protect_rules))
 
-    # 逐条规则的判定明细
+    # 逐条规则的判定明细。
+    # 顺序必须与真实判定的优先级一致：内置保护清单 → 规则包 → 额外指定。
+    # 内置清单排在最前且单独标注来源，否则会出现「结论说是 builtin_xxx 保护的，
+    # 但逐条列表里根本找不到这条规则」这种查不到责任人的情况。
     traces: list[RuleTrace] = []
+    for m in compile_protect_rules(builtin_protect_rules()):
+        bhit = matcher_hits(m, rel, is_dir)
+        traces.append(
+            RuleTrace(
+                rule_id=m.rule_id,
+                action="protect",
+                matched=bhit,
+                conditions_passed=True,
+                note="内置保护清单命中 → 该路径受保护（规则包关不掉）" if bhit else "",
+                source="builtin",
+            )
+        )
+
     winner: str | None = None
     for rule in pack.get("rules") or []:
         rule_id = str(rule.get("id") or "unknown")
         action = str(rule.get("action", "candidate_only"))
         matched = any(it.path == rel for it in match_items(rule, items, root))
-        trace = RuleTrace(rule_id=rule_id, action=action, matched=matched, conditions_passed=False)
+        trace = RuleTrace(
+            rule_id=rule_id, action=action, matched=matched, conditions_passed=False, source="pack"
+        )
 
         if matched:
             conds: list[str] = []
@@ -226,6 +266,19 @@ def explain_path(
             else:
                 trace.note = f"被更靠前的规则 {winner} 抢先 → 本条不生效"
         traces.append(trace)
+
+    for m in compile_protect_rules(list(extra_protect_rules or [])):
+        ehit = matcher_hits(m, rel, is_dir)
+        traces.append(
+            RuleTrace(
+                rule_id=m.rule_id,
+                action="protect",
+                matched=ehit,
+                conditions_passed=True,
+                note="调用方 --protect 额外指定的保护，命中即生效" if ehit else "",
+                source="extra",
+            )
+        )
 
     # 权威结论仍由 match_rules 给出，保证与真实执行一致
     res = match_rules(root, items, pack, now=now, extra_protect_rules=extra_protect_rules)

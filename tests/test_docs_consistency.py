@@ -1,10 +1,12 @@
-"""文档一致性守护：docs/04 规则 ID 表 vs 包内置规则包 YAML、docs/03 CLI 表 vs argparse。
+"""文档一致性守护：docs/04 规则 ID 表 vs 包内置规则包 YAML、docs/03 CLI 表 vs argparse、
+docs/05 用例表 vs 实际测试函数。
 
 在文档与实现漂移时，此测试应真正失败（真红），而非恒真。
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -13,7 +15,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS = REPO_ROOT / "docs"
 DOCS_03 = DOCS / "03-架构设计.md"
 DOCS_04 = DOCS / "04-规则包说明.md"
+DOCS_05 = DOCS / "05-测试与验收.md"
 DOCS_07 = DOCS / "07-规模与性能.md"
+TESTS_DIR = REPO_ROOT / "tests"
 PACKS_DIR = REPO_ROOT / "src" / "dirtidy" / "rules" / "packs"
 DEFAULT_YAML = PACKS_DIR / "default.yaml"
 SERVER_WORKSPACE_YAML = PACKS_DIR / "server_workspace.yaml"
@@ -137,3 +141,53 @@ def test_docs_07_scale_doc_references_existing_bench() -> None:
     assert (REPO_ROOT / "scripts" / "bench_scale.py").exists()
     for nfr in ("NFR-6", "NFR-10"):
         assert nfr in text, f"docs/07 未覆盖 {nfr}"
+
+
+def _parse_docs_05_test_list(doc_text: str) -> set[str]:
+    """解析 docs/05 §3「自动化用例」表格首列，返回用例名集合。"""
+    lines = doc_text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("## 3."):
+            start = i
+            break
+    assert start is not None, "未找到 docs/05 §3 标题"
+
+    names: set[str] = set()
+    for line in lines[start + 1 :]:
+        if line.strip().startswith("## "):
+            break
+        if "|" not in line:
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if not cells:
+            continue
+        name = _strip_code(cells[0])
+        if name.startswith("test_"):
+            names.add(name)
+    return names
+
+
+def _actual_test_functions() -> set[str]:
+    """收集 tests/ 下所有 test_* 函数名（含本文件自身）。"""
+    found: set[str] = set()
+    for path in sorted(TESTS_DIR.glob("test_*.py")):
+        text = path.read_text(encoding="utf-8")
+        found.update(re.findall(r"^def (test_\w+)", text, re.MULTILINE))
+    return found
+
+
+def test_docs_05_test_list_matches_actual() -> None:
+    """docs/05 §3 用例表必须与实际测试函数双向一致（防漏登）。
+
+    与 docs/03、docs/04 的守卫同构：文档漏登记新用例时应当真红，
+    否则「测试清单」会慢慢变成一份不可信的旧账。
+    """
+    documented = _parse_docs_05_test_list(DOCS_05.read_text(encoding="utf-8"))
+    actual = _actual_test_functions()
+
+    assert documented, "docs/05 §3 表格应至少解析出一条用例"
+    assert documented == actual, (
+        f"docs/05 用例表与实际不符：文档多出 {sorted(documented - actual)}，"
+        f"实现多出 {sorted(actual - documented)}"
+    )

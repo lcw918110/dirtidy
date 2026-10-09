@@ -172,6 +172,57 @@ def test_explain_cli_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert main(["explain", str(root), "../escape"]) == 2
 
 
+def test_explain_lists_builtin_protect_rules(tmp_path: Path) -> None:
+    """内置保护清单必须在逐条列表里出现。
+
+    曾经的缺陷：结论区说「builtin_protect_credentials 保护了它」，但逐条列表只列了
+    规则包的规则，用户照着列表去找根本找不到这条 —— 「谁保护的」查不到责任人。
+    """
+    root = _ws(tmp_path)
+    (root / ".ssh").mkdir()
+    (root / ".ssh" / ".cache").write_text("x", encoding="utf-8")
+
+    exp = explain_path(root, ".ssh/.cache")
+    assert exp.protect_rule_id == "builtin_protect_credentials"
+
+    builtin = [t for t in exp.traces if t.source == "builtin"]
+    assert builtin, "内置保护规则应出现在 traces 里"
+    hit = next(t for t in builtin if t.rule_id == "builtin_protect_credentials")
+    assert hit.matched is True, "保护了它的那条内置规则必须标记为命中"
+    assert "内置保护清单命中" in hit.note
+
+    text = exp.to_text()
+    assert "builtin_protect_credentials" in text
+    assert "内置保护" in text
+
+
+def test_explain_traces_cover_every_effective_protect_rule(tmp_path: Path) -> None:
+    """逐条列表里的保护规则条数必须等于生效保护策略的条数。
+
+    否则列表与「生效的保护规则 N 条」这句自相矛盾，用户无法据此确认清单是否完整。
+    """
+    root = _ws(tmp_path)
+    (root / "plain.txt").write_text("x", encoding="utf-8")
+
+    extra = [
+        {
+            "id": "cli_protect_0",
+            "action": "protect",
+            "match": {"type": "path_glob", "patterns": ["whatever"]},
+            "reason": "命令行 --protect 指定",
+        }
+    ]
+    exp = explain_path(root, "plain.txt", load_rule_pack("default"), extra_protect_rules=extra)
+
+    protect_traces = [t for t in exp.traces if t.action == "protect"]
+    assert len(protect_traces) == len(exp.protect_policy)
+    assert {t.rule_id for t in protect_traces} == {p["id"] for p in exp.protect_policy}
+    assert any(t.source == "extra" for t in protect_traces), "额外指定的保护也要进列表"
+
+    # 内置清单排在最前：它们是最高优先级，且与规则书写顺序无关
+    assert exp.traces[0].source == "builtin"
+
+
 # ------------------------------------------------------------------ dry-run
 
 def test_apply_rules_dry_run_does_not_move(tmp_path: Path) -> None:
