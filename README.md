@@ -38,6 +38,8 @@ dirtidy serve --root /path/to/root --port 8765
 
 产物目录：`<root>/.dirtidy/runs/<run_id>/`；隔离区：`<root>/.dirtidy/quarantine/<run_id>/`。未改动文件的内容 hash 缓存在 `<root>/.dirtidy/hash_cache.json`。扫描可加 `--workers 8` 并行算 hash。
 
+只读介质或不想污染目标目录时，可用环境变量 `DIRTIDY_STATE_DIR` 把整个 `.dirtidy/` 重定位到外部可写目录。
+
 规则包含「空目录自动隔离」时，搬走子项后新空出来的父目录会再清几轮。
 
 ## 安全约定
@@ -56,3 +58,9 @@ mypy
 ```
 
 三平台矩阵（ubuntu / macos / windows × Python 3.11、3.12）由 `.github/workflows/ci.yml` 覆盖，推送到 GitHub 后生效。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 lichaowei
+
+本工具会移动/隔离目标目录下的文件，请在使用前确认规则与决策；软件按「原样」提供，不附带任何明示或暗示的担保。

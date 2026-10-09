@@ -5,7 +5,7 @@
 - 审核范围：过程资料（`docs/` 6 份 + `README.md` + 修订记录）与结果资料（`src/` 21 个模块、`tests/` 4 个文件 20 用例、`build/`、`configs/`）
 - 审核方式：全量代码通读 + 实际运行（pytest 20 用例全绿）+ 针对可疑点编写复现脚本实证
 - 结论一句话：**架构分层清晰、安全默认（默认隔离不抹盘）方向正确、文档体系完整；但存在 1 个高危数据安全缺陷（路径穿越）与 3 个高优先缺陷（凭据外发泄漏、候选为空时全量外发、只读根扫描崩溃），且"第一期缺口已补完"的结论过于乐观。**
-- 处理情况：P0/P1 缺陷与绝大部分 P2 项**已修复并补回归用例**；最终 `ruff` 零告警、`mypy` 21 文件零问题、`pytest -W error` **33 用例全绿**。仅剩「提交 git」与「选定 LICENSE」两项需项目所有者决定。详见第五节与 `修复说明-20261009.md`。
+- 处理情况：P0/P1 缺陷与全部 P2 项**已修复并补回归用例**；最终 `ruff` 零告警、`mypy` 21 文件零问题、`pytest -W error` **33 用例全绿**。许可证采用 **MIT**，改动已分两笔提交入库。详见第五节与 `修复说明-20261009.md`。
 
 ---
 
@@ -172,7 +172,7 @@ if use_hash_cache and not quick:
 
 `archive` 目标已存在、或 `quarantine` 源文件不存在时，代码 `continue` 静默跳过，返回值只统计成功数（`kept/archived/quarantined`）。用户无法知道哪条决策没被执行、为什么。建议返回 `skipped: [{path, action, reason}]` 明细。
 
-#### P2-5 缺工程配套 ⚠️ 部分已修（CI/ruff/mypy 已加；LICENSE 待所有者决定）
+#### P2-5 缺工程配套 ✅ 已修
 
 无 `LICENSE`、无 CI、无 lint/类型检查配置（ruff/mypy/black 均未配置，`pyproject.toml` 无 `[tool.ruff]`/`[tool.mypy]`）。对于一个自述"跨平台"的项目，缺 CI 意味着 Windows/Linux 的回归只能靠人工。
 
@@ -217,7 +217,7 @@ if use_hash_cache and not quick:
 
 | 序号 | 动作 | 状态 |
 |------|------|------|
-| 1 | **提交本轮改动** | ⏳ 待项目所有者执行（改动混有此前遗留的未提交变更，建议分两笔提交） |
+| 1 | **提交本轮改动** | ✅ 已分两笔提交：`adc3393`（规则包迁移+文档对齐）、`7150ace`（审核修复+工程配套） |
 | 2 | **补 CI**（三平台 × pytest） | ✅ 已加 `.github/workflows/ci.yml`（三平台 × 3.11/3.12，跑 ruff + mypy + pytest） |
 | 3 | **配置查找去源码树依赖**（P2-2） | ✅ 已改为 `$DIRTIDY_CONFIG` → `./models.yaml` → `~/.config/dirtidy/` → `configs/` 兜底 |
 | 4 | **前端转义 + CSP**（P2-1） | ✅ `app.js` 全面去 `innerHTML`；`app.py` 加严格 CSP / nosniff / no-referrer |
