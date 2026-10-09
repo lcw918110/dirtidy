@@ -20,7 +20,11 @@ python3 -m venv .venv
 # 扫描（不立刻隔离）
 dirtidy scan /path/to/root --rules server_workspace
 
-# 对 pending 高置信项执行隔离
+# 先问「这个路径为什么会被/不会被动」
+dirtidy explain /path/to/root src/logs --rules server_workspace
+
+# 对 pending 高置信项执行隔离（--dry-run 只预览）
+dirtidy apply-rules /path/to/root <run_id> --dry-run
 dirtidy apply-rules /path/to/root <run_id>
 
 # 或一步：扫描并隔离
@@ -62,6 +66,7 @@ dirtidy scan /path/to/root --protect path/to/keep --protect another/dir
 - 重复文件与解压残留（hash 对照）默认仅候选
 - 外发模型默认只传安全摘要，且 `summary.max_targets` 给单次外发封顶
 - `apply-rules` 在搬文件前会用当前生效的保护清单**再复核一遍**，防止 pending 被改过就绕过保护
+- `scan` / `apply-rules` / `apply-decisions` 都支持 `--dry-run`：先看「会动哪些、哪些被保护拦下」再决定执行
 - 非 quick 扫描将文件 `path + size + mtime + sha256` 缓存在 `<root>/.dirtidy/hash_cache.sqlite`；处理敏感目录时可加 `--quick` 跳过内容 hash 与缓存
 
 ## 规模
@@ -71,12 +76,13 @@ dirtidy scan /path/to/root --protect path/to/keep --protect another/dir
 
 ```bash
 python scripts/bench_scale.py --files 1200   # 可复现基准：条目内存 / 扫描吞吐 / inventory 读写峰值
+python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply-rules → analyze，并断言保护生效
 ```
 
 ## 测试
 
 ```bash
-pytest -q            # 79 个用例
+pytest -q            # 97 个用例
 ruff check src tests
 mypy
 ```

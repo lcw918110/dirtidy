@@ -21,6 +21,10 @@ def _resolve_root(path: str) -> Path:
 def cmd_scan(args: argparse.Namespace) -> int:
     import sys
 
+    if args.dry_run and args.apply:
+        print("--dry-run 与 --apply 互斥：dry-run 只预览不落盘。")
+        return 2
+
     def _progress(done: int, total: int) -> None:
         print(f"\rhash {done}/{total}", end="", file=sys.stderr, flush=True)
         if done == total:
@@ -35,15 +39,39 @@ def cmd_scan(args: argparse.Namespace) -> int:
         on_progress=None if args.quick else _progress,
         protect=args.protect,
     )
+    if args.dry_run:
+        meta = {**meta, "dry_run": True}
     print(json.dumps(meta, ensure_ascii=False, indent=2))
     return 0
 
 
 def cmd_apply_rules(args: argparse.Namespace) -> int:
     root = _resolve_root(args.root)
-    result = apply_pending_rules(root, args.run_id)
+    result = apply_pending_rules(root, args.run_id, dry_run=args.dry_run)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
+
+
+def cmd_explain(args: argparse.Namespace) -> int:
+    from dirtidy.explain import explain_path
+    from dirtidy.pipeline import protect_rules_from_paths
+
+    root = _resolve_root(args.root)
+    try:
+        exp = explain_path(
+            root,
+            args.path,
+            rules=args.rules,
+            extra_protect_rules=protect_rules_from_paths(args.protect),
+        )
+    except ValueError as e:
+        print(f"无法解释该路径: {e}")
+        return 2
+    if args.json:
+        print(json.dumps(exp.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(exp.to_text())
+    return 0 if exp.exists else 1
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
@@ -66,7 +94,7 @@ def cmd_apply_decisions(args: argparse.Namespace) -> int:
     root = _resolve_root(args.root)
     rdir = run_dir(root, args.run_id)
     qdir = quarantine_root(root, args.run_id)
-    result = apply_decisions(root, args.run_id, rdir, qdir)
+    result = apply_decisions(root, args.run_id, rdir, qdir, dry_run=args.dry_run)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
@@ -128,18 +156,24 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--quick", action="store_true", help="跳过内容 hash / 解压对照")
     s.add_argument("--apply", action="store_true", help="扫描后立即隔离 auto 规则命中项")
     s.add_argument("--workers", type=int, default=4, help="内容 hash 并行线程数")
-    s.add_argument(
-        "--protect",
-        action="append",
-        default=[],
-        metavar="REL_PATH",
-        help="额外保护某个相对路径（含其整棵子树），可重复；命中的路径永不自动隔离",
-    )
+    s.add_argument("--protect", action="append", default=[], metavar="REL_PATH",
+                   help="额外保护某个相对路径（含其整棵子树），可重复；命中的路径永不自动隔离")
+    s.add_argument("--dry-run", action="store_true", help="只预览不落盘（与 --apply 互斥）")
     s.set_defaults(func=cmd_scan)
+
+    s = sub.add_parser("explain", help="解释某个相对路径会被如何处理（规则/条件/保护逐条摊开）")
+    s.add_argument("root")
+    s.add_argument("path", help="相对目标根的路径")
+    s.add_argument("--rules", default="default", help="规则包名或 YAML 路径")
+    s.add_argument("--protect", action="append", default=[], metavar="REL_PATH",
+                   help="按指定的额外保护路径来评估，可重复")
+    s.add_argument("--json", action="store_true", help="以 JSON 输出（默认人类可读文本）")
+    s.set_defaults(func=cmd_explain)
 
     s = sub.add_parser("apply-rules", help="对已有 run 的 pending auto 命中执行隔离")
     s.add_argument("root")
     s.add_argument("run_id")
+    s.add_argument("--dry-run", action="store_true", help="只列出会搬走哪些、哪些被保护拦下")
     s.set_defaults(func=cmd_apply_rules)
 
     s = sub.add_parser("analyze", help="模型分析残留/候选")
@@ -152,6 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("apply-decisions", help="执行 decisions.json")
     s.add_argument("root")
     s.add_argument("run_id")
+    s.add_argument("--dry-run", action="store_true", help="只校验并预览，不移动任何文件")
     s.set_defaults(func=cmd_apply_decisions)
 
     s = sub.add_parser("save-decisions", help="从 JSON 文件写入 decisions")

@@ -24,11 +24,21 @@ def save_decisions(run_path: Path, decisions: Sequence[Decision | dict]) -> None
     write_json(run_path / "decisions.json", out)
 
 
-def apply_decisions(root: Path, run_id: str, run_path: Path, quarantine_dir: Path) -> dict:
+def apply_decisions(
+    root: Path,
+    run_id: str,
+    run_path: Path,
+    quarantine_dir: Path,
+    *,
+    dry_run: bool = False,
+) -> dict:
     """按 decisions.json 执行：保留计数、归档移动、或转入隔离区。
 
     所有路径先经 resolve_under 校验必须落在 root 内，越界条目记入 skipped 而不执行，
     避免外部输入的 `..` / 绝对路径把文件搬出目标根。
+
+    dry_run=True 时只做完整校验与冲突检测并报告，不动任何文件；
+    同批次内两个决策落到同一归档目标的情况，也会在 dry-run 里被指出。
     """
     decisions = load_decisions(run_path)
     manifest_path = run_path / "quarantine_manifest.json"
@@ -36,6 +46,7 @@ def apply_decisions(root: Path, run_id: str, run_path: Path, quarantine_dir: Pat
     archived = 0
     kept = 0
     skipped: list[dict] = []
+    planned_targets: dict[str, str] = {}  # 目标相对路径 → 来源路径（用于同批次冲突检测）
 
     for d in decisions:
         try:
@@ -71,20 +82,32 @@ def apply_decisions(root: Path, run_id: str, run_path: Path, quarantine_dir: Pat
             except ValueError as e:
                 skipped.append({"path": d.path, "action": d.action, "reason": f"归档目标非法: {e}"})
                 continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
-                skipped.append({"path": d.path, "action": d.action, "reason": f"归档目标已存在: {target}"})
+            if dest.exists() or target in planned_targets:
+                holder = planned_targets.get(target, "磁盘上已存在")
+                skipped.append(
+                    {"path": d.path, "action": d.action, "reason": f"归档目标已存在: {target}（{holder}）"}
+                )
                 continue
+            planned_targets[target] = d.path
+            if dry_run:
+                archived += 1
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dest))
             archived += 1
 
-    if q_hits:
+    if q_hits and not dry_run:
         quarantine_dir.mkdir(parents=True, exist_ok=True)
         quarantine_hits(root, run_id, q_hits, quarantine_dir, manifest_path)
 
-    return {
+    result = {
         "kept": kept,
         "archived": archived,
         "quarantined": len(q_hits),
         "skipped": skipped,
     }
+    if dry_run:
+        result["dry_run"] = True
+        result["would_archive"] = [p for p in planned_targets.values()]
+        result["would_quarantine"] = [h.path for h in q_hits]
+    return result

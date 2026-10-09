@@ -163,11 +163,13 @@ def _append_protection_records(rdir: Path, records: list[dict]) -> list[dict]:
     return merged
 
 
-def apply_pending_rules(root: Path, run_id: str) -> dict[str, Any]:
+def apply_pending_rules(root: Path, run_id: str, *, dry_run: bool = False) -> dict[str, Any]:
     """对已有 run 的 pending_auto_hits 执行隔离，并刷新 audit.md。
 
     隔离前会**再用当前生效的保护清单复核一遍**：pending 列表可能是在旧规则包、
     或人工编辑过的状态下生成的，复核可以保证「保护」不会因为中间环节被绕过。
+
+    dry_run=True 时只报告「会搬走哪些、哪些被保护拦下」，不改动任何文件与清单。
     """
     root = root.resolve()
     rdir = run_dir(root, run_id)
@@ -210,6 +212,17 @@ def apply_pending_rules(root: Path, run_id: str) -> dict[str, Any]:
                 "blocked_at": "apply",
             }
         )
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "run_id": run_id,
+            "would_quarantine": len(kept),
+            "paths": [h.path for h in kept],
+            "blocked_by_protect": len(blocked),
+            "blocked_paths": [b["path"] for b in blocked],
+        }
+
     if blocked:
         _append_protection_records(rdir, blocked)
 

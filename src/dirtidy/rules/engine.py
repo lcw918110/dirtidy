@@ -280,43 +280,95 @@ def _under_any(path: str, prefixes: list[str]) -> bool:
     return any(path == p or path.startswith(p + "/") for p in prefixes)
 
 
-def _passes_when(item: InventoryItem, when: dict[str, Any], now: float, index: _PathIndex) -> bool:
-    """条件过滤；任何一条不满足即不命中。"""
+def _passes_when(
+    item: InventoryItem,
+    when: dict[str, Any],
+    now: float,
+    index: _PathIndex,
+    trace: list[str] | None = None,
+) -> bool:
+    """条件过滤；任何一条不满足即不命中。
+
+    trace 非 None 时把每条条件的判定明细追加进去（供 `dirtidy explain` 展示）；
+    为 None 时一条字符串都不拼，避免在大规模扫描里为每次命中付格式化开销。
+    """
     if not when:
         return True
+
+    def note(text: str) -> None:
+        if trace is not None:
+            trace.append(text)
+
     path = item.path
-
-    if "under" in when and not _under_any(path, _norm_prefixes(when["under"])):
-        return False
-    if "not_under" in when and _under_any(path, _norm_prefixes(when["not_under"])):
-        return False
-
     depth = path.count("/") + 1
-    if "min_depth" in when and depth < int(when["min_depth"]):
-        return False
-    if "max_depth" in when and depth > int(when["max_depth"]):
-        return False
+
+    if "under" in when:
+        prefixes = _norm_prefixes(when["under"])
+        hit = _under_any(path, prefixes)
+        note(f"under={prefixes} → {'通过' if hit else '不满足'}")
+        if not hit:
+            return False
+    if "not_under" in when:
+        prefixes = _norm_prefixes(when["not_under"])
+        hit = _under_any(path, prefixes)
+        note(f"not_under={prefixes} → {'不满足（命中黑名单）' if hit else '通过'}")
+        if hit:
+            return False
+
+    if "min_depth" in when:
+        limit = int(when["min_depth"])
+        hit = depth >= limit
+        note(f"min_depth={limit}（当前 {depth}）→ {'通过' if hit else '不满足'}")
+        if not hit:
+            return False
+    if "max_depth" in when:
+        limit = int(when["max_depth"])
+        hit = depth <= limit
+        note(f"max_depth={limit}（当前 {depth}）→ {'通过' if hit else '不满足'}")
+        if not hit:
+            return False
 
     # 目录大小在 inventory 里恒为 0（不聚合子树），故 size 条件只对文件生效
     if not item.is_dir:
-        if "min_size_bytes" in when and item.size < int(when["min_size_bytes"]):
-            return False
-        if "max_size_bytes" in when and item.size > int(when["max_size_bytes"]):
-            return False
+        if "min_size_bytes" in when:
+            limit = int(when["min_size_bytes"])
+            hit = item.size >= limit
+            note(f"min_size_bytes={limit}（当前 {item.size}）→ {'通过' if hit else '不满足'}")
+            if not hit:
+                return False
+        if "max_size_bytes" in when:
+            limit = int(when["max_size_bytes"])
+            hit = item.size <= limit
+            note(f"max_size_bytes={limit}（当前 {item.size}）→ {'通过' if hit else '不满足'}")
+            if not hit:
+                return False
+    elif "min_size_bytes" in when or "max_size_bytes" in when:
+        note("size 条件对目录不适用（inventory 不聚合目录大小）→ 跳过")
 
     if "min_age_days" in when or "max_age_days" in when:
         if not item.mtime:
-            # mtime 缺失（stat 失败）时无法证明「够旧」→ 保守放弃
+            note("mtime 缺失（stat 失败）→ 无法证明够旧，保守判为不命中")
             return False
         age_days = (now - item.mtime) / 86400.0
-        if "min_age_days" in when and age_days < float(when["min_age_days"]):
-            return False
-        if "max_age_days" in when and age_days > float(when["max_age_days"]):
-            return False
+        if "min_age_days" in when:
+            limit_days = float(when["min_age_days"])
+            hit = age_days >= limit_days
+            note(f"min_age_days={limit_days}（实际 {age_days:.1f} 天）→ {'通过' if hit else '不满足'}")
+            if not hit:
+                return False
+        if "max_age_days" in when:
+            limit_days = float(when["max_age_days"])
+            hit = age_days <= limit_days
+            note(f"max_age_days={limit_days}（实际 {age_days:.1f} 天）→ {'通过' if hit else '不满足'}")
+            if not hit:
+                return False
 
     for guard in when.get("require") or ():
-        if guard == "source_free" and not _is_source_free(index, path):
-            return False
+        if guard == "source_free":
+            hit = _is_source_free(index, path)
+            note(f"require: source_free（子树内无源码/构建定义文件）→ {'通过' if hit else '不满足'}")
+            if not hit:
+                return False
     return True
 
 
@@ -450,3 +502,10 @@ def match_rules(
         protected=protected,
         protect_policy=protect_policy(pack, extra_protect_rules),
     )
+
+
+# 供 `dirtidy explain` 复用同一套判定逻辑：绝不在这里复制一份实现，
+# 否则解释结果会与真实执行结果漂移。
+PathIndex = _PathIndex
+match_items = _match_items
+passes_when = _passes_when

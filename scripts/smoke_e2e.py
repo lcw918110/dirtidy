@@ -55,7 +55,9 @@ def build() -> None:
         p.write_text(content, encoding="utf-8")
 
     old = time.time() - 30 * 86400
-    for rel in ("app/logs/app.log", "src/logs/handler.py", "old.tmp"):
+    # 目录自身的 mtime 也要回拨：min_age_days 看的是目录 mtime，
+    # 只回拨文件会先卡在 min_age_days 上，看不到 source_free 守卫那一层
+    for rel in ("app/logs", "src/logs", "app/logs/app.log", "src/logs/handler.py", "old.tmp"):
         os.utime(WS / rel, (old, old))
 
 
