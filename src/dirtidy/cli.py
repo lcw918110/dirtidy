@@ -33,6 +33,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         apply=args.apply,
         workers=args.workers,
         on_progress=None if args.quick else _progress,
+        protect=args.protect,
     )
     print(json.dumps(meta, ensure_ascii=False, indent=2))
     return 0
@@ -120,6 +121,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--quick", action="store_true", help="跳过内容 hash / 解压对照")
     s.add_argument("--apply", action="store_true", help="扫描后立即隔离 auto 规则命中项")
     s.add_argument("--workers", type=int, default=4, help="内容 hash 并行线程数")
+    s.add_argument(
+        "--protect",
+        action="append",
+        default=[],
+        metavar="REL_PATH",
+        help="额外保护某个相对路径（含其整棵子树），可重复；命中的路径永不自动隔离",
+    )
     s.set_defaults(func=cmd_scan)
 
     s = sub.add_parser("apply-rules", help="对已有 run 的 pending auto 命中执行隔离")

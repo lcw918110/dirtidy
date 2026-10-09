@@ -65,10 +65,19 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> dict:
-        """聚合前端所需的候选、建议、已有决策等 JSON。"""
+        """聚合前端所需的候选、建议、已有决策、保护清单等 JSON。"""
         rdir = _run_path(run_id)
         out = {"meta": read_json(rdir / "meta.json")}
-        for name in ("candidates.json", "quarantine_manifest.json", "ai_suggestions.json", "decisions.json"):
+        names = (
+            "candidates.json",
+            "quarantine_manifest.json",
+            "ai_suggestions.json",
+            "decisions.json",
+            "protection.json",
+            "protect_policy.json",
+            "pending_auto_hits.json",
+        )
+        for name in names:
             fp = rdir / name
             out[name.replace(".json", "")] = read_json(fp) if fp.exists() else []
         return out

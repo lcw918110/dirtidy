@@ -1,13 +1,18 @@
 pack_id: server_workspace
-version: 1
+version: 2
 extends: default
+# 服务器 / 交接类工作区：在 default 之上放开「日志目录」这类目录级清理，
+# 但都带条件与守卫，避免把名为 logs 的源码目录误搬。
 rules:
   - id: log_dir
     action: auto_quarantine
     match:
       type: dir_name
       names: ["logs", "log"]
-    reason: "常见日志目录"
+    when:
+      min_age_days: 3
+      require: [source_free]
+    reason: "超过 3 天未更新、且不含任何源码文件的日志目录"
 
   - id: dep_target_candidate
     action: candidate_only

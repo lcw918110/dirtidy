@@ -1,40 +1,229 @@
 pack_id: default
-version: 1
+version: 2
+# 通用高置信清理包。
+#
+# 三条原则：
+# 1) 会丢历史的（版本控制、密钥、CI 配置、项目标记）一律 protect，永不自动隔离；
+# 2) 能一条命令重建的（依赖目录、缓存、字节码、临时文件）才 auto_quarantine；
+# 3) 说不准的（build/dist/bin/压缩包/本地库）只进候选，交人工。
 rules:
+  # ============================ 保护：最高优先级 ============================
+  - id: protect_vcs
+    action: protect
+    match:
+      type: dir_name
+      names: [".git", ".hg", ".svn", ".bzr"]
+    reason: "版本控制元数据，删除即丢失历史"
+
+  - id: protect_credentials
+    action: protect
+    match:
+      type: dir_name
+      names: [".ssh", ".gnupg", ".aws", ".gcloud", ".azure", ".kube", ".docker", ".cargo"]
+    reason: "凭据 / 云与容器配置目录"
+
+  - id: protect_system_reserved
+    action: protect
+    match:
+      type: dir_name
+      names:
+        - "lost+found"
+        - "$RECYCLE.BIN"
+        - "System Volume Information"
+        - ".Trash"
+        - ".Spotlight-V100"
+        - ".fseventsd"
+        - ".DocumentRevisions-V100"
+        - ".TemporaryItems"
+        - ".vol"
+    reason: "操作系统 / 文件系统保留目录"
+
+  - id: protect_secrets
+    action: protect
+    match:
+      type: name_glob
+      globs:
+        - ".env"
+        - ".env.*"
+        - "*.pem"
+        - "*.key"
+        - "*.p12"
+        - "*.pfx"
+        - "*.jks"
+        - "*.keystore"
+        - "*.kdbx"
+        - "*.ppk"
+        - "*.asc"
+        - "*.gpg"
+        - "*.age"
+        - ".netrc"
+        - ".npmrc"
+        - ".pgpass"
+        - ".git-credentials"
+        - "id_rsa"
+        - "id_dsa"
+        - "id_ecdsa"
+        - "id_ed25519"
+        - "known_hosts"
+        - "authorized_keys"
+    reason: "密钥 / 凭据文件，误删不可恢复"
+
+  - id: protect_project_markers
+    action: protect
+    match:
+      type: file_name
+      names:
+        - "README"
+        - "README.md"
+        - "README.rst"
+        - "LICENSE"
+        - "LICENSE.txt"
+        - "COPYING"
+        - "pyproject.toml"
+        - "setup.py"
+        - "setup.cfg"
+        - "package.json"
+        - "go.mod"
+        - "Cargo.toml"
+        - "pom.xml"
+        - "build.gradle"
+        - "Makefile"
+        - "Dockerfile"
+        - "docker-compose.yml"
+        - "requirements.txt"
+        - "Pipfile"
+        - "composer.json"
+        - "Gemfile"
+        - ".gitignore"
+        - ".gitattributes"
+        - ".dockerignore"
+        - ".editorconfig"
+        - ".nvmrc"
+    reason: "项目标记与依赖清单，重建成本高"
+
+  - id: protect_ci_config
+    action: protect
+    match:
+      type: path_glob
+      patterns:
+        - ".github"
+        - ".github/**"
+        - ".gitlab-ci.yml"
+        - ".circleci/**"
+        - ".travis.yml"
+        - "Jenkinsfile"
+        - "azure-pipelines.yml"
+    reason: "CI/CD 流水线配置"
+
+  # ========================== 自动隔离：可重建 / 无源价值 ==========================
   - id: dep_node_modules
     action: auto_quarantine
     match:
       type: dir_name
-      names: ["node_modules"]
-    reason: "Node 依赖目录，可用包管理器重建"
+      names: ["node_modules", "bower_components", "jspm_packages"]
+    reason: "Node / 前端依赖目录，可用包管理器重建"
 
-  - id: dep_venv
+  - id: dep_python_cache
+    action: auto_quarantine
+    match:
+      type: name_glob
+      is_dir: true
+      globs:
+        - "__pycache__"
+        - ".pytest_cache"
+        - ".mypy_cache"
+        - ".ruff_cache"
+        - ".pytype"
+        - ".hypothesis"
+        - ".tox"
+        - ".nox"
+        - ".eggs"
+        - "*.egg-info"
+        - ".ipynb_checkpoints"
+    reason: "Python 缓存与打包中间目录，可重建"
+
+  - id: dep_python_venv
     action: auto_quarantine
     match:
       type: dir_name
-      names: [".venv", "venv"]
-    reason: "Python 虚拟环境，可重建"
+      names: [".venv", "venv", ".virtualenv"]
+    reason: "Python 虚拟环境，可用依赖清单重建"
 
-  - id: dep_pycache
+  - id: dep_jvm_cache
     action: auto_quarantine
     match:
       type: dir_name
-      names: ["__pycache__"]
-    reason: "Python 字节码缓存"
+      names: [".m2", ".gradle", ".ivy2"]
+    reason: "JVM 构建工具本地缓存"
 
-  - id: dep_m2
+  - id: dep_web_cache
     action: auto_quarantine
     match:
       type: dir_name
-      names: [".m2"]
-    reason: "Maven 本地仓库缓存"
+      names:
+        - ".next"
+        - ".nuxt"
+        - ".svelte-kit"
+        - ".angular"
+        - ".astro"
+        - ".parcel-cache"
+        - ".turbo"
+        - ".vite"
+        - ".webpack"
+        - ".cache"
+    reason: "前端框架构建缓存"
 
-  - id: dep_gradle
+  - id: dep_tool_cache
     action: auto_quarantine
     match:
       type: dir_name
-      names: [".gradle"]
-    reason: "Gradle 缓存目录"
+      names:
+        - ".npm"
+        - ".yarn"
+        - ".pnpm-store"
+        - ".dart_tool"
+        - ".stack-work"
+        - ".terraform"
+        - ".serverless"
+        - "__MACOSX"
+    reason: "其它工具链缓存 / 打包残留目录"
+
+  - id: dep_os_metadata
+    action: auto_quarantine
+    match:
+      type: file_name
+      names: [".DS_Store", "Thumbs.db", "desktop.ini"]
+    reason: "操作系统生成的元数据文件"
+
+  - id: dep_editor_swap
+    action: auto_quarantine
+    match:
+      type: name_glob
+      globs: ["*~", "#*#", "*.swp", "*.swo", "*.orig", "*.rej"]
+    reason: "编辑器交换文件与补丁残留"
+
+  - id: dep_python_bytecode
+    action: auto_quarantine
+    match:
+      type: suffix
+      suffixes: [".pyc", ".pyo", ".pyd"]
+    reason: "Python 字节码文件"
+
+  - id: dep_temp_partial
+    action: auto_quarantine
+    match:
+      type: suffix
+      suffixes: [".tmp", ".temp", ".part", ".partial", ".crdownload", ".download", ".!ut"]
+    reason: "临时文件与未完成下载"
+
+  - id: log_suffix
+    action: auto_quarantine
+    match:
+      type: suffix
+      suffixes: [".log"]
+    when:
+      min_age_days: 1
+    reason: "超过 1 天未更新的日志文件（正在写的日志不动）"
 
   - id: empty_dir
     action: auto_quarantine
@@ -42,22 +231,45 @@ rules:
       type: empty_dir
     reason: "空目录"
 
+  # ============================== 候选：需人工确认 ==============================
   - id: empty_file
     action: candidate_only
     match:
       type: empty_file
-    reason: "0 字节文件，需确认"
+    reason: "0 字节文件，可能是占位也可能是损坏，需确认"
 
-  - id: log_suffix
-    action: auto_quarantine
+  - id: build_dir_candidate
+    action: candidate_only
     match:
-      type: suffix
-      suffixes: [".log"]
-    reason: "日志文件"
+      type: name_glob
+      is_dir: true
+      globs: ["build", "dist", "out", "bin", "obj", "Pods", "DerivedData", "Carthage", "deps", "_build", ".build"]
+    reason: "可能是构建产物，也可能含手写源码，需确认"
 
   - id: installer_suffix
     action: candidate_only
     match:
       type: suffix
-      suffixes: [".dmg", ".msi", ".deb", ".rpm"]
-    reason: "安装包类文件，默认仅候选"
+      suffixes: [".dmg", ".msi", ".deb", ".rpm", ".pkg", ".AppImage", ".exe", ".apk", ".snap"]
+    reason: "安装包类文件，需确认是否还需保留"
+
+  - id: archive_suffix
+    action: candidate_only
+    match:
+      type: suffix
+      suffixes: [".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".zst"]
+    reason: "压缩包可能保存着唯一副本，需确认"
+
+  - id: backup_suffix
+    action: candidate_only
+    match:
+      type: suffix
+      suffixes: [".bak", ".backup", ".old"]
+    reason: "备份类文件，需确认"
+
+  - id: database_suffix
+    action: candidate_only
+    match:
+      type: suffix
+      suffixes: [".sqlite", ".sqlite3", ".db"]
+    reason: "本地数据库文件，需确认"

@@ -66,6 +66,58 @@ class Candidate:
 
 
 @dataclass
+class ProtectionRecord:
+    """一条「规则本来想动它、但被保护清单拦下」的记录。
+
+    intended_action 是**原本要执行**的动作（auto_quarantine / candidate_only）；
+    blocked_auto 为真表示这条原本会进待隔离列表，被 protect 降级为「只看不动」。
+    """
+
+    path: str
+    protect_rule_id: str
+    protect_reason: str
+    intended_rule_id: str
+    intended_action: str
+    is_dir: bool = False
+
+    @property
+    def blocked_auto(self) -> bool:
+        return self.intended_action == "auto_quarantine"
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["blocked_auto"] = self.blocked_auto
+        return d
+
+
+@dataclass
+class RuleMatchResult:
+    """规则匹配的完整结果。
+
+    只有 hits 会被隔离；candidates 待人审；protected 是「想动但被保护拦下」的清单，
+    既不隔离也不进候选，只用于审计与前端提示。
+    """
+
+    hits: list[RuleHit]
+    candidates: list[Candidate]
+    protected: list[ProtectionRecord] = field(default_factory=list)
+    protect_policy: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def downgraded(self) -> list[ProtectionRecord]:
+        """原本要自动隔离、被保护降级的条目。"""
+        return [p for p in self.protected if p.blocked_auto]
+
+    def to_dicts(self) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "hits": [h.to_dict() for h in self.hits],
+            "candidates": [c.to_dict() for c in self.candidates],
+            "protected": [p.to_dict() for p in self.protected],
+            "protect_policy": list(self.protect_policy),
+        }
+
+
+@dataclass
 class QuarantineEntry:
     """隔离区清单中的一条记录；quarantine_path 相对 `.dirtidy/`。"""
 

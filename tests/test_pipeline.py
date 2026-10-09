@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -12,11 +14,21 @@ from dirtidy.quarantine.store import restore_entries
 
 FIXTURE_SRC = Path(__file__).parent / "fixtures" / "sample_workspace"
 
+#: 默认包里 log_suffix 带 `min_age_days: 1`——「正在写的日志不动」。
+#: 需要被清掉的日志必须是旧日志，所以 fixture 里统一把 mtime 回拨。
+OLD_MTIME = time.time() - 30 * 86400
+
+
+def _backdate_logs(root: Path) -> None:
+    for p in root.rglob("*.log"):
+        os.utime(p, (OLD_MTIME, OLD_MTIME))
+
 
 @pytest.fixture()
 def workspace(tmp_path: Path) -> Path:
     dest = tmp_path / "ws"
     shutil.copytree(FIXTURE_SRC, dest)
+    _backdate_logs(dest)
     return dest
 
 
@@ -127,6 +139,7 @@ def test_sweep_empty_parents_after_move(tmp_path: Path) -> None:
     nested.mkdir(parents=True)
     (nested / "run.log").write_text("line\n", encoding="utf-8")
     (root / "stay.txt").write_text("keep\n", encoding="utf-8")
+    _backdate_logs(root)
     create_run(root, rules="default", quick=True, apply=True)
     assert not nested.exists()
     assert not (root / "keep_tree").exists()
