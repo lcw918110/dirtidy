@@ -19,6 +19,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]
+# 托盘图标是桌面壳的**可选增强**：不装也能用（降级为 Ctrl-C 退出），
+# 但文档既然承诺「装了 pystray 就有托盘」，这个 extra 就必须真实存在。
+desktop = ["pystray>=0.19", "Pillow>=10"]
 
 [project.scripts]
 dirtidy = "dirtidy.cli:main"

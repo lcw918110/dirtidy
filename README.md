@@ -14,6 +14,12 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 ```
 
+想要桌面壳的托盘图标，再装可选增强（不装也能用，只是没有托盘）：
+
+```bash
+.venv/bin/python -m pip install -e ".[desktop]"
+```
+
 ## 快速开始
 
 ```bash
@@ -115,7 +121,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 155 个用例
+pytest -q            # 157 个用例
 ruff check src tests
 mypy
 ```

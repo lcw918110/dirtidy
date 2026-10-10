@@ -133,6 +133,63 @@ def test_docs_03_cli_table_matches_parser() -> None:
     )
 
 
+def _parse_docs_03_module_table(doc_text: str) -> set[str]:
+    """解析 docs/03 §2「模块」表格首列，返回模块名集合。"""
+    lines = doc_text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("## 2."):
+            start = i
+            break
+    assert start is not None, "未找到 docs/03 §2 标题"
+
+    names: set[str] = set()
+    for line in lines[start + 1 :]:
+        if line.strip().startswith("## "):
+            break
+        if "|" not in line:
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if not cells:
+            continue
+        name = _strip_code(cells[0])
+        if not name or name == "模块" or set(name) <= {"-", ":"}:
+            continue
+        names.add(name)
+    return names
+
+
+# docs/03 §2 只登记「核心链路 + 入口」；以下顶层模块在别处描述（§5 CLI 契约、§5.1 解释），
+# 不要求出现在该表。名单是显式的：新增顶层模块时必须做一个决定——要么进表，要么进这里。
+DOCS_03_MODULES_DESCRIBED_ELSEWHERE = {"cli", "explain", "models", "pipeline"}
+
+
+def test_docs_03_module_table_matches_source() -> None:
+    """docs/03 §2 模块表必须与 src/dirtidy 的真实模块对齐。
+
+    这张表此前漏登记过 `desktop` / `watch`——它们只出现在 §5 CLI 表里，
+    于是「模块表」变成半份旧账。守三端：
+    - 表里每个名字都得对应真实模块（防幻影）；
+    - 子包一个不漏（新增子包最容易忘）；
+    - 顶层模块除「在别处描述」的那几个外，都必须进表。
+    """
+    src = REPO_ROOT / "src" / "dirtidy"
+    documented = _parse_docs_03_module_table(DOCS_03.read_text(encoding="utf-8"))
+    assert documented, "docs/03 §2 表格应至少解析出一条模块"
+
+    for name in sorted(documented):
+        assert (src / name).is_dir() or (src / f"{name}.py").exists(), (
+            f"docs/03 §2 列出的模块 {name!r} 在 src/dirtidy 下不存在"
+        )
+
+    subpackages = {p.name for p in src.iterdir() if p.is_dir() and (p / "__init__.py").exists()}
+    assert not (subpackages - documented), f"子包未在 docs/03 §2 登记：{sorted(subpackages - documented)}"
+
+    top_modules = {p.stem for p in src.glob("*.py") if not p.stem.startswith("__")}
+    required = top_modules - DOCS_03_MODULES_DESCRIBED_ELSEWHERE
+    assert not (required - documented), f"顶层模块未在 docs/03 §2 登记：{sorted(required - documented)}"
+
+
 def test_docs_07_scale_doc_references_existing_bench() -> None:
     """规模文档必须存在，且引用的基准脚本确实在仓库里。"""
     assert DOCS_07.exists(), "缺少 docs/07-规模与性能.md"
@@ -141,6 +198,27 @@ def test_docs_07_scale_doc_references_existing_bench() -> None:
     assert (REPO_ROOT / "scripts" / "bench_scale.py").exists()
     for nfr in ("NFR-6", "NFR-10"):
         assert nfr in text, f"docs/07 未覆盖 {nfr}"
+
+
+def test_pyproject_declares_desktop_extra() -> None:
+    """桌面壳的托盘被文档宣称为「可选增强」，那它就得真的装得到。
+
+    否则 `pip install dirtidy[desktop]` 是张空头支票：文档说装了 pystray 就有托盘，
+    实际 extra 根本不存在。反向也要守——托盘依赖不得进核心 `dependencies`，
+    缺它必须仍然能跑（降级为 Ctrl-C 退出）。
+    """
+    import tomllib
+
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    extras = data["project"]["optional-dependencies"]
+    assert "desktop" in extras, "pyproject 缺少 desktop extra，文档承诺的托盘增强装不到"
+    declared = " ".join(extras["desktop"]).lower()
+    for pkg in ("pystray", "pillow"):
+        assert pkg in declared, f"desktop extra 未声明 {pkg}"
+
+    core = " ".join(data["project"]["dependencies"]).lower()
+    for pkg in ("pystray", "pillow"):
+        assert pkg not in core, f"{pkg} 是可选增强，不能进核心依赖（缺它也要能跑）"
 
 
 def _parse_docs_05_test_list(doc_text: str) -> set[str]:
