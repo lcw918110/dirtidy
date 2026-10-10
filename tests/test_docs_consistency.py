@@ -21,6 +21,7 @@ DOCS_04 = DOCS / "04-规则包说明.md"
 DOCS_05 = DOCS / "05-测试与验收.md"
 DOCS_07 = DOCS / "07-规模与性能.md"
 TESTS_DIR = REPO_ROOT / "tests"
+FIXTURE_SRC = TESTS_DIR / "fixtures" / "sample_workspace"
 PACKS_DIR = REPO_ROOT / "src" / "dirtidy" / "rules" / "packs"
 DEFAULT_YAML = PACKS_DIR / "default.yaml"
 SERVER_WORKSPACE_YAML = PACKS_DIR / "server_workspace.yaml"
@@ -258,6 +259,62 @@ def test_gitattributes_pins_fixture_bytes() -> None:
         f"fixture 必须关掉换行符转换（-text），实际 attribute 为 {out!r}。"
         "注意 Git 是**后面的规则覆盖前面的**，-text 那条必须写在文件末尾。"
     )
+
+
+def test_fixture_workspace_survives_fresh_clone() -> None:
+    """夹具必须能只靠仓库重建，不能依赖「开发机磁盘上恰好留着」。
+
+    回归背景：`__pycache__/mod.pyc` 被 .gitignore 的 `__pycache__/` 屏蔽，
+    `empty_dir` 是空目录 git 根本存不下。开发机磁盘上恰好留着这两样 → 本地全绿；
+    CI 全新克隆没有 → 6 个 job 一起红。这类问题本地怎么跑都看不出来，
+    所以必须显式守：用 `git ls-files` 还原「克隆后能看到什么」，
+    再确认 conftest 补齐之后测试真正依赖的条目一个不缺。
+    """
+    if shutil.which("git") is None:
+        pytest.skip("环境里没有 git，无法枚举仓库内容")
+
+    proc = subprocess.run(
+        ["git", "ls-files", "tests/fixtures/sample_workspace"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"git ls-files 不可用: {proc.stderr.strip()}")
+
+    prefix = "tests/fixtures/sample_workspace/"
+    tracked = {
+        line.strip()[len(prefix) :]
+        for line in proc.stdout.splitlines()
+        if line.strip().startswith(prefix)
+    }
+
+    # 测试实际依赖的条目：扫描/规则/隔离区/重复组各取一个代表
+    needed = {
+        "app.log",
+        "dup_a.txt",
+        "payload.txt",
+        "payload.zip",
+        "zero.txt",
+        "keep/readme.md",
+        "node_modules/pkg/index.js",
+        "sub/dup_b.txt",
+        "empty_dir",
+        "__pycache__/mod.pyc",
+    }
+
+    # 这两样 git 天生存不下，所以 conftest 的补齐是**必需**的、不是冗余代码
+    assert "empty_dir" in needed - tracked, "空目录 git 存不下，应由 conftest 补"
+    assert "__pycache__/mod.pyc" in needed - tracked, (
+        "`__pycache__/` 被 .gitignore 屏蔽，该夹具文件应由 conftest 补"
+    )
+
+    for rel in sorted(needed):
+        assert (FIXTURE_SRC / rel).exists(), (
+            f"{rel} 不存在——既没进 git、conftest 也没补上。"
+            "本地会因为磁盘残留而绿，CI 全新克隆必红。"
+        )
 
 
 def _parse_docs_05_test_list(doc_text: str) -> set[str]:

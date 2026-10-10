@@ -139,7 +139,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 221 个用例
+pytest -q            # 222 个用例
 ruff check src tests
 mypy
 ```
