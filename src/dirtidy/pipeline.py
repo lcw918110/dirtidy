@@ -30,17 +30,11 @@ from dirtidy.rules.protect import compile_protect_rules, evaluate_protect
 from dirtidy.scan.scanner import scan_tree
 
 
-def _protect_checker(pack: dict[str, Any], extra: list[dict[str, Any]]):
-    """返回一个「相对路径是否受保护」的判定函数，供隔离后扫尾使用。"""
-    matchers = compile_protect_rules(effective_protect_rules(pack, extra))
-    return lambda rel: evaluate_protect(matchers, rel, True) is not None
-
-
 def protect_guard(pack: dict[str, Any], extra: list[dict[str, Any]]):
-    """返回完整形态的保护判定器：命中给出 (规则 ID, 原因)，否则 None。
+    """返回保护判定器：命中给出 (规则 ID, 原因)，否则 None。
 
-    与 `_protect_checker` 的差别只在「要不要知道是哪条规则保护的」——
-    拦截受保护后代时需要把规则 ID 与原因写进 protection.json 供审计追溯。
+    全项目**只有这一个**保护判定器来源。拦截受保护后代时要把规则 ID 与原因写进
+    protection.json 供审计追溯，因此返回完整元组而不是 bool。
     """
     matchers = compile_protect_rules(effective_protect_rules(pack, extra))
     return lambda rel, is_dir: evaluate_protect(matchers, rel, is_dir)
@@ -109,8 +103,11 @@ def create_run(
         candidates.extend(find_extracted_archives(root, items))
 
     hash_map = select_hashes(items, {h.path for h in hits})
-    is_protected = _protect_checker(pack, extra_protect)
+    guard = protect_guard(pack, extra_protect)
     quarantined: list[dict] = []
+    #: 命中目录因子树内含受保护路径而被拦下的记录。它们既不是「规则没命中」也不是
+    #: 「用户保留」，必须与 match.protected 一起进审计，否则用户看到目录没被搬走却查不到原因。
+    descendant_blocks: list[dict] = []
     if apply and hits:
         qdir.mkdir(parents=True, exist_ok=True)
         entries = quarantine_hits(
@@ -119,16 +116,21 @@ def create_run(
             hits,
             qdir,
             rdir / "quarantine_manifest.json",
+            is_protected=guard,
             known_hashes=hash_map,
+            blocked=descendant_blocks,
         )
         if pack_sweeps_empty(pack):
             entries = sweep_empty_dirs(
-                root, run_id, qdir, rdir / "quarantine_manifest.json", is_protected=is_protected
+                root, run_id, qdir, rdir / "quarantine_manifest.json", is_protected=guard
             )
         quarantined = [e.to_dict() for e in entries]
     else:
         write_json(rdir / "pending_auto_hits.json", [h.to_dict() for h in hits])
         write_json(rdir / "quarantine_manifest.json", [])
+
+    protection = [p.to_dict() for p in match.protected]
+    protection.extend(descendant_blocks)
 
     meta = {
         "run_id": run_id,
@@ -139,7 +141,12 @@ def create_run(
         "applied": apply,
         "protect": list(protect or ()),
         "auto_hits": len(hits),
+        # 命中路径**自身**受保护（扫描阶段即可判定）
         "protected_blocked": len(match.protected),
+        # 命中目录因子树内含受保护路径被整条拦下。只有真正执行隔离时才知道
+        # （需要实盘遍历子树），因此单列一项而不是并进上一项——否则
+        # `scan` 与 `scan --apply` 会为同一棵树报出不同的 protected_blocked。
+        "protected_blocked_by_descendant": len(descendant_blocks),
         "protected_downgraded": len(match.downgraded),
     }
     write_run_bundle(
@@ -150,7 +157,7 @@ def create_run(
         candidates=[c.to_dict() for c in candidates],
         quarantined=quarantined,
         errors=errors,
-        protection=[p.to_dict() for p in match.protected],
+        protection=protection,
         protect_policy=match.protect_policy,
     )
     return meta
@@ -295,7 +302,7 @@ def apply_pending_rules(
         append_protection_records(rdir, descendant_blocks)
     if pack_sweeps_empty(pack):
         entries = sweep_empty_dirs(
-            root, run_id, qdir, manifest, is_protected=_protect_checker(pack, extra)
+            root, run_id, qdir, manifest, is_protected=guard
         )
     pending_path.unlink(missing_ok=True)
 

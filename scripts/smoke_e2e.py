@@ -89,7 +89,7 @@ def main() -> int:
     rdir = WS / ".dirtidy" / "runs" / run_id
 
     print("\n--- meta ---")
-    for k in ("auto_hits", "protected_blocked", "protected_downgraded"):
+    for k in ("auto_hits", "protected_blocked", "protected_blocked_by_descendant", "protected_downgraded"):
         print(f"  {k} = {meta.get(k)}")
 
     print("\n--- protection.json（想动但被保护拦下） ---")
@@ -131,14 +131,25 @@ def main() -> int:
             failed.append(f"应被隔离却还在: {rel}")
 
     print("\n--- 保护拦下明细（protection.json） ---")
-    for r in json.loads((rdir / "protection.json").read_text(encoding="utf-8")):
+    records = json.loads((rdir / "protection.json").read_text(encoding="utf-8"))
+    for r in records:
         print(f"  {r['path']:<28} {r.get('blocked_at', '-'):<22} 保护={r['protect_rule_id']}")
-    blocked_at = {
-        r.get("blocked_at")
-        for r in json.loads((rdir / "protection.json").read_text(encoding="utf-8"))
-    }
-    if "protected_descendant" not in blocked_at:
-        failed.append("protection.json 缺少 protected_descendant 记录（目录含受保护后代未留痕）")
+    by_path = {r["path"]: r for r in records}
+    nm = by_path.get("app/node_modules")
+    if nm is None or nm.get("blocked_at") != "protected_descendant":
+        failed.append("app/node_modules 未被记为 protected_descendant（目录含受保护后代未整条拦下）")
+    elif nm.get("blocking_path") != "app/node_modules/.npmrc":
+        # 拦下还不够，必须能查到是哪个文件挡的，否则用户无从复核
+        failed.append(f"拦下记录未点名挡路文件：blocking_path={nm.get('blocking_path')!r}")
+
+    # 第三条执行路径：scan --apply 同样要复核保护（这里曾绕过，把 .npmrc 一并端走）
+    print("\n--- scan --apply（第三条执行路径） ---")
+    applied = json.loads(run("scan", str(WS), "--rules", "server_workspace", "--apply"))
+    print(f"  protected_blocked_by_descendant = {applied.get('protected_blocked_by_descendant')}")
+    if applied.get("protected_blocked_by_descendant", 0) < 1:
+        failed.append("scan --apply 未报告 protected_blocked_by_descendant（第三条路径未复核保护）")
+    if not (WS / "app/node_modules/.npmrc").exists():
+        failed.append("scan --apply 把 node_modules/.npmrc 端走了")
 
     print(f"\n审计摘要：{rdir / 'audit.md'}")
     if not args.keep:

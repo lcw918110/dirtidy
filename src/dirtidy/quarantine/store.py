@@ -20,6 +20,16 @@ from dirtidy.scan.scanner import file_sha256
 ProtectCheck = Callable[[str, bool], "tuple[str, str] | None"]
 
 
+def nothing_protected(rel: str, is_dir: bool) -> None:
+    """「此处不可能有受保护内容」的显式声明。
+
+    只在一处使用：`sweep_empty_dirs` 处理的是**当场确认为空**的目录，子树里没有东西，
+    漏洞在数学上不成立。写成有名字的函数而不是 `lambda: None`，是为了让这个例外
+    在调用处一眼可见——而不是看起来像「忘了传」。
+    """
+    return None
+
+
 def drop_covered_descendants(hits: Sequence[RuleHit]) -> list[RuleHit]:
     """丢弃「已被某个目录命中覆盖」的后代条目。
 
@@ -155,6 +165,7 @@ def plan_quarantine(
                         "blocking_path": descendant,
                         "intended_rule_id": hit.rule_id,
                         "intended_action": "auto_quarantine",
+                        "blocked_auto": True,
                         "is_dir": hit.is_dir,
                         "blocked_at": "protected_descendant",
                     }
@@ -191,17 +202,21 @@ def quarantine_hits(
     quarantine_dir: Path,
     manifest_path: Path,
     *,
+    is_protected: ProtectCheck,
     known_hashes: dict[str, str | None] | None = None,
-    is_protected: ProtectCheck | None = None,
     blocked: list[dict] | None = None,
 ) -> list[QuarantineEntry]:
     """将命中项移入隔离区并追加/更新 manifest。
 
     known_hashes: 可选 path→sha256（来自 inventory），避免移动后再算。
 
-    is_protected: 传入保护判定器时，先按 `plan_quarantine` 过滤一遍——命中目录
-      若子树内含受保护路径则整条拦下，其后代条目也不再单独搬。传入 `blocked`
-      可把拦下明细回传给调用方写进 protection.json（不传则只静默丢弃，不推荐）。
+    **is_protected 是必填的**，不是可选优化。曾经它是可选的，于是 `scan --apply`
+    这条调用路径漏传，`node_modules/.env`、`node_modules/id_rsa` 被连锅端走——
+    必填让「忘了传」变成 TypeError，而不是一次静默的保护失效。
+    确实不存在受保护内容的场景（`sweep_empty_dirs` 的空目录）显式传 `nothing_protected`。
+
+    命中目录若子树内含受保护路径则整条拦下，其后代条目也不再单独搬。传入 `blocked`
+    可把拦下明细回传给调用方写进 protection.json（不传则只静默丢弃，不推荐）。
 
     过滤后剩余的条目已互不嵌套，但**仍按路径深度倒序处理**：隔离区内已有同名
     残留时会走 `.__qN` 改名，顺序固定能让产物可复现。
@@ -340,7 +355,7 @@ def sweep_empty_dirs(
     manifest_path: Path,
     *,
     max_rounds: int = 8,
-    is_protected: Callable[[str], bool] | None = None,
+    is_protected: ProtectCheck | None = None,
 ) -> list[QuarantineEntry]:
     """隔离子项后，多轮把新变成空的父目录也隔离，直到稳定或达到轮数上限。
 
@@ -366,7 +381,7 @@ def sweep_empty_dirs(
         for rel in sorted(frontier):
             if rel in done or _is_skipped_rel(rel):
                 continue
-            if is_protected is not None and is_protected(rel):
+            if is_protected is not None and is_protected(rel, True) is not None:
                 continue
             p = root / rel
             try:
@@ -389,9 +404,16 @@ def sweep_empty_dirs(
             for rel in empties
         ]
         before = len(_read_manifest(manifest_path))
-        # 这里不传 is_protected：命中项都是**当场确认为空**的目录，子树里没有东西，
-        # 「目录命中带走受保护后代」的漏洞在此不成立。
-        quarantine_hits(root, run_id, hits, quarantine_dir, manifest_path)
+        # 命中项都是**当场确认为空**的目录，子树里没有东西，
+        # 「目录命中带走受保护后代」在此不成立——显式声明而不是漏传。
+        quarantine_hits(
+            root,
+            run_id,
+            hits,
+            quarantine_dir,
+            manifest_path,
+            is_protected=is_protected or nothing_protected,
+        )
         after = len(_read_manifest(manifest_path))
         done.update(empties)
         frontier = {p for p in (_parent_rel(r) for r in empties) if p and p not in done}

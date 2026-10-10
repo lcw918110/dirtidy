@@ -421,6 +421,42 @@ def test_unreadable_subtree_blocks_dir_hit(tmp_path: Path, monkeypatch: pytest.M
     assert any(r.get("protect_rule_id") == "__unreadable__" for r in records)
 
 
+def test_scan_apply_blocks_dir_with_protected_descendant(tmp_path: Path) -> None:
+    """`scan --apply` 是第三条执行路径，同样不得把受保护后代端走。
+
+    它直接调 quarantine_hits，曾经绕过 plan_quarantine——同一次漏洞修好 apply-rules 与
+    apply-decisions 之后，这条路径仍然是破的。
+    """
+    root, _ = _ws(tmp_path)
+    _seed_dep_dir_with_secrets(root)
+
+    meta = create_run(root, rules="default", quick=True, apply=True)
+
+    assert (root / "node_modules" / ".env").exists(), "scan --apply 也不得带走受保护后代"
+    assert (root / "node_modules" / "id_rsa").exists()
+    assert meta["protected_blocked_by_descendant"] == 1
+    assert meta["protected_blocked"] == 0, "自身未受保护，不该并进这一项"
+
+    records = read_json(run_dir(root, meta["run_id"]) / "protection.json")
+    assert any(r.get("blocked_at") == "protected_descendant" for r in records)
+    assert read_json(run_dir(root, meta["run_id"]) / "quarantine_manifest.json") == []
+
+
+def test_quarantine_hits_requires_protection_check() -> None:
+    """`is_protected` 必须是必填参数——这是防住「调用方忘了传」的机制本身。
+
+    它曾经是可选的，于是 `scan --apply` 漏传，`node_modules/.env` 与 `node_modules/id_rsa`
+    被连锅端走。必填让「忘了传」变成 TypeError，而不是一次静默的保护失效。
+    """
+    import inspect
+
+    from dirtidy.quarantine.store import quarantine_hits
+
+    param = inspect.signature(quarantine_hits).parameters["is_protected"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty, "有默认值就等于可以漏传"
+
+
 # -------------------------------------------- 目录与其内文件重复命中
 #
 # `src/__pycache__` 与 `src/__pycache__/main.cpython-311.pyc` 会同时命中规则。

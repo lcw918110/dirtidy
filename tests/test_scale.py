@@ -216,7 +216,7 @@ def test_sweep_only_touches_ancestors_of_quarantined(tmp_path: Path) -> None:
     manifest = rdir / "quarantine_manifest.json"
     manifest.write_text("[]", encoding="utf-8")
     qdir = quarantine_root(root, meta["run_id"])
-    from dirtidy.quarantine.store import quarantine_hits
+    from dirtidy.quarantine.store import nothing_protected, quarantine_hits
 
     quarantine_hits(
         root,
@@ -224,6 +224,8 @@ def test_sweep_only_touches_ancestors_of_quarantined(tmp_path: Path) -> None:
         [RuleHit(path="tree/inner/x.txt", rule_id="t", action="auto_quarantine", reason="t")],
         qdir,
         manifest,
+        # 本用例只关心扫尾边界，场景里没有受保护路径——显式声明而不是漏传。
+        is_protected=nothing_protected,
     )
     entries = sweep_empty_dirs(root, meta["run_id"], qdir, manifest)
 
@@ -242,6 +244,11 @@ def test_sweep_respects_protection(tmp_path: Path) -> None:
     from dirtidy.models import RuleHit, quarantine_root, run_dir
     from dirtidy.quarantine.store import quarantine_hits
 
+    def keepme_protected(rel: str, is_dir: bool) -> tuple[str, str, str] | None:
+        if rel.startswith("keepme"):
+            return (rel, "t", "测试用保护规则")
+        return None
+
     meta = create_run(root, rules="default", quick=True, apply=False)
     rdir = run_dir(root, meta["run_id"])
     manifest = rdir / "quarantine_manifest.json"
@@ -253,9 +260,10 @@ def test_sweep_respects_protection(tmp_path: Path) -> None:
         [RuleHit(path="keepme/inner/x.txt", rule_id="t", action="auto_quarantine", reason="t")],
         qdir,
         manifest,
+        is_protected=keepme_protected,
     )
     entries = sweep_empty_dirs(
-        root, meta["run_id"], qdir, manifest, is_protected=lambda rel: rel.startswith("keepme")
+        root, meta["run_id"], qdir, manifest, is_protected=keepme_protected
     )
     # 返回的是完整清单；关键是被保护目录没有被追加进去
     assert {e.original_path for e in entries} == {"keepme/inner/x.txt"}

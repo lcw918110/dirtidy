@@ -57,6 +57,9 @@ dirtidy serve --root /path/to/root --port 8765
 **整条命中会被拦下**并记入 `protection.json`。少了后者，保护会被「搬走它的父目录」绕开——
 `node_modules` 命中 dep 规则时，`node_modules/.env`、`node_modules/id_rsa` 就会被一并端走。
 
+这份判定覆盖**所有会搬文件的执行路径**（`apply-rules` / `apply-decisions` / `scan --apply`），且共用同一份实现；
+判定器是必填参数，调用方漏传会直接报错，而不是让保护静默失效。
+
 `dirtidy explain <路径>` 与真实执行共用同一份判定，因此不会出现「解释说要动、实际不动」：
 
 ```
@@ -81,8 +84,8 @@ dirtidy scan /path/to/root --protect path/to/keep --protect another/dir
 - 默认隔离，不直接抹盘；`purge-quarantine --yes` 才彻底删隔离副本
 - 重复文件与解压残留（hash 对照）默认仅候选
 - 外发模型默认只传安全摘要，且 `summary.max_targets` 给单次外发封顶
-- `apply-rules` 在搬文件前会用当前生效的保护清单**再复核一遍**，防止 pending 被改过就绕过保护
-- `apply-decisions`（人工决策隔离）同样复核保护清单，两条执行路径语义一致；受保护项被拦下并记入 `protection.json`
+- `apply-rules`（规则隔离）、`apply-decisions`（人工决策隔离）、`scan --apply` 三条路径在搬文件前都用同一份保护判定**再复核一遍**，语义一致；受保护项被拦下并记入 `protection.json`
+- 这份判定器的参数是必填的：调用方漏传会直接报错，保护不会因「忘了传」而静默失效
 - 命中自动隔离的目录若子树内含受保护路径（或子树不可读），整条拦下、不执行隔离——保护不能被「搬走父目录」绕开
 - 目录与其内文件同时命中时只保留父目录一条，避免清单出现永远还原不回去的记录
 - 0 字节文件不参与重复组判定（否则 `.env`/`id_rsa` 这类空文件会被凑成「内容相同」诱导误操作）
@@ -103,7 +106,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 124 个用例
+pytest -q            # 130 个用例
 ruff check src tests
 mypy
 ```
