@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from dirtidy.models import read_json, run_dir
+from dirtidy.models import read_json, run_dir, write_json
 from dirtidy.pipeline import apply_pending_rules, create_run
 from dirtidy.quarantine.store import purge_entries
 from dirtidy.settings import (
@@ -294,11 +294,23 @@ def test_purge_entries_refuses_paths_outside_state_dir(workspace: Path, tmp_path
     rdir = run_dir(workspace, "run-x")
     rdir.mkdir(parents=True, exist_ok=True)
     manifest = rdir / "quarantine_manifest.json"
-    manifest.write_text(
-        '[{"id": "e1", "original_path": "precious.txt", '
-        f'"quarantine_path": "{outside}", "rule_id": null, "reason": "", '
-        '"size": 0, "sha256": null, "quarantined_at": "", "is_dir": false}]',
-        encoding="utf-8",
+    # 用 write_json 而不是手拼字符串：Windows 路径带反斜杠（C:\Users\...），
+    # 手拼进 JSON 会变成非法转义（Invalid \escape），本机看不出来、只在 Windows 上红。
+    write_json(
+        manifest,
+        [
+            {
+                "id": "e1",
+                "original_path": "precious.txt",
+                "quarantine_path": str(outside),
+                "rule_id": None,
+                "reason": "",
+                "size": 0,
+                "sha256": None,
+                "quarantined_at": "",
+                "is_dir": False,
+            }
+        ],
     )
 
     assert purge_entries(workspace, manifest, purge_all=True) == []
