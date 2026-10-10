@@ -13,8 +13,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from dirtidy.decision.store import apply_decisions, save_decisions
+from dirtidy.explain import explain_path
 from dirtidy.models import Decision, quarantine_root, read_json, run_dir, state_root
-from dirtidy.pipeline import apply_pending_rules
+from dirtidy.pipeline import apply_pending_rules, protect_rules_from_paths
 
 
 class DecisionsBody(BaseModel):
@@ -108,5 +109,31 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
         _run_path(run_id)
         keep = body.keep_paths if body else []
         return apply_pending_rules(default_root, run_id, keep=keep)
+
+    @app.get("/api/runs/{run_id}/explain")
+    def get_explain(run_id: str, path: str) -> dict:
+        """解释某路径为什么被/不被动。
+
+        复用 CLI `explain` 的同一套判定（进而复用 engine 的匹配与条件函数），
+        并直接返回 `to_text()` 的文本 —— 网页与命令行看到的是同一份解释，
+        不会出现「网页说的和 CLI 说的不一样」。
+        """
+        rdir = _run_path(run_id)
+        meta = read_json(rdir / "meta.json")
+        try:
+            exp = explain_path(
+                default_root,
+                path,
+                rules=meta.get("rules") or "default",
+                extra_protect_rules=protect_rules_from_paths(meta.get("protect") or []),
+            )
+        except ValueError as e:
+            raise HTTPException(400, f"路径非法: {e}") from e
+        return {
+            "path": exp.path,
+            "decision": exp.decision,
+            "decision_label": exp.to_dict()["decision_label"],
+            "text": exp.to_text(),
+        }
 
     return app

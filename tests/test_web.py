@@ -138,3 +138,47 @@ def test_web_page_has_pending_and_protection_sections() -> None:
     assert "renderPending" in js
     assert "renderProtection" in js
     assert "apply-rules" in js
+
+
+def test_web_explain_returns_cli_text(workspace: Path) -> None:
+    """网页的「为什么？」与 CLI explain 必须是同一份解释。
+
+    复用 explain_path 并直接返回 to_text()，避免出现「网页说的和命令行说的不一样」。
+    """
+    from dirtidy.explain import explain_path
+
+    meta = create_run(workspace, rules="default", quick=True, apply=False)
+    app = create_app(default_root=workspace, default_run_id=meta["run_id"])
+    client = TestClient(app)
+
+    resp = client.get(f"/api/runs/{meta['run_id']}/explain", params={"path": "node_modules"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["decision"] == "auto_quarantine"
+    assert body["path"] == "node_modules"
+
+    expected = explain_path(workspace, "node_modules", rules="default").to_text()
+    assert body["text"] == expected, "网页解释应与 CLI explain 逐字一致"
+    assert "dep_node_modules" in body["text"]
+
+
+def test_web_explain_rejects_escaping_path(workspace: Path) -> None:
+    """解释接口不得成为绕过路径不变量的缝。"""
+    meta = create_run(workspace, rules="default", quick=True, apply=False)
+    app = create_app(default_root=workspace, default_run_id=meta["run_id"])
+    client = TestClient(app)
+
+    resp = client.get(f"/api/runs/{meta['run_id']}/explain", params={"path": "../outside/x"})
+    assert resp.status_code == 400
+
+
+def test_web_page_has_explain_dialog() -> None:
+    """静态守护：审阅页要有解释弹窗与「为什么？」入口。"""
+    static = Path(__file__).resolve().parent.parent / "src" / "dirtidy" / "web" / "static"
+    html = (static / "index.html").read_text(encoding="utf-8")
+    assert 'id="explainDlg"' in html
+    assert 'id="explainBody"' in html
+
+    js = (static / "app.js").read_text(encoding="utf-8")
+    assert "whyButton" in js
+    assert "/explain?path=" in js

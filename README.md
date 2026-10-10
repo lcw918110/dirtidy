@@ -37,7 +37,8 @@ dirtidy analyze /path/to/root <run_id> --mock
 # dirtidy analyze /path/to/root <run_id> --config models.yaml
 # 也可放 ./models.yaml 或 ~/.config/dirtidy/models.yaml，或用 DIRTIDY_CONFIG 指定
 
-# 本地 Web 审阅：可看「待自动隔离」并勾选保留后直接执行，也能看受保护清单与已隔离清单
+# 本地 Web 审阅：可看「待自动隔离」并勾选保留后直接执行，也能看受保护清单与已隔离清单；
+# 每条路径旁有「为什么？」按钮，弹窗与 CLI explain 是同一份解释
 dirtidy serve --root /path/to/root --port 8765
 ```
 
@@ -86,7 +87,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 111 个用例
+pytest -q            # 114 个用例
 ruff check src tests
 mypy
 ```

@@ -30,6 +30,33 @@ function el(tag, { text, cls, attrs } = {}) {
   return node;
 }
 
+/* 「为什么？」按钮：弹窗展示该路径的规则判定明细。
+   后端直接返回 CLI explain 的 to_text()，所以网页与命令行看到的是同一份解释。 */
+function whyButton(path) {
+  const btn = el("button", {
+    cls: "why",
+    text: "为什么？",
+    attrs: { type: "button", title: "看这条路径的规则判定明细" },
+  });
+  btn.addEventListener("click", () => explain(path));
+  return btn;
+}
+
+async function explain(path) {
+  const dlg = document.getElementById("explainDlg");
+  document.getElementById("explainPath").textContent = path;
+  document.getElementById("explainBody").textContent = "加载中…";
+  dlg.showModal();
+  try {
+    const data = await api(
+      `/api/runs/${currentRun}/explain?path=${encodeURIComponent(path)}`,
+    );
+    document.getElementById("explainBody").textContent = data.text;
+  } catch (e) {
+    document.getElementById("explainBody").textContent = String(e);
+  }
+}
+
 /* 待自动隔离：规则已经判定要搬走、但还没执行的项。
    这是「不误删」的终审入口——没有它，用户在网页上根本看不到规则打算动什么。 */
 function renderPending(data) {
@@ -52,6 +79,7 @@ function renderPending(data) {
 
     const tdPath = document.createElement("td");
     tdPath.appendChild(el("code", { text: h.path }));
+    tdPath.appendChild(whyButton(h.path));
     tr.appendChild(tdPath);
 
     tr.appendChild(el("td", { text: h.rule_id }));
@@ -83,6 +111,7 @@ function renderProtection(data) {
     if (r.intended_rule_id) {
       line.appendChild(document.createTextNode(`；原本想动它的是 ${r.intended_rule_id}`));
     }
+    line.appendChild(whyButton(r.path));
     box.appendChild(line);
   }
   if (policy.length) {
@@ -108,6 +137,7 @@ function renderQuarantined(data) {
     line.appendChild(el("code", { text: e.original_path }));
     line.appendChild(document.createTextNode(` → ${e.quarantine_path}`));
     if (e.rule_id) line.appendChild(document.createTextNode(`（${e.rule_id}）`));
+    line.appendChild(whyButton(e.original_path));
     box.appendChild(line);
   }
 }
@@ -137,6 +167,7 @@ function render(data) {
 
     const tdPath = document.createElement("td");
     tdPath.appendChild(el("code", { text: path }));
+    tdPath.appendChild(whyButton(path));
     tr.appendChild(tdPath);
 
     tr.appendChild(el("td", { text: sug ? "ai" : "candidate" }));
@@ -277,5 +308,13 @@ document.getElementById("reloadBtn").onclick = () =>
 document.getElementById("saveBtn").onclick = save;
 document.getElementById("applyBtn").onclick = apply;
 document.getElementById("applyRulesBtn").onclick = applyRules;
+document.getElementById("explainClose").onclick = () =>
+  document.getElementById("explainDlg").close();
 document.getElementById("runSelect").onchange = (e) => loadRun(e.target.value);
-loadRuns().catch((e) => setStatus(String(e)));
+/* 深链：?explain=<相对路径> 直接打开该路径的解释弹窗，方便把「为什么判它」发给别人 */
+loadRuns()
+  .then(() => {
+    const target = new URLSearchParams(location.search).get("explain");
+    if (target) explain(target);
+  })
+  .catch((e) => setStatus(String(e)));
