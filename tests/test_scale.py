@@ -14,17 +14,25 @@ from pathlib import Path
 import pytest
 
 from dirtidy.hashing import content as hashing_content
-from dirtidy.hashing.content import find_duplicate_groups, iter_archive_members
+from dirtidy.hashing.content import (
+    archive_member_sizes,
+    candidate_duplicate_sizes,
+    find_duplicate_groups,
+    iter_archive_members,
+    probe_archives,
+)
 from dirtidy.models import (
     InventoryItem,
     iter_json_array,
+    read_json,
+    run_dir,
     select_hashes,
     write_json_stream,
 )
 from dirtidy.pipeline import create_run
 from dirtidy.quarantine.store import sweep_empty_dirs
 from dirtidy.scan.hashcache import HashCache
-from dirtidy.scan.scanner import hash_cache_path, scan_tree
+from dirtidy.scan.scanner import hash_cache_path, hash_items, scan_tree
 
 DAY = 86400.0
 
@@ -355,3 +363,118 @@ def test_inventory_write_is_streaming_and_readable(tmp_path: Path) -> None:
     rows = list(iter_json_array(inv))
     assert {r["path"] for r in rows} >= {"keep", "keep/a.txt", "old.log"}
     assert json.loads(inv.read_text(encoding="utf-8")) == rows
+
+
+# ------------------------------------------------------------- 选择性 hash
+
+def test_candidate_duplicate_sizes_excludes_unique_and_empty() -> None:
+    """只有「同 size 至少两份且非 0 字节」的 size 才值得算 hash。
+
+    0 字节被排除：`find_duplicate_groups` 本就跳过空文件，算它的 hash 纯属浪费。
+    """
+    items = [
+        InventoryItem(path="a", is_dir=False, size=100, mtime=1.0),
+        InventoryItem(path="b", is_dir=False, size=100, mtime=1.0),
+        InventoryItem(path="c", is_dir=False, size=200, mtime=1.0),  # 独一份，不可能重复
+        InventoryItem(path="e1", is_dir=False, size=0, mtime=1.0),
+        InventoryItem(path="e2", is_dir=False, size=0, mtime=1.0),
+        InventoryItem(path="d", is_dir=True, size=0, mtime=1.0),  # 目录不参与
+    ]
+    assert candidate_duplicate_sizes(items) == {100}
+
+
+def test_probe_archives_reports_decompressed_member_sizes(tmp_path: Path) -> None:
+    """成员要带上**解压后**字节数——它是与磁盘 `st_size` 同一把尺子。"""
+    import zipfile
+
+    archive = tmp_path / "p.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("inner.txt", "hello-world")  # 11 字节
+
+    items = [InventoryItem(path="p.zip", is_dir=False, size=archive.stat().st_size, mtime=1.0)]
+    probes = probe_archives(tmp_path, items)
+    assert len(probes) == 1
+    assert probes[0].error is None and not probes[0].too_large
+    assert [(n, s) for n, s, _d in probes[0].members] == [("inner.txt", 11)]
+    assert archive_member_sizes(probes) == {11}
+
+
+def test_hash_items_only_hashes_selected_sizes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """只算选中的 size：独一份 size 的文件一个字节都不读。
+
+    这是「按 size 分桶」省下的 IO——也是它唯一的正确性前提，必须守住。
+    """
+    from dirtidy.scan import scanner
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "dup_a.txt").write_text("same-content", encoding="utf-8")
+    (root / "dup_b.txt").write_text("same-content", encoding="utf-8")
+    (root / "unique.txt").write_text("a-different-length-content", encoding="utf-8")
+
+    hashed: list[str] = []
+    real = scanner.file_sha256
+
+    def spy(path: Path, chunk_size: int = 1024 * 1024) -> str:
+        hashed.append(path.name)
+        return real(path, chunk_size)
+
+    monkeypatch.setattr(scanner, "file_sha256", spy)
+
+    items, _errors = scan_tree(root, quick=True)
+    sizes = candidate_duplicate_sizes(items)
+    assert sizes == {12}, "只有 dup_a/dup_b 的 size 该入选"
+    hash_items(root, items, sizes=sizes, use_hash_cache=False)
+
+    assert sorted(hashed) == ["dup_a.txt", "dup_b.txt"]
+    by_path = {it.path: it.sha256 for it in items}
+    assert by_path["dup_a.txt"] == by_path["dup_b.txt"] is not None
+    assert by_path["unique.txt"] is None, "独一份 size 的文件不该被算 hash"
+
+
+def test_selective_hash_still_detects_duplicates_end_to_end(tmp_path: Path) -> None:
+    """编排层不再全量算 hash，但重复组必须照旧检出。"""
+    root = tmp_path / "ws"
+    (root / "sub").mkdir(parents=True)
+    (root / "dup_a.txt").write_text("same-content", encoding="utf-8")
+    (root / "sub" / "dup_b.txt").write_text("same-content", encoding="utf-8")
+    (root / "lonely.txt").write_text("nothing-else-has-this-length", encoding="utf-8")
+
+    meta = create_run(root, rules="default", quick=False, apply=False)
+    cands = read_json(run_dir(root, meta["run_id"]) / "candidates.json")
+    dups = [c for c in cands if c["kind"] == "duplicate_group"]
+    assert len(dups) == 1
+    assert sorted(dups[0]["paths"]) == ["dup_a.txt", "sub/dup_b.txt"]
+
+    inv = {r["path"]: r["sha256"] for r in iter_json_array(run_dir(root, meta["run_id"]) / "inventory.json")}
+    assert inv["lonely.txt"] is None, "独一份 size 的文件不该被算 hash"
+    assert inv["dup_a.txt"] is not None
+
+
+def test_selective_hash_does_not_miss_archive_extraction(tmp_path: Path) -> None:
+    """归档残留检测**不会**因为只算一部分 hash 而漏检。
+
+    关键推理：能与归档成员对上的磁盘文件必然同 size，所以「按成员 size 选文件算 hash」
+    是全量算的超集级等价。这条用例就是把它钉死。
+    """
+    import zipfile
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    payload = root / "payload.txt"
+    payload.write_text("extracted-payload-content", encoding="utf-8")
+    # 另一个 size 完全不同的文件：它不该被算 hash，也不该影响判定
+    (root / "noise.bin").write_bytes(b"\x00" * 4096)
+    with zipfile.ZipFile(root / "payload.zip", "w") as zf:
+        zf.write(payload, "payload.txt")
+
+    meta = create_run(root, rules="default", quick=False, apply=False)
+    rdir = run_dir(root, meta["run_id"])
+    cands = read_json(rdir / "candidates.json")
+    extracted = [c for c in cands if c["rule_id"] == "archive_hash_match"]
+    assert extracted, f"归档残留应当被检出，实际候选：{[c['kind'] for c in cands]}"
+    assert extracted[0]["meta"]["matched"] >= 1
+
+    inv = {r["path"]: r["sha256"] for r in iter_json_array(rdir / "inventory.json")}
+    assert inv["payload.txt"] is not None, "成员 size 决定它必须被算 hash"
+    assert inv["noise.bin"] is None, "4096 字节独一份，不该被算 hash"

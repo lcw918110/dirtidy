@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from dirtidy.audit.writer import write_audit_md, write_run_bundle
-from dirtidy.hashing.content import find_duplicate_groups, find_extracted_archives
+from dirtidy.hashing.content import (
+    archive_member_sizes,
+    candidate_duplicate_sizes,
+    find_duplicate_groups,
+    find_extracted_archives,
+    probe_archives,
+)
 from dirtidy.models import (
     RuleHit,
     iter_json_array,
@@ -27,7 +33,7 @@ from dirtidy.rules.engine import (
     protect_policy,
 )
 from dirtidy.rules.protect import compile_protect_rules, evaluate_protect
-from dirtidy.scan.scanner import scan_tree
+from dirtidy.scan.scanner import hash_items, scan_tree
 
 
 def protect_guard(pack: dict[str, Any], extra: list[dict[str, Any]]):
@@ -92,15 +98,24 @@ def create_run(
 
     extra_protect = protect_rules_from_paths(protect)
 
-    items, errors = scan_tree(root, quick=quick, workers=workers, on_progress=on_progress)
+    # 先只扫元数据（路径 / size / mtime），不算 hash——要等归档成员解析出来，
+    # 才知道磁盘上哪些文件真的需要 hash（见下面 sizes 的构造）。
+    items, errors = scan_tree(root, quick=True, workers=workers, on_progress=on_progress)
     pack = load_rule_pack(rules)
     match = match_rules(root, items, pack, extra_protect_rules=extra_protect)
 
     hits = match.hits
     candidates = list(match.candidates)
     if not quick:
+        # 归档解析提到 hash 之前：成员的「解压后字节数」决定磁盘上哪些文件值得算 hash。
+        probes = probe_archives(root, items)
+        # 只算「size 出现 ≥2 次」与「size 命中某归档成员」的文件。重复组要求同 size，
+        # 归档残留对照也要求同 size（同内容必然同字节数），因此没被算到的文件
+        # 既不可能重复、也不可能与归档成员相同——结论与全量算一致。见 docs/07。
+        sizes = candidate_duplicate_sizes(items) | archive_member_sizes(probes)
+        errors.extend(hash_items(root, items, sizes=sizes, workers=workers, on_progress=on_progress))
         candidates.extend(find_duplicate_groups(items))
-        candidates.extend(find_extracted_archives(root, items))
+        candidates.extend(find_extracted_archives(root, items, probes=probes))
 
     hash_map = select_hashes(items, {h.path for h in hits})
     guard = protect_guard(pack, extra_protect)

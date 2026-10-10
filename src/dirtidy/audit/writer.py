@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from dirtidy.models import write_json, write_json_stream
+from dirtidy.models import write_json, write_json_stream, write_text_atomic
 
 
 def _fmt_values(values: list[Any], limit: int = 8) -> str:
@@ -97,7 +97,7 @@ def write_audit_md(
             lines.append(f"- `{e.get('path')}`: {e.get('error')}")
     lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines), encoding="utf-8")
+    write_text_atomic(path, "\n".join(lines))
 
 
 def write_run_bundle(

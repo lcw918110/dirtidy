@@ -2,7 +2,10 @@
 
 跨平台本地目录整理工具：YAML 规则清理（默认进隔离区）→ 可配置模型分析残留文件 → 本地 Web / CLI 人工终审留删与归类。
 
-过程文档见 [docs/](docs/01-愿景与范围.md)；缺口清单见 [docs/06-已知缺口与后续.md](docs/06-已知缺口与后续.md)。
+定位是**单机、单用户的后台程序**：可以无人值守长期跑（`watch` 定时扫描、`desktop` 常驻起服务），
+也可以被中断后重跑。稳定性与性能按后台程序的标准要求，见 [docs/08-稳定性与性能设计.md](docs/08-稳定性与性能设计.md)。
+
+过程文档见 [docs/](docs/01-愿景与范围.md)；缺口与待办见 [docs/06-已知缺口与后续.md](docs/06-已知缺口与后续.md)。
 
 ## 安装
 
@@ -106,11 +109,15 @@ dirtidy scan /path/to/root --protect path/to/keep --protect another/dir
 - 自动隔离可在执行前人工保留（CLI `--keep 相对路径` / 网页勾选「保留」）；保留项本轮不动并记入 `protection.json`，可审计追溯
 - `watch`（定时监视）**只扫描不执行**：源码里不存在任何执行入口，并有静态守护用例守着这条不变量
 - `desktop` 只是启动器，不改变任何行为；就绪判定走 `GET /api/health`，避免「端口通了但页面打不开」
-- 非 quick 扫描将文件 `path + size + mtime + sha256` 缓存在 `<root>/.dirtidy/hash_cache.sqlite`；处理敏感目录时可加 `--quick` 跳过内容 hash 与缓存
+- 非 quick 扫描只对**必要文件**算内容 hash（size 有重复的、或 size 命中归档成员的），
+  结果与全量算等价但 IO 小一个量级；算过的结果缓存在 `<root>/.dirtidy/hash_cache.sqlite`。
+  处理敏感目录时可加 `--quick` 完全跳过内容 hash 与缓存
+- 产物写盘是**原子**的（临时文件 + 重命名）：进程被杀也不会留下半个 JSON
+- 隔离中途被打断时，**已经搬走**的条目一定在清单里有记录，`quarantine-restore` 能还原回去
 
 ## 规模
 
-面向百万文件 / T 级数据设计，500 万条条目常驻内存预算约 1.55 GB（上限 2 GB）。
+面向百万文件 / T 级数据设计，500 万条条目常驻内存约 **1.07 GB**（上限 2 GB）。
 内存预算模型、采用的手段与实测数据见 [docs/07-规模与性能.md](docs/07-规模与性能.md)；
 
 ```bash
@@ -121,7 +128,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 157 个用例
+pytest -q            # 168 个用例
 ruff check src tests
 mypy
 ```

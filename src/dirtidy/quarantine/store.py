@@ -235,48 +235,56 @@ def quarantine_hits(
 
     ordered = sorted(executable, key=lambda h: h.path.count("/"), reverse=True)
 
-    for hit in ordered:
-        if hit.path in seen_orig:
-            continue
-        try:
-            src = resolve_under(root, hit.path)
-            dest = _safe_dest(quarantine_dir, hit.path)
-        except ValueError:
-            # 越界路径（外部输入的 .. / 绝对路径）直接跳过，不搬动任何根外文件
-            continue
-        if not src.exists():
-            continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dest))
-        size = 0
-        digest = known_hashes.get(hit.path)
-        if dest.is_file():
-            size = dest.stat().st_size
-            if digest is None:
-                try:
-                    digest = file_sha256(dest)
-                except OSError:
-                    digest = None
-        state = root / ".dirtidy"
-        try:
-            qrel = str(dest.relative_to(state))
-        except ValueError:
-            qrel = str(dest)
-        entry = QuarantineEntry(
-            id=uuid.uuid4().hex[:12],
-            original_path=hit.path,
-            quarantine_path=qrel,
-            rule_id=hit.rule_id,
-            reason=hit.reason,
-            size=size,
-            sha256=digest,
-            quarantined_at=utc_now_iso(),
-            is_dir=hit.is_dir,
-        )
-        entries.append(entry)
-        seen_orig.add(hit.path)
+    try:
+        for hit in ordered:
+            if hit.path in seen_orig:
+                continue
+            try:
+                src = resolve_under(root, hit.path)
+                dest = _safe_dest(quarantine_dir, hit.path)
+            except ValueError:
+                # 越界路径（外部输入的 .. / 绝对路径）直接跳过，不搬动任何根外文件
+                continue
+            if not src.exists():
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dest))
+            size = 0
+            digest = known_hashes.get(hit.path)
+            if dest.is_file():
+                size = dest.stat().st_size
+                if digest is None:
+                    try:
+                        digest = file_sha256(dest)
+                    except OSError:
+                        digest = None
+            state = root / ".dirtidy"
+            try:
+                qrel = str(dest.relative_to(state))
+            except ValueError:
+                qrel = str(dest)
+            entry = QuarantineEntry(
+                id=uuid.uuid4().hex[:12],
+                original_path=hit.path,
+                quarantine_path=qrel,
+                rule_id=hit.rule_id,
+                reason=hit.reason,
+                size=size,
+                sha256=digest,
+                quarantined_at=utc_now_iso(),
+                is_dir=hit.is_dir,
+            )
+            entries.append(entry)
+            seen_orig.add(hit.path)
+    finally:
+        # 即使中途抛错（含 Ctrl-C 的 KeyboardInterrupt），也必须把**已经搬走**的条目落盘。
+        # 否则会出现「文件已离开原位、清单里却查不到」——用户不知道它去哪了，也无从还原，
+        # 这是本工具最不能出的错。写在 finally 里，成功路径也仍然只写一次。
+        #
+        # 覆盖范围：Python 异常与 SIGINT。被 SIGKILL / OOM 硬杀仍会丢掉最后几条，
+        # 彻底解决需要 append-only 日志，已登记在 `docs/08-稳定性与性能设计.md`。
+        write_json(manifest_path, [e.to_dict() for e in entries])
 
-    write_json(manifest_path, [e.to_dict() for e in entries])
     return entries
 
 

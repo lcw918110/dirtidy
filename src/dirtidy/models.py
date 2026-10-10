@@ -172,9 +172,28 @@ class Decision:
         return asdict(self)
 
 
-def write_json(path: Path, data: Any) -> None:
+def write_text_atomic(path: Path, text: str) -> None:
+    """先写同目录临时文件，再 `os.replace` 原子替换。
+
+    后台运行时进程可能被 SIGKILL / OOM 杀掉。直接 `write_text` 会留下**截断**的 JSON，
+    下一次读取就报「JSON 数组未闭合」——一次崩溃连带毁掉整个 run 的产物，且看不出原因。
+    同目录内的 `os.replace` 在 POSIX 与 Windows 上都是原子的：读者要么看到旧的完整文件，
+    要么看到新的完整文件，不会看到半个。
+
+    临时文件名带 pid，避免两个进程互相踩。进程硬杀会留下一个 `.名字.pid.tmp`，
+    但它落在 `.dirtidy/` 里——扫描器本来就跳过该目录，不会污染 inventory。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def write_json(path: Path, data: Any) -> None:
+    write_text_atomic(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
 def write_json_stream(path: Path, rows: Iterable[Any]) -> int:
@@ -183,17 +202,25 @@ def write_json_stream(path: Path, rows: Iterable[Any]) -> int:
     为什么不用 `json.dumps([...])`：几百万条记录时，`[x.to_dict() for x in items]`
     会再构造一份等长的 dict 列表（5M 条约 1.2 GB 峰值），而流式写法只保留一行。
     输出是合法 JSON 数组，同时「一行一条」便于 grep 与 diff。
+
+    仍然**先写临时文件再原子替换**：流式写盘要几十秒到几分钟，这段时间里进程被杀
+    的概率比一次性写高得多，更需要保证读到的永远是完整文件。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     count = 0
-    with path.open("w", encoding="utf-8") as f:
-        f.write("[\n")
-        for row in rows:
-            if count:
-                f.write(",\n")
-            f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
-            count += 1
-        f.write("\n]\n" if count else "]\n")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write("[\n")
+            for row in rows:
+                if count:
+                    f.write(",\n")
+                f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+                count += 1
+            f.write("\n]\n" if count else "]\n")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
     return count
 
 
