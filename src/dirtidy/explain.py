@@ -12,10 +12,12 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import asdict, dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
-from dirtidy.models import InventoryItem, resolve_under
+from dirtidy.models import InventoryItem, RuleHit, resolve_under
+from dirtidy.quarantine.store import find_protected_descendants
 from dirtidy.rules.engine import (
     PathIndex,
     effective_protect_rules,
@@ -37,6 +39,7 @@ MAX_EXPLAIN_DESCENDANTS = 20_000
 
 DECISION_LABELS = {
     "protected": "受保护——不会被自动隔离，也不进候选",
+    "blocked_by_descendant": "整条拦下——子树内含受保护路径，apply-rules 时不会隔离",
     "auto_quarantine": "自动隔离——apply-rules / --apply 时会移入隔离区",
     "candidate_only": "仅候选——需要人工或模型确认",
     "no_match": "无规则命中——保持原样",
@@ -81,6 +84,11 @@ class Explanation:
     protected: bool = False
     protect_rule_id: str | None = None
     protect_reason: str | None = None
+    #: 「整条拦下」时说明是子树里的哪条路径、被哪条保护规则挡住。
+    #: 只说「子树里有受保护内容」等于没给责任人，用户查不到该动哪个文件。
+    blocking_path: str = ""
+    blocking_rule_id: str | None = None
+    blocking_reason: str = ""
     protect_policy: list[dict[str, Any]] = field(default_factory=list)
     traces: list[RuleTrace] = field(default_factory=list)
     enumerated_descendants: int = 0
@@ -107,6 +115,13 @@ class Explanation:
         if self.decision == "protected":
             lines.append(f"  保护规则: {self.protect_rule_id}（{self.protect_reason}）")
             lines.append(f"  本来想动它的规则: {self.rule_id}（{self.reason}）")
+        elif self.decision == "blocked_by_descendant":
+            # 路径自身不受保护，是它**里面**的受保护路径导致整条不能动。
+            # 必须说清是哪个文件挡的，否则用户只会看到「目录没被搬走」却无从下手。
+            lines.append(f"  本来想动它的规则: {self.rule_id}（{self.reason}）")
+            if self.blocking_path:
+                lines.append(f"  子树内的受保护路径: {self.blocking_path}")
+            lines.append(f"  保护规则: {self.blocking_rule_id}（{self.blocking_reason}）")
         elif self.rule_id:
             lines.append(f"  规则: {self.rule_id}")
             lines.append(f"  原因: {self.reason}")
@@ -308,6 +323,30 @@ def explain_path(
         explanation.decision = "auto_quarantine"
         explanation.rule_id = hit.rule_id
         explanation.reason = hit.reason
+        if is_dir:
+            # 命中目录但子树里躺着受保护路径时，apply 会**整条拦下**（见 plan_quarantine）。
+            # 解释若还报「会隔离」，用户就会照着一份错的说明做决策——
+            # 这与「网页说的和 CLI 说的不一样」是同一类问题，只是发生在解释与执行之间。
+            blocks = find_protected_descendants(
+                root,
+                [
+                    RuleHit(
+                        path=rel,
+                        rule_id=hit.rule_id,
+                        action="auto_quarantine",
+                        reason=hit.reason,
+                        is_dir=True,
+                    )
+                ],
+                partial(evaluate_protect, matchers),
+            )
+            found = blocks.get(rel)
+            if found is not None:
+                blocking_path, blocking_rule_id, blocking_reason = found
+                explanation.decision = "blocked_by_descendant"
+                explanation.blocking_path = blocking_path
+                explanation.blocking_rule_id = blocking_rule_id
+                explanation.blocking_reason = blocking_reason
     elif cand is not None:
         explanation.decision = "candidate_only"
         explanation.rule_id = cand.rule_id

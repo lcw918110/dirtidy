@@ -48,6 +48,63 @@ def test_explain_auto_quarantine(tmp_path: Path) -> None:
     assert "dep_node_modules" in exp.to_text()
 
 
+def test_explain_dir_with_protected_descendant_matches_execution(tmp_path: Path) -> None:
+    """命中目录但子树里有受保护文件时，explain 必须与 apply-rules 给同一个结论。
+
+    曾经 explain 只看路径本身，报「会隔离」而 apply 实际整条拦下——用户照着错的说明
+    做决策。这与「网页说的和 CLI 说的不一样」是同一类问题，只是发生在解释与执行之间。
+    """
+    root = _ws(tmp_path)
+    (root / "node_modules" / "pkg").mkdir(parents=True)
+    (root / "node_modules" / "pkg" / "index.js").write_text("x", encoding="utf-8")
+    (root / "node_modules" / ".npmrc").write_text("TOKEN=abc", encoding="utf-8")
+
+    exp = explain_path(root, "node_modules")
+    assert exp.decision == "blocked_by_descendant"
+    assert exp.blocking_path == "node_modules/.npmrc"
+    assert exp.blocking_rule_id == "builtin_protect_secret_files"
+    assert exp.rule_id == "dep_node_modules", "仍要说清本来是哪条规则想动它"
+
+    meta = create_run(root, rules="default", quick=True, apply=False)
+    preview = apply_pending_rules(root, meta["run_id"], dry_run=True)
+    assert preview["would_quarantine"] == 0
+    assert "node_modules" in preview["blocked_paths"]
+    assert exp.decision != "auto_quarantine", "解释与执行不能给出相反结论"
+
+
+def test_explain_blocked_by_descendant_text_names_the_blocker(tmp_path: Path) -> None:
+    """只说「子树里有受保护内容」查不到责任人，必须点名是哪个文件挡的。"""
+    root = _ws(tmp_path)
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "id_rsa").write_text("PRIVATE KEY", encoding="utf-8")
+
+    text = explain_path(root, "node_modules").to_text()
+    assert "整条拦下" in text
+    assert "node_modules/id_rsa" in text
+    assert "builtin_protect_secret_files" in text
+
+
+def test_explain_dir_without_protected_descendant_still_auto(tmp_path: Path) -> None:
+    """反向守卫：目录里没有受保护内容时仍报「会隔离」，不能因噎废食。"""
+    root = _ws(tmp_path)
+    (root / "node_modules" / "pkg").mkdir(parents=True)
+    (root / "node_modules" / "pkg" / "index.js").write_text("x", encoding="utf-8")
+
+    exp = explain_path(root, "node_modules")
+    assert exp.decision == "auto_quarantine"
+    assert exp.blocking_path == ""
+
+
+def test_explain_file_hit_skips_descendant_check(tmp_path: Path) -> None:
+    """文件命中不该走「子树含受保护后代」这条判定——它没有子树。"""
+    root = _ws(tmp_path)
+    (root / "old.tmp").write_text("junk", encoding="utf-8")
+
+    exp = explain_path(root, "old.tmp")
+    assert exp.decision == "auto_quarantine"
+    assert exp.blocking_path == ""
+
+
 def test_explain_protected_beats_rule(tmp_path: Path) -> None:
     """自定义规则想动 id_rsa，内置保护清单必须压过去，并在解释里说清楚。"""
     root = _ws(tmp_path)

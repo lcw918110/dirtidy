@@ -22,7 +22,9 @@
   <section>
     <h2>待自动隔离（规则命中）</h2>
     <p class="hint">
-      勾选「保留」的项本轮不会被隔离，并登记进 protection.json 便于审计追溯。
+      这里是<strong>规则命中</strong>的项，执行时未必都会搬走：勾选「保留」的项本轮不动；
+      某项的子树里若躺着受保护路径（如 <code>node_modules/.npmrc</code>），会被整条拦下。
+      两者都登记进 protection.json 便于审计追溯。点路径旁的「为什么？」看逐条判定。
     </p>
     <table>
       <thead>

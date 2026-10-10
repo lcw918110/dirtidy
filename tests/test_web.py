@@ -142,6 +142,9 @@ def test_web_page_has_pending_and_protection_sections() -> None:
     assert "pendingRows" in html
     assert "applyRulesBtn" in html
     assert 'id="protection"' in html
+    # 待隔离列表是「规则命中」而非「一定会搬」——执行时可能被保留或被保护整条拦下，
+    # 页面上要说清，否则用户看到按钮写着 N 项却一件没动会以为出错。
+    assert "整条拦下" in html
 
     js = (static / "app.js").read_text(encoding="utf-8")
     assert "renderPending" in js

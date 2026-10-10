@@ -39,44 +39,52 @@ def drop_covered_descendants(hits: Sequence[RuleHit]) -> list[RuleHit]:
 
 def _first_protected_under(
     root: Path, base: Path, is_protected: ProtectCheck
-) -> tuple[str, str] | None:
-    """在 base 子树里找第一条受保护路径；找不到返回 None。发现即早退。"""
+) -> tuple[str, str, str] | None:
+    """在 base 子树里找第一条受保护路径。
+
+    返回 (受保护路径, 保护规则 ID, 原因)；找不到返回 None。发现即早退。
+    带上具体路径是为了让解释与 protection.json 能说出「是哪个文件挡的」——
+    「子树里有受保护内容」这种说法查不到责任人。
+    """
     unreadable: list[OSError] = []
     for dirpath, dirnames, filenames in os.walk(base, onerror=unreadable.append):
         here = Path(dirpath)
         for name, is_dir in ((n, True) for n in dirnames):
-            guard = _check_rel(root, here / name, is_dir, is_protected)
-            if guard is not None:
-                return guard
+            found = _check_rel(root, here / name, is_dir, is_protected)
+            if found is not None:
+                return found
         for name, is_dir in ((n, False) for n in filenames):
-            guard = _check_rel(root, here / name, is_dir, is_protected)
-            if guard is not None:
-                return guard
+            found = _check_rel(root, here / name, is_dir, is_protected)
+            if found is not None:
+                return found
     if unreadable:
         # 读不动的子树无法证明「里面没有受保护内容」。保护优先于清理，
         # 因此宁可不动，也不赌它安全。
-        return ("__unreadable__", f"子树有 {len(unreadable)} 处不可读，无法确认其中没有受保护内容")
+        return ("", "__unreadable__", f"子树有 {len(unreadable)} 处不可读，无法确认其中没有受保护内容")
     return None
 
 
 def _check_rel(
     root: Path, path: Path, is_dir: bool, is_protected: ProtectCheck
-) -> tuple[str, str] | None:
+) -> tuple[str, str, str] | None:
     try:
         rel = path.relative_to(root).as_posix()
     except ValueError:
         return None
     if not rel or rel == ".":
         return None
-    return is_protected(rel, is_dir)
+    guard = is_protected(rel, is_dir)
+    if guard is None:
+        return None
+    return (rel, guard[0], guard[1])
 
 
 def find_protected_descendants(
     root: Path,
     hits: Sequence[RuleHit],
     is_protected: ProtectCheck,
-) -> dict[str, tuple[str, str]]:
-    """找出「子树内含受保护路径」的目录命中 → {命中路径: (保护规则 ID, 原因)}。
+) -> dict[str, tuple[str, str, str]]:
+    """找出「子树内含受保护路径」的目录命中 → {命中路径: (受保护路径, 保护规则 ID, 原因)}。
 
     保护清单的最高优先级语义是「命中即永不自动隔离」。只校验命中路径**本身**是不够的：
     一个命中目录会把内部受保护的密钥 / 版本库文件一起搬走，保护就形同虚设。
@@ -87,8 +95,11 @@ def find_protected_descendants(
       * 快照会过期——扫描之后新增的文件不在里面；
       * `.git` / `.dirtidy` 这类被扫描器跳过的目录本就不在快照里。
     代价只与「将要被搬走的目录」大小成正比，且发现第一条即早退，不随全树规模增长。
+
+    **不设枚举上限**：这里的结论会被当作「会不会拦下」的依据，截断就等于给出错误答案。
+    调用方（含 explain）应当接受这个成本——它与真正执行一次该目录的隔离相当。
     """
-    blocks: dict[str, tuple[str, str]] = {}
+    blocks: dict[str, tuple[str, str, str]] = {}
     for hit in hits:
         if not hit.is_dir or hit.path in blocks:
             continue
@@ -127,15 +138,21 @@ def plan_quarantine(
         if blocks:
             rest: list[RuleHit] = []
             for hit in survivors:
-                guard = blocks.get(hit.path)
-                if guard is None:
+                found = blocks.get(hit.path)
+                if found is None:
                     rest.append(hit)
                     continue
+                descendant, protect_rule_id, protect_reason = found
                 blocked.append(
                     {
                         "path": hit.path,
-                        "protect_rule_id": guard[0],
-                        "protect_reason": f"子树内含受保护路径（{guard[1]}）",
+                        "protect_rule_id": protect_rule_id,
+                        "protect_reason": (
+                            f"子树内含受保护路径 {descendant}（{protect_reason}）"
+                            if descendant
+                            else f"子树内含受保护内容（{protect_reason}）"
+                        ),
+                        "blocking_path": descendant,
                         "intended_rule_id": hit.rule_id,
                         "intended_action": "auto_quarantine",
                         "is_dir": hit.is_dir,

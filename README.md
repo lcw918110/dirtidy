@@ -57,6 +57,16 @@ dirtidy serve --root /path/to/root --port 8765
 **整条命中会被拦下**并记入 `protection.json`。少了后者，保护会被「搬走它的父目录」绕开——
 `node_modules` 命中 dep 规则时，`node_modules/.env`、`node_modules/id_rsa` 就会被一并端走。
 
+`dirtidy explain <路径>` 与真实执行共用同一份判定，因此不会出现「解释说要动、实际不动」：
+
+```
+$ dirtidy explain . node_modules
+结论: 整条拦下——子树内含受保护路径，apply-rules 时不会隔离
+  本来想动它的规则: dep_node_modules（Node / 前端依赖目录，可用包管理器重建）
+  子树内的受保护路径: node_modules/.npmrc
+  保护规则: builtin_protect_secret_files（密钥 / 凭据文件，误删不可恢复）
+```
+
 想额外护住某个目录：
 
 ```bash
