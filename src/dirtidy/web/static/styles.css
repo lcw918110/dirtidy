@@ -3,6 +3,8 @@
   --ink: #1c1b19;
   --line: #d9d2c5;
   --accent: #2f5d50;
+  --danger: #9b2c2c;
+  --muted: #6b6459;
 }
 * { box-sizing: border-box; }
 body {
@@ -12,33 +14,133 @@ body {
   color: var(--ink);
   padding: 1.5rem;
 }
-h1 { margin: 0 0 0.25rem; letter-spacing: 0.04em; }
-.toolbar { display: flex; gap: 0.75rem; align-items: end; margin: 1rem 0; flex-wrap: wrap; }
+h1 { margin: 0; letter-spacing: 0.04em; }
+h2 { margin: 0 0 0.6rem; font-size: 1.15rem; }
+h3 { margin: 1.4rem 0 0.4rem; font-size: 1rem; }
+header { margin-bottom: 0.5rem; }
+.brand { display: flex; align-items: baseline; gap: 0.7rem; flex-wrap: wrap; }
+.tag { color: var(--muted); font-size: 0.85rem; }
+#meta { margin: 0.4rem 0 0; font-size: 0.88rem; }
+#stateDir { margin: 0.15rem 0 0; }
+
+/* ------------------------------- 分页导航 ------------------------------- */
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--line);
+  margin: 1rem 0 1.2rem;
+}
+.tabbtn {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.95rem;
+}
+.tabbtn:hover { color: var(--accent); }
+.tabbtn[aria-selected="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.tab { display: none; }
+.tab.active { display: block; }
+
+/* ------------------------------- 通用元件 ------------------------------- */
+.toolbar { display: flex; gap: 0.75rem; align-items: end; margin: 0.6rem 0 1rem; flex-wrap: wrap; }
+.panel {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.6);
+  padding: 0.9rem 1rem;
+  margin-bottom: 1rem;
+}
 button {
   background: var(--accent);
   color: white;
   border: 0;
   padding: 0.45rem 0.9rem;
   cursor: pointer;
+  border-radius: 3px;
 }
-table { width: 100%; border-collapse: collapse; background: rgba(255,255,255,0.7); }
-th, td { border-bottom: 1px solid var(--line); padding: 0.45rem; text-align: left; font-size: 0.92rem; }
-select, input { padding: 0.3rem; }
-#status { background: #1c1b19; color: #d7e7df; padding: 0.75rem; min-height: 2rem; }
-.dup-group { border: 1px solid var(--line); padding: 0.75rem; margin-bottom: 0.5rem; background: rgba(255,255,255,0.65); }
-.hint { color: #6b6459; font-size: 0.85rem; margin: 0.25rem 0 0.5rem; }
-.rowline { padding: 0.25rem 0; font-size: 0.92rem; border-bottom: 1px solid var(--line); }
-.rowline code { background: rgba(47,93,80,0.08); padding: 0.05rem 0.25rem; }
+button.danger { background: var(--danger); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
+table { width: 100%; border-collapse: collapse; background: rgba(255,255,255,0.7); }
+th, td { border-bottom: 1px solid var(--line); padding: 0.45rem; text-align: left; font-size: 0.9rem; }
+th { font-weight: 600; color: var(--muted); }
+select, input, textarea { padding: 0.3rem; font: inherit; border: 1px solid var(--line); background: #fff; }
+/* ------------------------------- 状态条 ------------------------------- */
+/* 底部固定的一条人话提示。以前是页面末尾一个黑色 <pre> 直接 JSON.stringify，
+   用户看不懂、而且位于所有分页之外，每页都会漏出来。 */
+.statusbar {
+  position: fixed;
+  left: 50%;
+  bottom: 1rem;
+  transform: translateX(-50%);
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  max-width: min(760px, 92vw);
+  padding: 0.55rem 0.7rem 0.55rem 0.95rem;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 6px;
+  background: #fffdf8;
+  color: var(--ink);
+  box-shadow: 0 6px 20px rgba(28, 27, 25, 0.16);
+  font-size: 0.88rem;
+}
+.statusbar[hidden] { display: none; }
+.statusbar.error { border-left-color: var(--danger); }
+.statusbar.error #status { color: var(--danger); }
+#status { flex: 1; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+#statusClose {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.15rem;
+  line-height: 1;
+  padding: 0 0.25rem;
+  cursor: pointer;
+}
+#statusClose:hover { color: var(--danger); }
+.dup-group { border: 1px solid var(--line); padding: 0.75rem; margin-bottom: 0.5rem; background: rgba(255,255,255,0.65); }
+.hint { color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0 0.6rem; line-height: 1.55; }
+.rowline { padding: 0.25rem 0; font-size: 0.9rem; border-bottom: 1px solid var(--line); }
+.rowline code, td code { background: rgba(47,93,80,0.08); padding: 0.05rem 0.25rem; }
 .why {
   background: transparent;
   color: var(--accent);
   border: 1px solid var(--line);
   padding: 0.1rem 0.45rem;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   margin-left: 0.45rem;
   border-radius: 3px;
 }
+
+/* -------------------------------- 表单 -------------------------------- */
+.form label { display: block; margin-bottom: 0.7rem; font-size: 0.9rem; }
+.form label.inline { display: flex; align-items: center; gap: 0.45rem; }
+.form input[type="text"], .form input[type="number"], .form input[type="password"] { width: min(420px, 100%); display: block; margin-top: 0.2rem; }
+.form textarea { width: min(520px, 100%); display: block; margin-top: 0.2rem; font-family: inherit; }
+#openaiFields, #ollamaFields { border-left: 3px solid var(--line); padding-left: 0.8rem; margin-bottom: 0.8rem; }
+
+/* -------------------------------- 卡片 -------------------------------- */
+.cards { display: flex; gap: 0.8rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.card {
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.75);
+  padding: 0.7rem 1rem;
+  min-width: 8.5rem;
+}
+.card .k { color: var(--muted); font-size: 0.78rem; }
+.card .v { font-size: 1.35rem; font-weight: 600; letter-spacing: 0.02em; }
+.card .s { color: var(--muted); font-size: 0.76rem; }
+
+/* ------------------------------- 弹窗 ------------------------------- */
 dialog { border: 1px solid var(--line); border-radius: 6px; padding: 0; max-width: min(920px, 92vw); }
 .dlg-head {
   display: flex;

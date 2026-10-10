@@ -215,10 +215,13 @@ class OpenAICompatibleProvider(ModelProvider):
     def __init__(self, cfg: dict[str, Any]):
         self.base_url = cfg.get("base_url", "").rstrip("/")
         env = cfg.get("api_key_env", "DIRTIDY_API_KEY")
-        self.api_key = os.environ.get(env, "")
+        # 显式写的 api_key 优先（供网页设置页填写）；否则回落到环境变量。
+        # 两条路都走不通才报错——报错信息要同时点出这两个来源，否则用户
+        # 明明在网页里填了密钥，却只被告知「环境变量未设置」，无从下手。
+        self.api_key = str(cfg.get("api_key") or "").strip() or os.environ.get(env, "")
         self.model = cfg.get("model", "gpt-4o-mini")
         if not self.api_key:
-            raise RuntimeError(f"环境变量 {env} 未设置")
+            raise RuntimeError(f"未配置模型密钥：请在设置页填写，或设置环境变量 {env}")
 
     def analyze_batch(self, summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         payload = {

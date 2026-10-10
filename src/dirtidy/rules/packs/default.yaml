@@ -6,6 +6,10 @@ version: 2
 # 1) 会丢历史的（版本控制、密钥、CI 配置、项目标记）一律 protect，永不自动隔离；
 # 2) 能一条命令重建的（依赖目录、缓存、字节码、临时文件）才 auto_quarantine；
 # 3) 说不准的（build/dist/bin/压缩包/本地库）只进候选，交人工。
+#
+# 可选字段 `purge_safe: true`：标记「重建成本为零、确定无用」的规则。
+# 它**不改变默认行为**（默认一律只进隔离区），只是给界面一个推荐标记：
+# 用户可在界面上把这类规则设为「隔离后立即物理删除」，省下隔离区的占用。
 rules:
   # ============================ 保护：最高优先级 ============================
   - id: protect_vcs
@@ -125,6 +129,7 @@ rules:
 
   - id: dep_python_cache
     action: auto_quarantine
+    purge_safe: true
     match:
       type: name_glob
       is_dir: true
@@ -190,6 +195,7 @@ rules:
 
   - id: dep_os_metadata
     action: auto_quarantine
+    purge_safe: true
     match:
       type: file_name
       names: [".DS_Store", "Thumbs.db", "desktop.ini"]
@@ -197,6 +203,7 @@ rules:
 
   - id: dep_editor_swap
     action: auto_quarantine
+    purge_safe: true
     match:
       type: name_glob
       globs: ["*~", "#*#", "*.swp", "*.swo", "*.orig", "*.rej"]
@@ -204,6 +211,7 @@ rules:
 
   - id: dep_python_bytecode
     action: auto_quarantine
+    purge_safe: true
     match:
       type: suffix
       suffixes: [".pyc", ".pyo", ".pyd"]

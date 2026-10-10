@@ -15,11 +15,25 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any, Protocol
 
 from dirtidy.pipeline import protect_rules_from_paths
 from dirtidy.quarantine.store import drop_covered_descendants
 from dirtidy.rules.engine import load_rule_pack, match_rules
 from dirtidy.scan.scanner import scan_tree
+
+
+class StopSignal(Protocol):
+    """停止信号（`threading.Event` 同形）。
+
+    只要求 `is_set` / `wait` 两个方法，这样 watch 不必 import threading——
+    CLI 直接跑时传 None，等待就退化成普通 sleep；Web 后台线程传 Event，
+    停止时能立刻醒来，不必等满一个 interval。
+    """
+
+    def is_set(self) -> bool: ...
+
+    def wait(self, timeout: float | None = None) -> bool: ...
 
 
 def scan_hits(
@@ -112,28 +126,53 @@ def run_watch(
     protect: Sequence[str] = (),
     max_rounds: int | None = None,
     notify_enabled: bool = True,
+    stop_event: StopSignal | None = None,
+    on_round: Callable[[dict[str, Any]], None] | None = None,
     _sleep: Callable[[float], None] = time.sleep,
     _scan: Callable[..., set[str]] = scan_hits,
 ) -> int:
-    """定期扫描并报告变化，直到 Ctrl-C 或跑满 max_rounds。
+    """定期扫描并报告变化，直到 Ctrl-C、跑满 max_rounds 或被 stop_event 叫停。
 
     首轮必然把所有命中报成「新增」——这是有意的：用户启动监视时就想知道
     「现在有哪些待处理」，而不是等第二次扫描才有反馈。
+
+    stop_event 非 None 时，等待改用 `stop_event.wait(timeout)`：界面点「停止」
+    能立刻退出，而不是傻等满一个 interval（默认 30 分钟，用户会以为按钮坏了）。
+    on_round 每轮结束回调一次，供 Web 侧记录进度。
     """
     previous: set[str] = set()
     rounds = 0
     print(f"开始监视 {root}，每 {interval_minutes:g} 分钟扫描一次（只扫描，不执行任何隔离）。")
     print("按 Ctrl-C 停止。\n")
+
+    def _wait(seconds: float) -> None:
+        if stop_event is not None:
+            stop_event.wait(seconds)
+        else:
+            _sleep(seconds)
+
     try:
         while max_rounds is None or rounds < max_rounds:
+            if stop_event is not None and stop_event.is_set():
+                break
             current = _scan(root, rules=rules, quick=quick, protect=protect)
             added, removed = diff_hits(previous, current)
             _report(root, added, removed, len(current), notify_enabled=notify_enabled)
             previous = current
             rounds += 1
+            if on_round is not None:
+                on_round(
+                    {
+                        "rounds": rounds,
+                        "total": len(current),
+                        "added": sorted(added),
+                        "removed": sorted(removed),
+                        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                )
             if max_rounds is not None and rounds >= max_rounds:
                 break
-            _sleep(interval_minutes * 60)
+            _wait(interval_minutes * 60)
     except KeyboardInterrupt:
         print("\n已停止监视。")
     return 0

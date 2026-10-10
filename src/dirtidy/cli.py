@@ -46,8 +46,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 
 def cmd_apply_rules(args: argparse.Namespace) -> int:
+    from dirtidy.settings import load_auto_purge_rules
+
     root = _resolve_root(args.root)
-    result = apply_pending_rules(root, args.run_id, dry_run=args.dry_run, keep=args.keep or ())
+    # 「隔离后立即物理删除」的规则清单由状态目录里的 settings.json 提供，
+    # 界面与命令行读的是同一份——否则会出现「网页里开了直删、命令行跑却只隔离」。
+    result = apply_pending_rules(
+        root,
+        args.run_id,
+        dry_run=args.dry_run,
+        keep=args.keep or (),
+        purge_rule_ids=load_auto_purge_rules(root),
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

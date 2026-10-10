@@ -25,7 +25,12 @@ from dirtidy.models import (
     utc_now_iso,
     write_json,
 )
-from dirtidy.quarantine.store import plan_quarantine, quarantine_hits, sweep_empty_dirs
+from dirtidy.quarantine.store import (
+    plan_quarantine,
+    purge_entries,
+    quarantine_hits,
+    sweep_empty_dirs,
+)
 from dirtidy.rules.engine import (
     effective_protect_rules,
     load_rule_pack,
@@ -195,12 +200,33 @@ def append_protection_records(rdir: Path, records: list[dict]) -> list[dict]:
     return merged
 
 
+def append_purged_records(rdir: Path, records: list[dict]) -> list[dict]:
+    """把「隔离后立即物理删除」的记录并进 purged_directly.json，保留历史。
+
+    单独留一份审计是必要的：这些文件已经**不在磁盘上了**，隔离清单里也不会再有它们，
+    不另记一笔，事后就完全查不到「这条是谁删的、什么时候删的」。
+    """
+    path = rdir / "purged_directly.json"
+    existing = read_json(path) if path.exists() else []
+    if not isinstance(existing, list):
+        existing = []
+    known = {r.get("id") for r in existing if isinstance(r, dict)}
+    merged = list(existing)
+    for r in records:
+        if r.get("id") not in known:
+            merged.append(r)
+            known.add(r.get("id"))
+    write_json(path, merged)
+    return merged
+
+
 def apply_pending_rules(
     root: Path,
     run_id: str,
     *,
     dry_run: bool = False,
     keep: Collection[str] = (),
+    purge_rule_ids: Collection[str] = (),
 ) -> dict[str, Any]:
     """对已有 run 的 pending_auto_hits 执行隔离，并刷新 audit.md。
 
@@ -212,6 +238,11 @@ def apply_pending_rules(
     keep 是「人工保留」的路径集合（Web 审阅页勾选、或调用方指定）。这些路径
     本轮不隔离，并登记进 protection.json（protect_rule_id=user_kept）以便审计追溯
     —— 「用户不想动它」和「内置清单保护它」在结果上是同一件事。
+
+    purge_rule_ids 是「隔离后立即物理删除」的规则 id 集合（默认空 = 只隔离）。
+    走的是同一条路径：**先搬进隔离区、再删**，而不是规则直接 unlink。这样保护判定
+    与清单写入一个环节都不少，删除明细另记 purged_directly.json。命中项仍会先
+    经过 `keep` 与保护复核——「直删」不会成为绕过保护的缝。
     """
     root = root.resolve()
     rdir = run_dir(root, run_id)
@@ -222,11 +253,26 @@ def apply_pending_rules(
     hits = [RuleHit(**h) for h in read_json(pending_path)]
 
     keep_set = {str(p).strip().strip("/") for p in (keep or ()) if str(p).strip()}
+    if keep_set:
+        # 保留一个**目录**时，它子树内的命中也不该动。否则：子项被搬走 → 目录变空
+        # → `sweep_empty_dirs` 再把空壳收走。用户勾的「保留」等于没生效，而且事后
+        # 能在隔离区里找到子项、却找不到那个目录，很难向人解释。
+        keep_set = keep_set | {
+            child.path
+            for hit in hits
+            if hit.is_dir and hit.path in keep_set
+            for child in hits
+            if child.path.startswith(hit.path + "/")
+        }
+
+    purge_set = {str(r) for r in (purge_rule_ids or ()) if str(r).strip()}
     user_kept: list[dict] = []
     if keep_set:
         survivors: list[RuleHit] = []
         for h in hits:
-            if h.path in keep_set:
+            # 反方向也要挡：保留项落在某个命中目录内部时，那个目录本轮同样不能动
+            # ——搬走父目录等于把保留项一起搬走。
+            if h.path in keep_set or any(k.startswith(h.path + "/") for k in keep_set):
                 user_kept.append(
                     {
                         "path": h.path,
@@ -282,11 +328,14 @@ def apply_pending_rules(
         # 包括「子树内含受保护路径而整条被拦下」和「被目录覆盖的后代」这两类。
         executable, dry_blocks = plan_quarantine(root, kept, is_protected=guard)
         all_blocked = [*blocked, *dry_blocks]
+        would_purge = [h for h in executable if h.rule_id in purge_set]
         return {
             "dry_run": True,
             "run_id": run_id,
             "would_quarantine": len(executable),
             "paths": [h.path for h in executable],
+            "would_purge": len(would_purge),
+            "would_purge_paths": [h.path for h in would_purge],
             "blocked_by_protect": len(all_blocked),
             "blocked_paths": [b["path"] for b in all_blocked],
             "kept_by_user": len(user_kept),
@@ -299,6 +348,13 @@ def apply_pending_rules(
     qdir = quarantine_root(root, run_id)
     qdir.mkdir(parents=True, exist_ok=True)
     manifest = rdir / "quarantine_manifest.json"
+    # 记下本轮开始前清单里已有的 id：稍后判断「哪些是这一轮新搬进去的」，
+    # 直删只作用于新条目，不动历史遗留。
+    before_ids = {
+        str(e.get("id"))
+        for e in (read_json(manifest) if manifest.exists() else [])
+        if isinstance(e, dict)
+    }
     descendant_blocks: list[dict] = []
     entries = quarantine_hits(
         root,
@@ -321,9 +377,24 @@ def apply_pending_rules(
         )
     pending_path.unlink(missing_ok=True)
 
+    # 「隔离后立即物理删除」：搬完再删，保护判定与清单写入一个环节都不少。
+    # 只处理**本轮新搬进去的**条目——清单里可能还躺着历史条目，规则 id 恰好
+    # 相同的话不该被这一轮顺手删掉，那是另一件事（界面上的「彻底删除」负责）。
+    purged: list[str] = []
+    if purge_rule_ids:
+        purge_set = {str(r) for r in purge_rule_ids}
+        fresh = [e for e in entries if e.id not in before_ids and e.rule_id in purge_set]
+        if fresh:
+            purge_entries(root, manifest, entry_ids={e.id for e in fresh})
+            append_purged_records(rdir, [e.to_dict() for e in fresh])
+            fresh_ids = {e.id for e in fresh}
+            entries = [e for e in entries if e.id not in fresh_ids]
+            purged = [e.original_path for e in fresh]
+
     meta = meta_early
     meta["applied"] = True
     meta["protected_blocked_at_apply"] = len(blocked)
+    meta["purged_directly"] = len(purged)
     write_json(rdir / "meta.json", meta)
     write_audit_md(
         rdir / "audit.md",
@@ -338,6 +409,8 @@ def apply_pending_rules(
     )
     return {
         "quarantined": len(entries),
+        "purged_directly": len(purged),
+        "purged_paths": purged,
         "blocked_by_protect": len(blocked),
         "kept_by_user": len(user_kept),
         "run_id": run_id,

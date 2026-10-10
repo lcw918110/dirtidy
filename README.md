@@ -48,8 +48,11 @@ dirtidy analyze /path/to/root <run_id> --mock
 # dirtidy analyze /path/to/root <run_id> --config models.yaml
 # 也可放 ./models.yaml 或 ~/.config/dirtidy/models.yaml，或用 DIRTIDY_CONFIG 指定
 
-# 本地 Web 审阅：可看「待自动隔离」并勾选保留后直接执行，也能看受保护清单与已隔离清单；
-# 每条路径旁有「为什么？」按钮，弹窗与 CLI explain 是同一份解释
+# 本地 Web 控制台（`dirtidy serve` / `dirtidy desktop`）：
+#   分 概览 / 扫描 / 审阅 / 隔离区 / 规则 / 设置 / 监视 七页，CLI 的功能都有对应入口。
+#   审阅页能看「待自动隔离」并勾选保留后直接执行，也能看受保护清单与已隔离清单；
+#   每条路径旁有「为什么？」按钮，弹窗与 CLI explain 是同一份解释。
+#   隔离区页显示每条与合计占用空间，可按条「还原」或「彻底删除」释放空间。
 dirtidy serve --root /path/to/root --port 8765
 
 # 桌面壳：起本地服务 + 自动打开浏览器（端口被占用会自动顺延；
@@ -61,6 +64,9 @@ dirtidy watch /path/to/root --interval 30
 ```
 
 产物目录：`<root>/.dirtidy/runs/<run_id>/`；隔离区：`<root>/.dirtidy/quarantine/<run_id>/`。未改动文件的内容 hash 缓存在 `<root>/.dirtidy/hash_cache.sqlite`。扫描可加 `--workers 8` 并行算 hash。
+
+跨 run 的设置（直删规则、模型配置）也在状态目录里，**命令行与界面读同一份**：
+`<root>/.dirtidy/settings.json` 与 `<root>/.dirtidy/models.yaml`。
 
 只读介质或不想污染目标目录时，可用环境变量 `DIRTIDY_STATE_DIR` 把整个 `.dirtidy/` 重定位到外部可写目录。
 
@@ -99,7 +105,9 @@ dirtidy scan /path/to/root --protect path/to/keep --protect another/dir
 
 ## 安全约定
 
-- 默认隔离，不直接抹盘；`purge-quarantine --yes` 才彻底删隔离副本
+- 默认隔离，不直接抹盘；`purge-quarantine --yes` 或界面上明确点「彻底删除」才真正删
+- **「直删」不是绕过隔离的另一条路径**：命中项仍先过人工保留与保护复核、搬入隔离区、写清单，然后才物理删除，并另记 `purged_directly.json`。**默认一条都不开**，要开得自己在「规则」页逐条勾；开了之后那些条目不可还原
+- 隔离区页显示每条与合计**实算磁盘占用**（清单里的 `size` 对目录恒为 0，直接汇总会显示成「0 B」）；按条彻底删除会同步收敛清单，界面上的「已隔离」列表因此始终可信
 - 重复文件与解压残留（hash 对照）默认仅候选
 - 外发模型默认只传安全摘要，且 `summary.max_targets` 给单次外发封顶
 - `apply-rules`（规则隔离）、`apply-decisions`（人工决策隔离）、`scan --apply` 三条路径在搬文件前都用同一份保护判定**再复核一遍**，语义一致；受保护项被拦下并记入 `protection.json`
@@ -108,7 +116,8 @@ dirtidy scan /path/to/root --protect path/to/keep --protect another/dir
 - 目录与其内文件同时命中时只保留父目录一条，避免清单出现永远还原不回去的记录
 - 0 字节文件不参与重复组判定（否则 `.env`/`id_rsa` 这类空文件会被凑成「内容相同」诱导误操作）
 - `scan` / `apply-rules` / `apply-decisions` 都支持 `--dry-run`：先看「会动哪些、哪些被保护拦下」再决定执行
-- 自动隔离可在执行前人工保留（CLI `--keep 相对路径` / 网页勾选「保留」）；保留项本轮不动并记入 `protection.json`，可审计追溯
+- 自动隔离可在执行前人工保留（CLI `--keep 相对路径` / 网页勾选「保留」）；保留项本轮不动并记入 `protection.json`，可审计追溯。**保留判定是双向的**：保留目录 ⇒ 子树保留（否则子项被搬走、目录变空后被清扫收走，保留等于没生效）；保留项落在命中目录里 ⇒ 该目录本轮不动（搬走父目录等于把它一起搬走）
+- 模型分析**默认关闭**，不打开就完全不外发；密钥可走环境变量（不落盘），也可在界面直接填——后者以**明文**写进 `<root>/.dirtidy/models.yaml`，界面上会提示；密钥框留空表示保持原样，不是清空
 - `watch`（定时监视）**只扫描不执行**：源码里不存在任何执行入口，并有静态守护用例守着这条不变量
 - `desktop` 只是启动器，不改变任何行为；就绪判定走 `GET /api/health`，避免「端口通了但页面打不开」
 - 非 quick 扫描只对**必要文件**算内容 hash（size 有重复的、或 size 命中归档成员的），
@@ -130,7 +139,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 169 个用例
+pytest -q            # 221 个用例
 ruff check src tests
 mypy
 ```

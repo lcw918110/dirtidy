@@ -336,6 +336,146 @@ def purge_quarantine_dir(quarantine_dir: Path) -> None:
         shutil.rmtree(quarantine_dir)
 
 
+def _state_bases(root: Path) -> list[Path]:
+    """隔离清单里的 `quarantine_path` 可能基于哪几个目录。
+
+    正常只有 `<root>/.dirtidy` 一个；但 `DIRTIDY_STATE_DIR` 覆盖后实体落在别处，
+    而清单里的相对路径仍是按 `<root>/.dirtidy` 写的（写入端如此）。两个都认，
+    否则一旦设了环境变量，purge 就会因为「路径不在允许范围内」而全部拒绝。
+    """
+    from dirtidy.models import state_root
+
+    out: list[Path] = []
+    for base in (state_root(root), root / ".dirtidy"):
+        try:
+            resolved = base.resolve()
+        except OSError:
+            continue
+        if resolved not in out:
+            out.append(resolved)
+    return out
+
+
+def quarantine_entry_path(root: Path, entry: dict) -> Path | None:
+    """把清单里的 quarantine_path 解析成绝对路径；越界则返回 None。
+
+    历史清单里可能存过绝对路径，也可能是被手改过的脏数据。这里守住
+    「不碰状态目录之外的东西」——purge 是物理删除，一次越界就是删掉用户的
+    真实文件，代价不可逆。界面统计占用空间时也走这里，两边口径一致。
+    """
+    raw = str(entry.get("quarantine_path") or "")
+    if not raw:
+        return None
+    bases = _state_bases(root)
+    if not bases:
+        return None
+    p = Path(raw)
+    if not p.is_absolute():
+        for base in bases:
+            candidate = base / p
+            if candidate.exists():
+                p = candidate
+                break
+        else:
+            p = bases[0] / p
+    try:
+        p_abs = p.resolve()
+    except OSError:
+        return None
+    if not any(p_abs == b or str(p_abs).startswith(str(b) + os.sep) for b in bases):
+        return None
+    return p
+
+
+def tree_size(path: Path) -> int:
+    """目录树的真实占用（字节）。单个条目读不到就按 0 计。
+
+    清单里的 `size` 只对文件有值（目录恒为 0），直接汇总会显示「0 B」——
+    而用户想知道的恰恰是「隔离区占了多少空间」。所以这里实算。
+
+    不 follow symlink：与扫描侧一致，避免顺着链接跑到根外面去统计。
+    """
+    try:
+        if path.is_file():
+            return path.stat().st_size
+    except OSError:
+        return 0
+    if not path.is_dir():
+        return 0
+    total = 0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total
+
+
+def purge_entries(
+    root: Path,
+    manifest_path: Path,
+    *,
+    entry_ids: set[str] | None = None,
+    purge_all: bool = False,
+) -> list[str]:
+    """物理删除隔离区中的条目（按 id 或全部），并从 manifest 移除。**不可恢复。**
+
+    与 `purge_quarantine_dir` 的区别：那个删的是整个隔离目录、清单留在原地（于是
+    清单里的条目全部指向不存在的位置）；这个按条删，**清单与磁盘同时收敛**，
+    界面上「已隔离」列表因此始终是可信的——用户不必猜某一条还在不在。
+
+    - `entry_ids=None` 且 `purge_all=False`：什么都不做（防「忘了传参就删光」）。
+    - 目录条目用 rmtree、文件用 unlink；条目指向的实体已不存在时仍从清单移除，
+      否则界面会留下一条永远删不掉的幽灵记录。
+    - 越出状态目录的路径**拒绝删除**，但**保留在清单里**，让问题可见。
+    """
+    if not manifest_path.exists():
+        return []
+    raw = read_json(manifest_path)
+    if not isinstance(raw, list):
+        return []
+
+    remaining: list[dict] = []
+    purged: list[str] = []
+
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        eid = str(item.get("id") or "")
+        if not purge_all and (entry_ids is None or eid not in entry_ids):
+            remaining.append(item)
+            continue
+
+        target = quarantine_entry_path(root, item)
+        if target is None:
+            # 路径越界或缺失：不动磁盘，也不从清单里抹掉——这条需要人看一眼
+            remaining.append(item)
+            continue
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+        except OSError:
+            # 删不掉（占用中 / 权限）就留在清单里，下次还能重试
+            remaining.append(item)
+            continue
+        purged.append(str(item.get("original_path") or ""))
+
+    write_json(manifest_path, remaining)
+    return purged
+
+
 def _read_manifest(manifest_path: Path) -> list[dict]:
     if not manifest_path.exists():
         return []

@@ -3,28 +3,97 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>dirtidy 审阅</title>
+  <title>dirtidy</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
   <header>
-    <h1>dirtidy</h1>
+    <div class="brand">
+      <h1>dirtidy</h1>
+      <span class="tag">本地目录整理 · 规则隔离 + 人工终审</span>
+    </div>
     <p id="meta"></p>
+    <p class="hint" id="stateDir"></p>
   </header>
-  <section class="toolbar">
-    <label>Run
-      <select id="runSelect"></select>
-    </label>
-    <button id="reloadBtn" type="button">刷新</button>
-    <button id="saveBtn" type="button">保存决策</button>
-    <button id="applyBtn" type="button">执行决策</button>
+
+  <nav class="tabs" id="tabs">
+    <button type="button" class="tabbtn" data-tab="overview">概览</button>
+    <button type="button" class="tabbtn" data-tab="scan">扫描</button>
+    <button type="button" class="tabbtn" data-tab="review">审阅</button>
+    <button type="button" class="tabbtn" data-tab="quarantine">隔离区</button>
+    <button type="button" class="tabbtn" data-tab="rules">规则</button>
+    <button type="button" class="tabbtn" data-tab="settings">设置</button>
+    <button type="button" class="tabbtn" data-tab="watch">监视</button>
+  </nav>
+
+  <!-- ============================== 概览 ============================== -->
+  <section class="tab" id="tab-overview">
+    <h2>概览</h2>
+    <div class="cards" id="overviewCards"></div>
+    <div class="panel">
+      <div class="toolbar">
+        <label>当前 run
+          <select id="runSelect"></select>
+        </label>
+        <button id="reloadBtn" type="button">刷新</button>
+        <span class="hint" id="runHint"></span>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>下一步</h3>
+      <p class="hint">
+        完整流程：<strong>扫描</strong>（产出候选与待隔离清单）→ <strong>审阅</strong>（逐条确认或保留）
+        → <strong>执行</strong>（搬进隔离区）→ 确认无误后在<strong>隔离区</strong>页彻底删除释放空间。
+        规则命中项<strong>永远先搬进隔离区</strong>，不会直接删除；只有你在「规则」页显式开启
+        「直删」的规则，才会在搬入后立刻物理删除。
+      </p>
+    </div>
   </section>
-  <section>
-    <h2>待自动隔离（规则命中）</h2>
+
+  <!-- ============================== 扫描 ============================== -->
+  <section class="tab" id="tab-scan">
+    <h2>扫描</h2>
+    <p class="hint">
+      扫描只读取元数据与内容 hash，<strong>不移动、不删除任何文件</strong>。
+      勾选「扫描后立即执行自动隔离」才会搬走规则命中项——它们进入隔离区，仍可还原。
+    </p>
+    <div class="panel form">
+      <label>规则包
+        <select id="scanRules"></select>
+      </label>
+      <label>内容 hash 并行线程数
+        <input id="scanWorkers" type="number" min="1" max="64" value="4" />
+      </label>
+      <label class="inline">
+        <input id="scanQuick" type="checkbox" />
+        跳过内容 hash 与解压对照（大目录下快很多，但看不到重复组与归档残留）
+      </label>
+      <label class="inline">
+        <input id="scanApply" type="checkbox" />
+        扫描后立即执行自动隔离
+      </label>
+      <label class="block">额外保护路径（每行一个，含整棵子树；命中的路径永不自动隔离）
+        <textarea id="scanProtect" rows="3" placeholder="例如：&#10;projects/client-a&#10;资料/合同"></textarea>
+      </label>
+      <button id="scanBtn" type="button">开始扫描</button>
+    </div>
+    <div class="panel" id="scanResult"></div>
+  </section>
+
+  <!-- ============================== 审阅 ============================== -->
+  <section class="tab" id="tab-review">
+    <h2>审阅</h2>
+    <div class="toolbar">
+      <button id="saveBtn" type="button">保存决策</button>
+      <button id="applyBtn" type="button">执行决策</button>
+    </div>
+
+    <h3>待自动隔离（规则命中）</h3>
     <p class="hint">
       这里是<strong>规则命中</strong>的项，执行时未必都会搬走：勾选「保留」的项本轮不动；
-      某项的子树里若躺着受保护路径（如 <code>node_modules/.npmrc</code>），会被整条拦下。
-      两者都登记进 protection.json 便于审计追溯。点路径旁的「为什么？」看逐条判定。
+      某项的子树里若躺着受保护路径（如 <code>node_modules/.npmrc</code>），会被整条拦下；
+      被上层目录命中的条目会被标成「已被上层目录覆盖」（执行时只搬父目录）。
+      前两者都登记进 protection.json 便于审计追溯。点路径旁的「为什么？」看逐条判定。
     </p>
     <table>
       <thead>
@@ -34,14 +103,14 @@
           <th>命中规则</th>
           <th>类型</th>
           <th>原因</th>
+          <th>本规则已开启直删</th>
         </tr>
       </thead>
       <tbody id="pendingRows"></tbody>
     </table>
     <button id="applyRulesBtn" type="button">执行自动隔离</button>
-  </section>
-  <section>
-    <h2>候选 / 建议</h2>
+
+    <h3>候选 / 建议</h3>
     <table>
       <thead>
         <tr>
@@ -54,20 +123,192 @@
       </thead>
       <tbody id="rows"></tbody>
     </table>
-  </section>
-  <section>
-    <h2>重复组（人选保留）</h2>
+
+    <h3>重复组（人选保留）</h3>
     <div id="dups"></div>
-  </section>
-  <section>
-    <h2>受保护（不会被自动隔离）</h2>
+
+    <h3>受保护（不会被自动隔离）</h3>
     <p class="hint">内置保护清单写在代码里，规则包关不掉；下面是本轮实际拦下的项。</p>
     <div id="protection"></div>
+
+    <h3>模型建议</h3>
+    <div class="toolbar">
+      <button id="analyzeBtn" type="button">运行模型分析</button>
+      <span class="hint">模型是可选增强；需先在「设置」页启用并保存配置。</span>
+    </div>
+    <p class="hint" id="aiHint">未运行模型分析。</p>
+    <div id="aiBox"></div>
   </section>
-  <section>
-    <h2>已隔离</h2>
-    <div id="quarantined"></div>
+
+  <!-- ============================== 隔离区 ============================== -->
+  <section class="tab" id="tab-quarantine">
+    <h2>隔离区</h2>
+    <p class="hint">
+      隔离区是<strong>中间状态</strong>：文件已离开原位但还在磁盘上，占着空间。
+      确认不需要了就在这一页<strong>彻底删除</strong>释放空间；发现删错了就<strong>还原</strong>回原位
+      （原路径已有文件时会跳过，不覆盖）。彻底删除<strong>不可恢复</strong>。
+    </p>
+    <div class="cards" id="quarantineCards"></div>
+    <div class="toolbar">
+      <button id="restoreSelBtn" type="button">还原选中</button>
+      <button id="purgeSelBtn" type="button" class="danger">彻底删除选中</button>
+      <button id="restoreAllBtn" type="button">全部还原</button>
+      <button id="purgeAllBtn" type="button" class="danger">清空隔离区（彻底删除）</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>选择</th>
+          <th>原路径</th>
+          <th>命中规则</th>
+          <th>类型</th>
+          <th>占用</th>
+          <th>隔离时间</th>
+          <th>原因</th>
+        </tr>
+      </thead>
+      <tbody id="quarantineRows"></tbody>
+    </table>
+    <h3>已直接删除（审计留痕）</h3>
+    <p class="hint">这些条目命中了「直删」规则，已搬入隔离区后立刻物理删除，不可还原。</p>
+    <div id="purgedBox"></div>
   </section>
+
+  <!-- ============================== 规则 ============================== -->
+  <section class="tab" id="tab-rules">
+    <h2>规则</h2>
+    <div class="toolbar">
+      <label>规则包
+        <select id="rulePackSelect"></select>
+      </label>
+      <button id="ruleLoadBtn" type="button">查看</button>
+      <button id="ruleSaveBtn" type="button">保存直删配置</button>
+    </div>
+    <p class="hint">
+      规则动作分三档：<strong>protect</strong>（永不自动隔离，最高优先级）、
+      <strong>auto_quarantine</strong>（进待隔离清单）、<strong>candidate_only</strong>（只进候选，交人工）。
+      标了「建议直删」的规则是<strong>重建成本为零</strong>的类型；勾选「直删」后，它命中的项会
+      先搬入隔离区、随即物理删除，不再占用空间。<strong>保护判定依然优先</strong>——直删不会成为绕过保护的缝。
+    </p>
+    <div class="panel">
+      <h3>规则清单</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>id</th>
+            <th>动作</th>
+            <th>匹配</th>
+            <th>原因</th>
+            <th>直删</th>
+          </tr>
+        </thead>
+        <tbody id="ruleRows"></tbody>
+      </table>
+      <p class="hint" id="ruleSummary"></p>
+    </div>
+    <div class="panel">
+      <h3>生效保护清单</h3>
+      <p class="hint">内置清单不可被规则包关闭；规则包可以追加自己的 protect 规则。</p>
+      <table>
+        <thead>
+          <tr><th>来源</th><th>id</th><th>匹配类型</th><th>值</th><th>原因</th></tr>
+        </thead>
+        <tbody id="protectRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================== 设置 ============================== -->
+  <section class="tab" id="tab-settings">
+    <h2>设置</h2>
+
+    <div class="panel">
+      <h3>模型分析</h3>
+      <label class="inline">
+        <input id="useModel" type="checkbox" />
+        启用模型分析（关闭时「审阅」页不会调用任何模型，也不外发任何内容）
+      </label>
+      <p class="hint">
+        模型是<strong>可选增强</strong>：不用它，规则引擎与人工终审一样完整。
+        它只对「候选」类文件给建议，且默认只外发安全摘要（可截断的文本片段，密钥会被打码）。
+      </p>
+      <label>provider
+        <select id="provider"></select>
+      </label>
+      <div id="openaiFields">
+        <label>base_url
+          <input id="baseUrl" type="text" placeholder="https://api.openai.com/v1" />
+        </label>
+        <label>model
+          <input id="modelName" type="text" placeholder="gpt-4o-mini" />
+        </label>
+        <label>密钥环境变量名
+          <input id="apiKeyEnv" type="text" placeholder="DIRTIDY_API_KEY" />
+        </label>
+        <label>密钥（可选）
+          <input id="apiKey" type="password" placeholder="留空表示不修改已保存的密钥" />
+        </label>
+      </div>
+      <div id="ollamaFields">
+        <label>host
+          <input id="ollamaHost" type="text" placeholder="http://127.0.0.1:11434" />
+        </label>
+        <label>model
+          <input id="ollamaModel" type="text" placeholder="llama3.2" />
+        </label>
+      </div>
+      <label>单次分析外发上限（条）
+        <input id="maxTargets" type="number" min="1" />
+      </label>
+      <label>非候选文件保留层级
+        <input id="maxDepth" type="number" min="0" />
+      </label>
+      <button id="saveModelBtn" type="button">保存模型配置</button>
+      <button id="saveUseModelBtn" type="button">保存开关</button>
+      <p class="hint" id="modelStatus"></p>
+    </div>
+
+    <div class="panel">
+      <h3>危险操作</h3>
+      <p class="hint">
+        彻底删除隔离区条目不可恢复。按条目删除会同步收敛清单；「清空隔离区」等价于
+        命令行的 <code>dirtidy purge-quarantine --yes</code>。
+      </p>
+    </div>
+  </section>
+
+  <!-- ============================== 监视 ============================== -->
+  <section class="tab" id="tab-watch">
+    <h2>监视</h2>
+    <p class="hint">
+      监视会<strong>定期扫描并报告新增命中</strong>，但<strong>绝不执行任何隔离</strong>——
+      它只回答「现在有什么」，动不动是人的决定。命令行等价于 <code>dirtidy watch</code>。
+    </p>
+    <div class="panel form">
+      <label>扫描间隔（分钟）
+        <input id="watchInterval" type="number" min="0.1" step="0.1" value="30" />
+      </label>
+      <label>规则包
+        <select id="watchRules"></select>
+      </label>
+      <label class="inline">
+        <input id="watchQuick" type="checkbox" checked />
+        只做规则匹配（不算内容 hash，更快）
+      </label>
+      <label class="inline">
+        <input id="watchNotify" type="checkbox" />
+        发系统通知
+      </label>
+      <label class="block">额外保护路径（每行一个）
+        <textarea id="watchProtect" rows="2" placeholder="留空即不加额外保护"></textarea>
+      </label>
+      <button id="watchStartBtn" type="button">启动监视</button>
+      <button id="watchStopBtn" type="button" class="danger">停止监视</button>
+    </div>
+    <div class="cards" id="watchCards"></div>
+    <div class="panel" id="watchDetail"></div>
+  </section>
+
   <dialog id="explainDlg">
     <div class="dlg-head">
       <strong>为什么？</strong>
@@ -76,7 +317,11 @@
     </div>
     <pre id="explainBody"></pre>
   </dialog>
-  <pre id="status"></pre>
+
+  <div id="statusbar" class="statusbar" role="status" aria-live="polite" hidden>
+    <span id="status"></span>
+    <button id="statusClose" type="button" title="关闭提示" aria-label="关闭提示">&times;</button>
+  </div>
   <script src="/static/app.js"></script>
 </body>
 </html>
