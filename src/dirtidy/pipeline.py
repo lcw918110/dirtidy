@@ -146,7 +146,7 @@ def create_run(
     return meta
 
 
-def _append_protection_records(rdir: Path, records: list[dict]) -> list[dict]:
+def append_protection_records(rdir: Path, records: list[dict]) -> list[dict]:
     """把新发现的「被保护拦下」记录并进 protection.json，保留历史。"""
     path = rdir / "protection.json"
     existing = read_json(path) if path.exists() else []
@@ -258,7 +258,7 @@ def apply_pending_rules(
         }
 
     if blocked or user_kept:
-        _append_protection_records(rdir, [*blocked, *user_kept])
+        append_protection_records(rdir, [*blocked, *user_kept])
 
     qdir = quarantine_root(root, run_id)
     qdir.mkdir(parents=True, exist_ok=True)

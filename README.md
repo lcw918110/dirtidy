@@ -67,6 +67,8 @@ dirtidy scan /path/to/root --protect path/to/keep --protect another/dir
 - 重复文件与解压残留（hash 对照）默认仅候选
 - 外发模型默认只传安全摘要，且 `summary.max_targets` 给单次外发封顶
 - `apply-rules` 在搬文件前会用当前生效的保护清单**再复核一遍**，防止 pending 被改过就绕过保护
+- `apply-decisions`（人工决策隔离）同样复核保护清单，两条执行路径语义一致；受保护项被拦下并记入 `protection.json`
+- 0 字节文件不参与重复组判定（否则 `.env`/`id_rsa` 这类空文件会被凑成「内容相同」诱导误操作）
 - `scan` / `apply-rules` / `apply-decisions` 都支持 `--dry-run`：先看「会动哪些、哪些被保护拦下」再决定执行
 - 自动隔离可在执行前人工保留（CLI `--keep 相对路径` / 网页勾选「保留」）；保留项本轮不动并记入 `protection.json`，可审计追溯
 - 非 quick 扫描将文件 `path + size + mtime + sha256` 缓存在 `<root>/.dirtidy/hash_cache.sqlite`；处理敏感目录时可加 `--quick` 跳过内容 hash 与缓存
@@ -84,7 +86,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 106 个用例
+pytest -q            # 111 个用例
 ruff check src tests
 mypy
 ```

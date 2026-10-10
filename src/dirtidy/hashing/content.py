@@ -135,11 +135,15 @@ def find_duplicate_groups(items: list[InventoryItem]) -> list[Candidate]:
 
     单个组超过 MAX_DUPLICATE_PATHS 时截断并标记，避免一个「全盘同内容」的组
     把候选文件和审计报告撑爆。
+
+    0 字节文件被排除：它们的 hash 天然全都相同，凑成的「重复组」没有任何整理价值，
+    还会把 `.env` / `id_rsa` 这类空占位文件混进来，诱导用户点「其余标记隔离」。
+    空文件自有 `empty_file` 规则处理（进候选）。
     """
     groups: dict[str, list[str]] = defaultdict(list)
     overflow: dict[str, int] = defaultdict(int)  # 只对超限的组计数，避免多背一个全量字典
     for item in items:
-        if item.is_dir or not item.sha256 or item.error:
+        if item.is_dir or not item.sha256 or item.error or item.size == 0:
             continue
         bucket = groups[item.sha256]
         if len(bucket) < MAX_DUPLICATE_PATHS:
