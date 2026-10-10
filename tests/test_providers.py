@@ -154,7 +154,10 @@ def test_load_model_config_finds_user_config_dir(monkeypatch: pytest.MonkeyPatch
     (home / ".config" / "dirtidy").mkdir(parents=True)
     (home / ".config" / "dirtidy" / "models.yaml").write_text("provider: mock\n", encoding="utf-8")
     monkeypatch.delenv("DIRTIDY_CONFIG", raising=False)
-    monkeypatch.setenv("HOME", str(home))
+    # 不能靠 setenv("HOME")：Path.home() 在 POSIX 读 HOME，在 Windows 读 USERPROFILE。
+    # 设 HOME 在 Windows 上是空操作，代码会去查**真实**用户目录，于是必然找不到而失败。
+    # 直接替换 Path.home 才是平台无关的写法。
+    monkeypatch.setattr("dirtidy.ai.providers.Path.home", lambda: home)
     monkeypatch.setattr("dirtidy.ai.providers.Path.cwd", lambda: tmp_path / "nope")
     assert load_model_config()["provider"] == "mock"
 
@@ -173,7 +176,10 @@ def test_example_config_ships_inside_package() -> None:
 
 def test_missing_config_error_mentions_example_and_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.delenv("DIRTIDY_CONFIG", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # 同上：setenv("HOME") 在 Windows 上是空操作。这个用例在 Windows 上曾经**碰巧通过**——
+    # 真实用户目录同样没有配置，也会抛 FileNotFoundError，断言就满足了，
+    # 于是它其实什么都没验证。换成 Path.home 之后才真的在测「用户目录里也没有」这一情形。
+    monkeypatch.setattr("dirtidy.ai.providers.Path.home", lambda: tmp_path / "home")
     monkeypatch.setattr("dirtidy.ai.providers.Path.cwd", lambda: tmp_path / "nope")
     with pytest.raises(FileNotFoundError) as ei:
         load_model_config()

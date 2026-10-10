@@ -1,0 +1,14 @@
+# 其余文本统一 LF：跨平台项目里 checkout 出来的换行符差异是纯粹的无谓噪声。
+* text=auto eol=lf
+
+# 测试 fixture 依赖**精确字节**，必须原样入库、原样取出。
+#
+# `payload.txt` 要与 `payload.zip` 里的同名成员做 sha256 对照（归档残留检测）；
+# `dup_a.txt` / `dup_b.txt` 要构成重复组。一旦发生换行符转换，size 与内容都会变：
+#   - size 变了 → 该文件不进「待算 hash 的 size 集合」→ 根本不会被 hash
+#   - 内容变了 → 即使算了 hash 也对不上 zip 成员
+# 于是 `test_archive_hash_candidate` 在 Windows 上必然失败（本仓库第一次跑 CI 就是这么挂的），
+# 而 macOS/Linux 因为默认不转换，一直看不出来。
+#
+# 这条必须放在 `* text=auto eol=lf` **之后**：Git 的规则是后面的覆盖前面的。
+tests/fixtures/** -text

@@ -7,8 +7,11 @@ docs/05 用例表 vs 实际测试函数。
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -219,6 +222,42 @@ def test_pyproject_declares_desktop_extra() -> None:
     core = " ".join(data["project"]["dependencies"]).lower()
     for pkg in ("pystray", "pillow"):
         assert pkg not in core, f"{pkg} 是可选增强，不能进核心依赖（缺它也要能跑）"
+
+
+def test_gitattributes_pins_fixture_bytes() -> None:
+    """fixture 必须关掉换行符转换，否则 Windows 上的归档残留用例会失败。
+
+    这个坑很隐蔽：`payload.txt` 要与 `payload.zip` 里的同名成员做 sha256 对照，
+    一旦 checkout 时被转成 CRLF，size（16 → 17）与内容**同时**变：
+      - size 不在「待算 hash 的 size 集合」里 → 该文件根本不会被 hash
+      - 内容不同 → 即便算了 hash 也对不上 zip 成员
+    于是 Windows 上必然报「找不到归档残留」，而 macOS/Linux 默认不转换，一直看不出来。
+
+    所以这里守的不是「文件在不在」，而是**规则有没有真的生效**——直接问 git。
+    """
+    assert (REPO_ROOT / ".gitattributes").exists(), (
+        "缺少 .gitattributes：Windows 上 fixture 会被转成 CRLF，test_archive_hash_candidate 必然失败"
+    )
+
+    if shutil.which("git") is None:
+        pytest.skip("环境里没有 git，无法验证 attribute 是否生效")
+
+    target = "tests/fixtures/sample_workspace/payload.txt"
+    proc = subprocess.run(
+        ["git", "check-attr", "text", "--", target],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"git check-attr 不可用: {proc.stderr.strip()}")
+
+    out = proc.stdout.strip()
+    assert out.endswith(": unset"), (
+        f"fixture 必须关掉换行符转换（-text），实际 attribute 为 {out!r}。"
+        "注意 Git 是**后面的规则覆盖前面的**，-text 那条必须写在文件末尾。"
+    )
 
 
 def _parse_docs_05_test_list(doc_text: str) -> set[str]:
