@@ -4,6 +4,13 @@ on:
   push:
   pull_request:
 
+# 同一分支连续推送时取消尚未跑完的旧 run。
+# 否则旧提交的结果会和新提交的混在一起，看 CI 状态时容易被误导，
+# 也要为已被覆盖的提交白跑一遍三平台矩阵。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: ${{ matrix.os }} / py${{ matrix.python-version }}
@@ -14,9 +21,16 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      # 必须 ≥ v5：v4 及更早版本目标 Node 20，而 GitHub 已强制它们在 Node 24 上运行，
+      # 每次跑都会产生「Node.js 20 is deprecated」警告（迟早会变成硬失败）。
+      # v7 另含「阻止在 pull_request_target / workflow_run 下检出 fork PR」的加固；
+      # 本工作流只由 push / pull_request 触发，不受该变更影响。
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      # 必须 ≥ v6：v5 及更早版本同样目标 Node 20。
+      # v7 移除了 `pip-install` 输入（本工作流未使用），并移除了一批 EOL Python 版本；
+      # 矩阵只用 3.11 / 3.12，均未 EOL，不受影响。
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
