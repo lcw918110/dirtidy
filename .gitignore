@@ -12,3 +12,7 @@ build/
 *.egg-info/
 models.yaml
 .DS_Store
+
+# AI 工具的项目记忆目录：属于工具私有、含环境特定信息、且会随会话频繁变动。
+# 项目该记住的结论都沉淀在 docs/ 里，这里不入库。
+.workbuddy-ai/
