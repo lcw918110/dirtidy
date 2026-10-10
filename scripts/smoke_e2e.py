@@ -36,6 +36,9 @@ def build() -> None:
     files = {
         "app/main.py": "print(1)\n",
         "app/node_modules/pkg/index.js": "x\n",
+        # 目录命中 dep_node_modules 会被自动隔离，但它子树里有 .npmrc（密钥文件）→
+        # 整条命中必须被拦下。这是很现实的组合：npm 常把带 token 的 .npmrc 放在这里。
+        "app/node_modules/.npmrc": "//registry.example.com/:_authToken=SHOULD-NOT-BE-TOUCHED\n",
         "app/__pycache__/main.cpython-312.pyc": "y\n",
         "app/logs/app.log": "old log\n",
         "app/.git/objects/ab12": "HEAD\n",
@@ -100,6 +103,8 @@ def main() -> int:
     run("apply-rules", str(WS), run_id)
     run("analyze", str(WS), run_id, "--mock")
 
+    failed: list[str] = []
+
     print("\n--- 隔离后仍在原地的东西（保护生效的证据） ---")
     for rel in (
         ".env",
@@ -109,17 +114,43 @@ def main() -> int:
         "app/.git/objects/ab12",
         "src/logs/handler.py",
         ".ssh/.cache",
+        # 目录命中自动隔离，但子树里有 .npmrc → 整条被拦下
+        "app/node_modules",
+        "app/node_modules/.npmrc",
     ):
-        print(f"  {'存在' if (WS / rel).exists() else '已消失!!'}  {rel}")
+        ok = (WS / rel).exists()
+        print(f"  {'存在' if ok else '已消失!!'}  {rel}")
+        if not ok:
+            failed.append(f"应留在原地却消失了: {rel}")
 
     print("\n--- 应该被隔离掉的东西 ---")
-    for rel in ("app/node_modules", "app/__pycache__", "old.tmp", "app/logs/app.log"):
-        print(f"  {'仍在!!' if (WS / rel).exists() else '已隔离'}  {rel}")
+    for rel in ("app/__pycache__", "old.tmp", "app/logs/app.log"):
+        gone = not (WS / rel).exists()
+        print(f"  {'仍在!!' if not gone else '已隔离'}  {rel}")
+        if not gone:
+            failed.append(f"应被隔离却还在: {rel}")
+
+    print("\n--- 保护拦下明细（protection.json） ---")
+    for r in json.loads((rdir / "protection.json").read_text(encoding="utf-8")):
+        print(f"  {r['path']:<28} {r.get('blocked_at', '-'):<22} 保护={r['protect_rule_id']}")
+    blocked_at = {
+        r.get("blocked_at")
+        for r in json.loads((rdir / "protection.json").read_text(encoding="utf-8"))
+    }
+    if "protected_descendant" not in blocked_at:
+        failed.append("protection.json 缺少 protected_descendant 记录（目录含受保护后代未留痕）")
 
     print(f"\n审计摘要：{rdir / 'audit.md'}")
     if not args.keep:
         shutil.rmtree(WS.parent, ignore_errors=True)
         print("已清理 .smoke/")
+
+    if failed:
+        print("\n冒烟失败：", file=sys.stderr)
+        for f in failed:
+            print(f"  - {f}", file=sys.stderr)
+        return 1
+    print("\n冒烟通过：保护生效，预期项均已隔离。")
     return 0
 
 

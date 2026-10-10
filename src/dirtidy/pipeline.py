@@ -19,7 +19,7 @@ from dirtidy.models import (
     utc_now_iso,
     write_json,
 )
-from dirtidy.quarantine.store import quarantine_hits, sweep_empty_dirs
+from dirtidy.quarantine.store import plan_quarantine, quarantine_hits, sweep_empty_dirs
 from dirtidy.rules.engine import (
     effective_protect_rules,
     load_rule_pack,
@@ -34,6 +34,16 @@ def _protect_checker(pack: dict[str, Any], extra: list[dict[str, Any]]):
     """返回一个「相对路径是否受保护」的判定函数，供隔离后扫尾使用。"""
     matchers = compile_protect_rules(effective_protect_rules(pack, extra))
     return lambda rel: evaluate_protect(matchers, rel, True) is not None
+
+
+def protect_guard(pack: dict[str, Any], extra: list[dict[str, Any]]):
+    """返回完整形态的保护判定器：命中给出 (规则 ID, 原因)，否则 None。
+
+    与 `_protect_checker` 的差别只在「要不要知道是哪条规则保护的」——
+    拦截受保护后代时需要把规则 ID 与原因写进 protection.json 供审计追溯。
+    """
+    matchers = compile_protect_rules(effective_protect_rules(pack, extra))
+    return lambda rel, is_dir: evaluate_protect(matchers, rel, is_dir)
 
 
 def pack_sweeps_empty(pack: dict[str, Any]) -> bool:
@@ -225,19 +235,19 @@ def apply_pending_rules(
     pack = load_rule_pack(meta_early.get("rules") or "default")
 
     extra = protect_rules_from_paths(meta_early.get("protect") or [])
-    matchers = compile_protect_rules(effective_protect_rules(pack, extra))
+    guard = protect_guard(pack, extra)
     kept: list[RuleHit] = []
     blocked: list[dict] = []
     for hit in hits:
-        guard = evaluate_protect(matchers, hit.path, hit.is_dir)
-        if guard is None:
+        guard_hit = guard(hit.path, hit.is_dir)
+        if guard_hit is None:
             kept.append(hit)
             continue
         blocked.append(
             {
                 "path": hit.path,
-                "protect_rule_id": guard[0],
-                "protect_reason": guard[1],
+                "protect_rule_id": guard_hit[0],
+                "protect_reason": guard_hit[1],
                 "intended_rule_id": hit.rule_id,
                 "intended_action": "auto_quarantine",
                 "is_dir": hit.is_dir,
@@ -246,13 +256,17 @@ def apply_pending_rules(
         )
 
     if dry_run:
+        # 与实跑共用 plan_quarantine：预览的条数必须与真实产物一致，
+        # 包括「子树内含受保护路径而整条被拦下」和「被目录覆盖的后代」这两类。
+        executable, dry_blocks = plan_quarantine(root, kept, is_protected=guard)
+        all_blocked = [*blocked, *dry_blocks]
         return {
             "dry_run": True,
             "run_id": run_id,
-            "would_quarantine": len(kept),
-            "paths": [h.path for h in kept],
-            "blocked_by_protect": len(blocked),
-            "blocked_paths": [b["path"] for b in blocked],
+            "would_quarantine": len(executable),
+            "paths": [h.path for h in executable],
+            "blocked_by_protect": len(all_blocked),
+            "blocked_paths": [b["path"] for b in all_blocked],
             "kept_by_user": len(user_kept),
             "kept_paths": [u["path"] for u in user_kept],
         }
@@ -263,7 +277,22 @@ def apply_pending_rules(
     qdir = quarantine_root(root, run_id)
     qdir.mkdir(parents=True, exist_ok=True)
     manifest = rdir / "quarantine_manifest.json"
-    entries = quarantine_hits(root, run_id, kept, qdir, manifest, known_hashes=hash_map)
+    descendant_blocks: list[dict] = []
+    entries = quarantine_hits(
+        root,
+        run_id,
+        kept,
+        qdir,
+        manifest,
+        known_hashes=hash_map,
+        is_protected=guard,
+        blocked=descendant_blocks,
+    )
+    if descendant_blocks:
+        # 目录命中因子树内含受保护路径而被拦下——与直接命中保护同样是「保护生效」，
+        # 必须留痕，否则用户看到目录没被搬走却查不到原因。
+        blocked.extend(descendant_blocks)
+        append_protection_records(rdir, descendant_blocks)
     if pack_sweeps_empty(pack):
         entries = sweep_empty_dirs(
             root, run_id, qdir, manifest, is_protected=_protect_checker(pack, extra)

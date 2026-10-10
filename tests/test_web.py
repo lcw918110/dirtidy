@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -12,6 +13,14 @@ from dirtidy.pipeline import create_run
 from dirtidy.web.app import create_app
 
 FIXTURE_SRC = Path(__file__).parent / "fixtures" / "sample_workspace"
+
+#: `to_text()` 结尾带「（生成于 <时间戳>）」。两次调用必然落在不同秒上，
+#: 而它承载的是「什么时候打印的」，不是「判定结果」——比对前抹掉，否则用例会随机红。
+_GENERATED_AT = re.compile(r"（生成于 [^）]*）")
+
+
+def _without_timestamp(text: str) -> str:
+    return _GENERATED_AT.sub("（生成于 <t>）", text)
 
 
 @pytest.fixture()
@@ -158,7 +167,11 @@ def test_web_explain_returns_cli_text(workspace: Path) -> None:
     assert body["path"] == "node_modules"
 
     expected = explain_path(workspace, "node_modules", rules="default").to_text()
-    assert body["text"] == expected, "网页解释应与 CLI explain 逐字一致"
+    # 归一化必须真的生效，否则文本格式一变，这个用例就悄悄退化成「比原样」的假守卫
+    assert _GENERATED_AT.search(body["text"]), "解释文本应含「（生成于 …）」时间戳"
+    assert _without_timestamp(body["text"]) == _without_timestamp(
+        expected
+    ), "网页解释应与 CLI explain 逐字一致（时间戳除外）"
     assert "dep_node_modules" in body["text"]
 
 

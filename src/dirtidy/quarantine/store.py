@@ -6,13 +6,145 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from dirtidy.models import QuarantineEntry, RuleHit, read_json, resolve_under, utc_now_iso, write_json
 from dirtidy.scan.scanner import file_sha256
+
+#: 保护判定签名：给定相对路径与是否目录，命中返回 (保护规则 ID, 原因)，否则 None。
+#: 与 `rules.protect.evaluate_protect` 同形，便于把判定器直接传进来而不必包一层。
+ProtectCheck = Callable[[str, bool], "tuple[str, str] | None"]
+
+
+def drop_covered_descendants(hits: Sequence[RuleHit]) -> list[RuleHit]:
+    """丢弃「已被某个目录命中覆盖」的后代条目。
+
+    目录整棵搬走时，它内部的文件自然跟着走。若把父子都当成独立条目：
+      * 清单会多出一条**永远还原不回去**的记录——还原时目标路径已被父目录的还原
+        创建出来，`restore_entries` 遇到「目标已存在」会跳过，于是这条记录永久卡住；
+      * 隔离区里留下一个死空目录；
+      * dry-run 的条数与真实产物对不上。
+
+    纯集合运算，不访问文件系统。
+    """
+    dirs = {h.path for h in hits if h.is_dir}
+    if not dirs:
+        return list(hits)
+    return [h for h in hits if not any(h.path.startswith(f"{d}/") for d in dirs)]
+
+
+def _first_protected_under(
+    root: Path, base: Path, is_protected: ProtectCheck
+) -> tuple[str, str] | None:
+    """在 base 子树里找第一条受保护路径；找不到返回 None。发现即早退。"""
+    unreadable: list[OSError] = []
+    for dirpath, dirnames, filenames in os.walk(base, onerror=unreadable.append):
+        here = Path(dirpath)
+        for name, is_dir in ((n, True) for n in dirnames):
+            guard = _check_rel(root, here / name, is_dir, is_protected)
+            if guard is not None:
+                return guard
+        for name, is_dir in ((n, False) for n in filenames):
+            guard = _check_rel(root, here / name, is_dir, is_protected)
+            if guard is not None:
+                return guard
+    if unreadable:
+        # 读不动的子树无法证明「里面没有受保护内容」。保护优先于清理，
+        # 因此宁可不动，也不赌它安全。
+        return ("__unreadable__", f"子树有 {len(unreadable)} 处不可读，无法确认其中没有受保护内容")
+    return None
+
+
+def _check_rel(
+    root: Path, path: Path, is_dir: bool, is_protected: ProtectCheck
+) -> tuple[str, str] | None:
+    try:
+        rel = path.relative_to(root).as_posix()
+    except ValueError:
+        return None
+    if not rel or rel == ".":
+        return None
+    return is_protected(rel, is_dir)
+
+
+def find_protected_descendants(
+    root: Path,
+    hits: Sequence[RuleHit],
+    is_protected: ProtectCheck,
+) -> dict[str, tuple[str, str]]:
+    """找出「子树内含受保护路径」的目录命中 → {命中路径: (保护规则 ID, 原因)}。
+
+    保护清单的最高优先级语义是「命中即永不自动隔离」。只校验命中路径**本身**是不够的：
+    一个命中目录会把内部受保护的密钥 / 版本库文件一起搬走，保护就形同虚设。
+    —— `node_modules` 命中 dep 规则，`node_modules/.env`、`node_modules/id_rsa`
+    就会被连锅端走，而这两条本该由内置清单兜底。
+
+    这里在**实盘**上遍历该目录，而不是查 scan 时的 inventory 快照：
+      * 快照会过期——扫描之后新增的文件不在里面；
+      * `.git` / `.dirtidy` 这类被扫描器跳过的目录本就不在快照里。
+    代价只与「将要被搬走的目录」大小成正比，且发现第一条即早退，不随全树规模增长。
+    """
+    blocks: dict[str, tuple[str, str]] = {}
+    for hit in hits:
+        if not hit.is_dir or hit.path in blocks:
+            continue
+        try:
+            base = resolve_under(root, hit.path)
+        except ValueError:
+            continue
+        if not base.is_dir():
+            continue
+        found = _first_protected_under(root, base, is_protected)
+        if found is not None:
+            blocks[hit.path] = found
+    return blocks
+
+
+def plan_quarantine(
+    root: Path,
+    hits: Sequence[RuleHit],
+    *,
+    is_protected: ProtectCheck | None = None,
+) -> tuple[list[RuleHit], list[dict]]:
+    """把「命中列表」拆成「可执行列表 + 被保护拦下列表」。
+
+    dry-run 预测与真实执行**共用这一个函数**，否则两条路迟早漂移——
+    而「预览说会搬、实跑不搬」或反过来的工具，比没有预览更危险。
+
+    顺序不可颠倒：
+      1. 先按保护拦下「子树内含受保护路径」的目录命中（保护优先）；
+      2. 再丢弃被覆盖的后代条目——若先丢弃，被拦下目录里的子文件仍会留在列表里。
+    """
+    blocked: list[dict] = []
+    survivors: list[RuleHit] = list(hits)
+
+    if is_protected is not None:
+        blocks = find_protected_descendants(root, survivors, is_protected)
+        if blocks:
+            rest: list[RuleHit] = []
+            for hit in survivors:
+                guard = blocks.get(hit.path)
+                if guard is None:
+                    rest.append(hit)
+                    continue
+                blocked.append(
+                    {
+                        "path": hit.path,
+                        "protect_rule_id": guard[0],
+                        "protect_reason": f"子树内含受保护路径（{guard[1]}）",
+                        "intended_rule_id": hit.rule_id,
+                        "intended_action": "auto_quarantine",
+                        "is_dir": hit.is_dir,
+                        "blocked_at": "protected_descendant",
+                    }
+                )
+            survivors = rest
+
+    return drop_covered_descendants(survivors), blocked
 
 
 def _safe_dest(quarantine_dir: Path, original_rel: str) -> Path:
@@ -43,13 +175,25 @@ def quarantine_hits(
     manifest_path: Path,
     *,
     known_hashes: dict[str, str | None] | None = None,
+    is_protected: ProtectCheck | None = None,
+    blocked: list[dict] | None = None,
 ) -> list[QuarantineEntry]:
     """将命中项移入隔离区并追加/更新 manifest。
 
     known_hashes: 可选 path→sha256（来自 inventory），避免移动后再算。
-    先处理路径更深的条目，减少父目录先移导致子路径找不到的问题。
+
+    is_protected: 传入保护判定器时，先按 `plan_quarantine` 过滤一遍——命中目录
+      若子树内含受保护路径则整条拦下，其后代条目也不再单独搬。传入 `blocked`
+      可把拦下明细回传给调用方写进 protection.json（不传则只静默丢弃，不推荐）。
+
+    过滤后剩余的条目已互不嵌套，但**仍按路径深度倒序处理**：隔离区内已有同名
+    残留时会走 `.__qN` 改名，顺序固定能让产物可复现。
     """
     del run_id  # 隔离目录已由调用方按 run_id 选好；保留参数便于 API 稳定
+    executable, blocks = plan_quarantine(root, hits, is_protected=is_protected)
+    if blocked is not None:
+        blocked.extend(blocks)
+
     existing: list[dict] = []
     if manifest_path.exists():
         existing = read_json(manifest_path)
@@ -57,7 +201,7 @@ def quarantine_hits(
     seen_orig = {e.original_path for e in entries}
     known_hashes = known_hashes or {}
 
-    ordered = sorted(hits, key=lambda h: h.path.count("/"), reverse=True)
+    ordered = sorted(executable, key=lambda h: h.path.count("/"), reverse=True)
 
     for hit in ordered:
         if hit.path in seen_orig:
@@ -228,6 +372,8 @@ def sweep_empty_dirs(
             for rel in empties
         ]
         before = len(_read_manifest(manifest_path))
+        # 这里不传 is_protected：命中项都是**当场确认为空**的目录，子树里没有东西，
+        # 「目录命中带走受保护后代」的漏洞在此不成立。
         quarantine_hits(root, run_id, hits, quarantine_dir, manifest_path)
         after = len(_read_manifest(manifest_path))
         done.update(empties)

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dirtidy.models import Decision, RuleHit, read_json, resolve_under, write_json
 from dirtidy.pipeline import append_protection_records, protect_rules_from_paths
-from dirtidy.quarantine.store import quarantine_hits
+from dirtidy.quarantine.store import drop_covered_descendants, plan_quarantine, quarantine_hits
 from dirtidy.rules.engine import effective_protect_rules, load_rule_pack
 from dirtidy.rules.protect import compile_protect_rules, evaluate_protect
 
@@ -65,6 +65,10 @@ def apply_decisions(
     decisions = load_decisions(run_path)
     manifest_path = run_path / "quarantine_manifest.json"
     matchers = _protect_matchers(run_path)
+
+    def guard(rel: str, is_dir: bool) -> tuple[str, str] | None:
+        return evaluate_protect(matchers, rel, is_dir)
+
     q_hits: list[RuleHit] = []
     archived = 0
     kept = 0
@@ -87,13 +91,13 @@ def apply_decisions(
                 continue
             is_dir = src.is_dir()
             rel = posixpath.normpath(str(d.path).replace("\\", "/")).lstrip("/")
-            guard = evaluate_protect(matchers, rel, is_dir)
-            if guard is not None:
+            guard_hit = guard(rel, is_dir)
+            if guard_hit is not None:
                 blocked.append(
                     {
                         "path": rel,
-                        "protect_rule_id": guard[0],
-                        "protect_reason": guard[1],
+                        "protect_rule_id": guard_hit[0],
+                        "protect_reason": guard_hit[1],
                         "intended_rule_id": "decision",
                         "intended_action": "auto_quarantine",
                         "is_dir": is_dir,
@@ -104,7 +108,7 @@ def apply_decisions(
                     {
                         "path": d.path,
                         "action": d.action,
-                        "reason": f"受保护（{guard[0]}：{guard[1]}），未执行隔离",
+                        "reason": f"受保护（{guard_hit[0]}：{guard_hit[1]}），未执行隔离",
                     }
                 )
                 continue
@@ -143,23 +147,58 @@ def apply_decisions(
             shutil.move(str(src), str(dest))
             archived += 1
 
-    if q_hits and not dry_run:
-        quarantine_dir.mkdir(parents=True, exist_ok=True)
-        quarantine_hits(root, run_id, q_hits, quarantine_dir, manifest_path)
+    if dry_run:
+        # 与实跑共用 plan_quarantine：人工决策把整个目录标 quarantine 时，
+        # 若目录子树内含受保护路径同样必须拦下，预览与实跑不能有分歧。
+        executable, dry_blocks = plan_quarantine(root, q_hits, is_protected=guard)
+        all_blocked = [*blocked, *dry_blocks]
+        return {
+            "kept": kept,
+            "archived": archived,
+            "quarantined": len(executable),
+            "blocked_by_protect": len(all_blocked),
+            "skipped": skipped,
+            "dry_run": True,
+            "would_archive": [p for p in planned_targets.values()],
+            "would_quarantine": [h.path for h in executable],
+            "blocked_paths": [b["path"] for b in all_blocked],
+        }
 
-    if blocked and not dry_run:
+    descendant_blocks: list[dict] = []
+    if q_hits:
+        quarantine_dir.mkdir(parents=True, exist_ok=True)
+        quarantine_hits(
+            root,
+            run_id,
+            q_hits,
+            quarantine_dir,
+            manifest_path,
+            is_protected=guard,
+            blocked=descendant_blocks,
+        )
+
+    if descendant_blocks:
+        blocked.extend(descendant_blocks)
+        skipped.extend(
+            {
+                "path": b["path"],
+                "action": "quarantine",
+                "reason": f"子树内含受保护路径（{b['protect_reason']}），未执行隔离",
+            }
+            for b in descendant_blocks
+        )
+
+    if blocked:
         append_protection_records(run_path, blocked)
 
-    result = {
+    # 与 plan_quarantine 同源的纯集合运算（不再走一次实盘遍历），保证报数与实搬一致
+    blocked_paths = {b["path"] for b in descendant_blocks}
+    executed = drop_covered_descendants([h for h in q_hits if h.path not in blocked_paths])
+
+    return {
         "kept": kept,
         "archived": archived,
-        "quarantined": len(q_hits),
+        "quarantined": len(executed),
         "blocked_by_protect": len(blocked),
         "skipped": skipped,
     }
-    if dry_run:
-        result["dry_run"] = True
-        result["would_archive"] = [p for p in planned_targets.values()]
-        result["would_quarantine"] = [h.path for h in q_hits]
-        result["blocked_paths"] = [b["path"] for b in blocked]
-    return result

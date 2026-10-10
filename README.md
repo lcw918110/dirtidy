@@ -53,6 +53,10 @@ dirtidy serve --root /path/to/root --port 8765
 规则包有三个 action：`protect`（**最高优先级**，命中即永不自动隔离，也不进候选）、`auto_quarantine`、`candidate_only`。
 保护清单内置在 `src/dirtidy/rules/protect.py`，规则包关不掉：版本控制元数据、凭据目录、系统保留目录、密钥文件（`.env*`/`*.pem`/`id_rsa` 等）。
 
+保护判定是**双向**的：目录命中保护 ⇒ 其整棵子树受保护；反过来，一个命中自动隔离的目录若子树内含受保护路径，
+**整条命中会被拦下**并记入 `protection.json`。少了后者，保护会被「搬走它的父目录」绕开——
+`node_modules` 命中 dep 规则时，`node_modules/.env`、`node_modules/id_rsa` 就会被一并端走。
+
 想额外护住某个目录：
 
 ```bash
@@ -69,6 +73,8 @@ dirtidy scan /path/to/root --protect path/to/keep --protect another/dir
 - 外发模型默认只传安全摘要，且 `summary.max_targets` 给单次外发封顶
 - `apply-rules` 在搬文件前会用当前生效的保护清单**再复核一遍**，防止 pending 被改过就绕过保护
 - `apply-decisions`（人工决策隔离）同样复核保护清单，两条执行路径语义一致；受保护项被拦下并记入 `protection.json`
+- 命中自动隔离的目录若子树内含受保护路径（或子树不可读），整条拦下、不执行隔离——保护不能被「搬走父目录」绕开
+- 目录与其内文件同时命中时只保留父目录一条，避免清单出现永远还原不回去的记录
 - 0 字节文件不参与重复组判定（否则 `.env`/`id_rsa` 这类空文件会被凑成「内容相同」诱导误操作）
 - `scan` / `apply-rules` / `apply-decisions` 都支持 `--dry-run`：先看「会动哪些、哪些被保护拦下」再决定执行
 - 自动隔离可在执行前人工保留（CLI `--keep 相对路径` / 网页勾选「保留」）；保留项本轮不动并记入 `protection.json`，可审计追溯
@@ -87,7 +93,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 114 个用例
+pytest -q            # 124 个用例
 ruff check src tests
 mypy
 ```
