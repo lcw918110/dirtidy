@@ -94,7 +94,6 @@ def scan_tree(
                             is_dir=True,
                             size=0,
                             mtime=st.st_mtime,
-                            suffix="",
                         )
                     )
                 except OSError as e:
@@ -111,7 +110,6 @@ def scan_tree(
                             is_dir=False,
                             size=int(st.st_size),
                             mtime=st.st_mtime,
-                            suffix=p.suffix.lower(),
                         )
                     )
                 except OSError as e:
@@ -122,7 +120,6 @@ def scan_tree(
                             is_dir=False,
                             size=0,
                             mtime=0.0,
-                            suffix=Path(name).suffix.lower(),
                             error=str(e),
                         )
                     )

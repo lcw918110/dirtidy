@@ -306,13 +306,13 @@ def test_archive_file_size_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     root = tmp_path / "ws"
     root.mkdir()
     (root / "a.zip").write_bytes(b"PK\x03\x04" + b"x" * 100)
-    items = [InventoryItem(path="a.zip", is_dir=False, size=104, mtime=1.0, suffix=".zip")]
+    items = [InventoryItem(path="a.zip", is_dir=False, size=104, mtime=1.0)]
     out = hashing_content.find_extracted_archives(root, items)
     assert out and out[0].rule_id == "archive_too_large"
 
 
 def test_find_extracted_archives_skips_hash_set_when_no_archives(tmp_path: Path) -> None:
-    items = [InventoryItem(path="a.txt", is_dir=False, size=1, mtime=1.0, suffix=".txt", sha256="h")]
+    items = [InventoryItem(path="a.txt", is_dir=False, size=1, mtime=1.0, sha256="h")]
     assert hashing_content.find_extracted_archives(tmp_path, items) == []
 
 

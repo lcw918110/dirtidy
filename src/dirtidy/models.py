@@ -4,8 +4,9 @@
 - `.dirtidy/runs/<run_id>/`：一次整理运行的产物
 - `.dirtidy/quarantine/<run_id>/`：隔离区实体文件
 
-规模约定：所有 dataclass 都用 `slots=True`。百万级文件下，`InventoryItem` 每条
-从 215 B 降到约 175 B（5M 文件省约 200 MB），是少数「零成本」的内存优化。
+规模约定：所有 dataclass 都用 `slots=True`；`InventoryItem` **不存**可由 `path` 现算的
+`suffix`——它每条要单独存一个字符串（实测约 57 B/条，500 万条约 270 MB），
+而全项目只有规则匹配一处需要它。实测占用与预算模型见 `docs/07-规模与性能.md`。
 """
 
 from __future__ import annotations
@@ -25,15 +26,34 @@ def utc_now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
+def suffix_of(path: str) -> str:
+    """等价于 `Path(path).suffix.lower()`，但不为每条条目常驻一个字符串。
+
+    两个边界都要守：
+    - 点开头不算后缀（`.env` 没有后缀，不是「后缀 `.env`」）；
+    - 点**结尾**也不算（`a.` / `x.` 的后缀是空串，`Path.suffix` 如此）。
+    `tests/test_rules_protect.py::test_suffix_of_matches_path_suffix` 逐例对照着守。
+    """
+    name = path.rsplit("/", 1)[-1]
+    dot = name.rfind(".")
+    if dot <= 0 or dot == len(name) - 1:
+        return ""
+    return name[dot:].lower()
+
+
 @dataclass(slots=True)
 class InventoryItem:
-    """扫描得到的单个路径条目（相对目标根）。"""
+    """扫描得到的单个路径条目（相对目标根）。
+
+    **没有 `suffix` 字段**：每条单独存一个后缀字符串实测约 57 B，500 万条就是 270 MB，
+    而全项目只有规则匹配一处读它。改为需要时 `suffix_of(path)` 现算——
+    省的是常驻内存，付出的是匹配时一次字符串操作。
+    """
 
     path: str
     is_dir: bool
     size: int
     mtime: float
-    suffix: str = ""
     sha256: str | None = None
     error: str | None = None
 

@@ -4,7 +4,12 @@
     python scripts/bench_scale.py                 # 默认 2000 文件 / 200 目录
     python scripts/bench_scale.py --files 20000
 
-只依赖标准库，不写仓库外任何东西；合成树建在系统临时目录下，跑完即删。
+只依赖标准库。合成树建在**当前工作目录**的 `.bench-tmp/`（已进 .gitignore），跑完即删——
+不用系统临时目录，是因为某些沙箱不允许往 /tmp 大批建文件；反过来，若所在环境会拦截
+「工作目录内批量删除」，请先 `cd` 到一个可自由删除的目录再运行。
+
+注意 [1] 条目内存：样本里每条都必须是**新造**的对象。用 `mtime=1.0`、`suffix=".py"`
+这类字面量做样本会被解释器共享，测出来的数字明显偏低（旧版正因此把 5M 条的账算少了一半）。
 """
 
 from __future__ import annotations
@@ -16,7 +21,9 @@ import shutil
 import sys
 import time
 import tracemalloc
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -39,40 +46,92 @@ def _row(label: str, per: float) -> None:
     )
 
 
+def _measure(build: Callable[[], list[Any]]) -> float:
+    """跑一次构造，返回每条的平均常驻字节数。
+
+    用 tracemalloc 而不是 `sys.getsizeof`：前者统计**实际分配**，
+    能把每条各自的路径字符串、mtime、hash 都算进去。
+    """
+    tracemalloc.start()
+    base = tracemalloc.get_traced_memory()[0]
+    objs = build()
+    used = tracemalloc.get_traced_memory()[0] - base
+    tracemalloc.stop()
+    del objs
+    return used / N_ENTRIES
+
+
 def bench_entry_memory() -> None:
-    """单个 InventoryItem 的常驻开销（含 slots 对比）。"""
-    tracemalloc.start()
-    base = tracemalloc.get_traced_memory()[0]
-    items = [
-        InventoryItem(path=f"proj{i % 50}/svc{i}/src/module_{i}.py", is_dir=False, size=i, mtime=1.0, suffix=".py")
-        for i in range(N_ENTRIES)
-    ]
-    used = tracemalloc.get_traced_memory()[0] - base
-    tracemalloc.stop()
-    per = used / N_ENTRIES
-    _row("InventoryItem（slots=True）  ", per)
-    del items
+    """单个 InventoryItem 的常驻开销。
 
-    # 对照：去掉 slots 的等价对象（用普通类模拟旧实现）
-    class Plain:
-        __slots__ = ()
+    关键：每条都必须造**新**的 mtime 与 sha256 对象。写成 `mtime=1.0` 这类字面量会被
+    解释器共享，测出来的数字明显低于真实扫描场景——旧版基准正因此把 5M 条的账算少了一半。
+    """
 
-    class NoSlots:
-        def __init__(self, path: str, is_dir: bool, size: int, mtime: float, suffix: str = "") -> None:
-            self.path, self.is_dir, self.size, self.mtime, self.suffix = path, is_dir, size, mtime, suffix
-            self.sha256 = None
-            self.error = None
+    def current() -> list[Any]:
+        return [
+            InventoryItem(
+                path=f"proj{i % 50}/svc{i}/src/module_{i}.py",
+                is_dir=False,
+                size=i,
+                mtime=1_700_000_000.0 + i,
+                sha256=f"{i:064x}",
+            )
+            for i in range(N_ENTRIES)
+        ]
 
-    tracemalloc.start()
-    base = tracemalloc.get_traced_memory()[0]
-    plain = [
-        NoSlots(f"proj{i % 50}/svc{i}/src/module_{i}.py", False, i, 1.0, ".py") for i in range(N_ENTRIES)
-    ]
-    used = tracemalloc.get_traced_memory()[0] - base
-    tracemalloc.stop()
-    per = used / N_ENTRIES
-    _row("__dict__ 版本（无 slots 对照）", per)
-    del plain
+    class _WithSuffix:
+        """对照：第一期保留 suffix 字段的结构（现已改为按需现算）。"""
+
+        __slots__ = ("path", "is_dir", "size", "mtime", "suffix", "sha256", "error")
+
+        def __init__(
+            self,
+            path: str,
+            is_dir: bool,
+            size: int,
+            mtime: float,
+            suffix: str = "",
+            sha256: str | None = None,
+        ) -> None:
+            self.path, self.is_dir, self.size, self.mtime = path, is_dir, size, mtime
+            self.suffix, self.sha256, self.error = suffix, sha256, None
+
+    def legacy() -> list[Any]:
+        return [
+            _WithSuffix(
+                f"proj{i % 50}/svc{i}/src/module_{i}.py",
+                False,
+                i,
+                1_700_000_000.0 + i,
+                # 必须运行时生成：写成 "." + "py" 会被编译器常量折叠成共享字面量，
+                # 于是这条对照反而测不出 suffix 的真实开销。
+                f".{i % 100:02d}",
+                f"{i:064x}",
+            )
+            for i in range(N_ENTRIES)
+        ]
+
+    class _NoSlots:
+        """对照：不用 slots 的等价对象（多背一个 __dict__）。"""
+
+        def __init__(
+            self, path: str, is_dir: bool, size: int, mtime: float, sha256: str | None = None
+        ) -> None:
+            self.path, self.is_dir, self.size, self.mtime = path, is_dir, size, mtime
+            self.sha256, self.error = sha256, None
+
+    def no_slots() -> list[Any]:
+        return [
+            _NoSlots(
+                f"proj{i % 50}/svc{i}/src/module_{i}.py", False, i, 1_700_000_000.0 + i, f"{i:064x}"
+            )
+            for i in range(N_ENTRIES)
+        ]
+
+    _row("InventoryItem（slots=True）  ", _measure(current))
+    _row("对照：含 suffix 的旧结构    ", _measure(legacy))
+    _row("对照：无 slots 的等价对象   ", _measure(no_slots))
 
 
 def build_tree(root: Path, n_files: int) -> None:

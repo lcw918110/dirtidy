@@ -57,6 +57,11 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
     def meta() -> dict:
         return {"root": str(default_root), "run_id": default_run_id}
 
+    @app.get("/api/health")
+    def health() -> dict:
+        """探活端点：桌面壳用它判断「路由已挂好」，而不是只判断端口通了。"""
+        return {"status": "ok"}
+
     @app.get("/api/runs")
     def list_runs() -> dict:
         runs_root = state_root(default_root) / "runs"

@@ -136,6 +136,32 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_desktop(args: argparse.Namespace) -> int:
+    from dirtidy.desktop import launch
+
+    return launch(
+        _resolve_root(args.root),
+        host=args.host,
+        port=args.port,
+        open_browser=not args.no_browser,
+        use_tray=not args.no_tray,
+    )
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    from dirtidy.watch import run_watch
+
+    return run_watch(
+        _resolve_root(args.root),
+        interval_minutes=args.interval,
+        rules=args.rules,
+        quick=not args.full,
+        protect=args.protect,
+        max_rounds=args.rounds,
+        notify_enabled=not args.no_notify,
+    )
+
+
 def cmd_save_decisions(args: argparse.Namespace) -> int:
     root = _resolve_root(args.root)
     rdir = run_dir(root, args.run_id)
@@ -221,6 +247,25 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
     s.set_defaults(func=cmd_serve)
+
+    s = sub.add_parser("desktop", help="薄壳启动器：起本地服务并打开浏览器（降低启动门槛）")
+    s.add_argument("root", nargs="?", default=".", help="目标根目录（默认当前目录）")
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--port", type=int, default=8765, help="首选端口；被占用会自动顺延")
+    s.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    s.add_argument("--no-tray", action="store_true", help="不显示托盘图标")
+    s.set_defaults(func=cmd_desktop)
+
+    s = sub.add_parser("watch", help="定时监视：定期扫描并报告新增命中（只扫描，绝不执行隔离）")
+    s.add_argument("root", nargs="?", default=".", help="目标根目录（默认当前目录）")
+    s.add_argument("--rules", default="default", help="规则包名或 YAML 路径")
+    s.add_argument("--interval", type=float, default=30.0, help="扫描间隔（分钟）")
+    s.add_argument("--full", action="store_true", help="包含内容 hash（默认跳过，仅看规则命中）")
+    s.add_argument("--rounds", type=int, default=None, help="只跑 N 轮后退出（默认无限）")
+    s.add_argument("--no-notify", action="store_true", help="不发系统通知")
+    s.add_argument("--protect", action="append", default=[], metavar="REL_PATH",
+                   help="额外保护某个相对路径（含其整棵子树），可重复")
+    s.set_defaults(func=cmd_watch)
 
     return p
 

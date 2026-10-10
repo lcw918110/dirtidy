@@ -23,18 +23,41 @@ DAY = 86400.0
 
 
 def _item(path: str, *, is_dir: bool = False, size: int = 0, age_days: float = 0.0) -> InventoryItem:
-    name = path.rsplit("/", 1)[-1]
-    suffix = ""
-    if not is_dir:
-        dot = name.rfind(".")
-        suffix = name[dot:].lower() if dot > 0 else ""
+    # 不传 suffix：条目不再存它，规则匹配侧用 suffix_of(path) 现算
     return InventoryItem(
         path=path,
         is_dir=is_dir,
         size=size,
         mtime=NOW - age_days * DAY,
-        suffix=suffix,
     )
+
+
+def test_suffix_of_matches_path_suffix() -> None:
+    """`suffix_of` 必须与 `Path.suffix` 逐例一致。
+
+    它是被去掉的 `suffix` 字段的替代品；一旦行为漂移，规则匹配就会与第一期不一样
+    （最典型的是 `.env` 突然「有了后缀」，或者 `a.` 被判成后缀 `.`）。
+    """
+    from dirtidy.models import suffix_of
+
+    cases = [
+        "a.py",
+        "a.tar.gz",
+        ".env",
+        "dir/.env",
+        "noext",
+        "dir/noext",
+        "a.",
+        "x.",
+        "..",
+        ".",
+        ".a.b",
+        "a..b",
+        "x.PY",
+        "dir.d/file",
+    ]
+    for case in cases:
+        assert suffix_of(case) == Path(case).suffix.lower(), f"与 Path.suffix 不一致: {case!r}"
 
 
 def _empty_root(tmp_path: Path) -> Path:
@@ -129,7 +152,7 @@ def test_min_age_days_blocks_fresh_items(tmp_path: Path) -> None:
 
 def test_missing_mtime_is_conservative(tmp_path: Path) -> None:
     root = _empty_root(tmp_path)
-    it = InventoryItem(path="x.log", is_dir=False, size=1, mtime=0.0, suffix=".log")
+    it = InventoryItem(path="x.log", is_dir=False, size=1, mtime=0.0)
     pack = {
         "rules": [
             {

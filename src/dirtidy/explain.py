@@ -158,17 +158,13 @@ class Explanation:
 
 
 def _item_for(root: Path, rel: str, is_dir: bool) -> InventoryItem:
-    name = rel.rsplit("/", 1)[-1]
-    suffix = ""
-    if not is_dir:
-        dot = name.rfind(".")
-        suffix = name[dot:].lower() if dot > 0 else ""
     try:
         st = (root / rel).stat()
         size, mtime = (0 if is_dir else int(st.st_size)), float(st.st_mtime)
     except OSError:
         size, mtime = 0, 0.0
-    return InventoryItem(path=rel, is_dir=is_dir, size=size, mtime=mtime, suffix=suffix)
+    # 不再预算 suffix：规则匹配侧会用 suffix_of(path) 现算，这里保持一致
+    return InventoryItem(path=rel, is_dir=is_dir, size=size, mtime=mtime)
 
 
 def _collect_items(root: Path, rel: str, is_dir: bool) -> tuple[list[InventoryItem], int, bool]:

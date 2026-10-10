@@ -45,6 +45,7 @@ from dirtidy.models import (
     RuleHit,
     RuleMatchResult,
     default_rules_dir,
+    suffix_of,
 )
 from dirtidy.rules.protect import (
     builtin_protect_rules,
@@ -408,7 +409,7 @@ def _match_items(
             for s in (match.get("suffixes") or ())
         }
         for it in items:
-            if not it.is_dir and it.suffix.lower() in suffixes:
+            if not it.is_dir and suffix_of(it.path) in suffixes:
                 yield it
 
     elif mtype == "empty_dir":

@@ -40,6 +40,13 @@ dirtidy analyze /path/to/root <run_id> --mock
 # 本地 Web 审阅：可看「待自动隔离」并勾选保留后直接执行，也能看受保护清单与已隔离清单；
 # 每条路径旁有「为什么？」按钮，弹窗与 CLI explain 是同一份解释
 dirtidy serve --root /path/to/root --port 8765
+
+# 桌面壳：起本地服务 + 自动打开浏览器（端口被占用会自动顺延；
+# 装了 pystray 还会显示托盘图标，没装就按 Ctrl-C 退出）
+dirtidy desktop /path/to/root
+
+# 定时监视：定期扫描并报告新增/消失的命中项 —— 只扫描，绝不执行隔离
+dirtidy watch /path/to/root --interval 30
 ```
 
 产物目录：`<root>/.dirtidy/runs/<run_id>/`；隔离区：`<root>/.dirtidy/quarantine/<run_id>/`。未改动文件的内容 hash 缓存在 `<root>/.dirtidy/hash_cache.sqlite`。扫描可加 `--workers 8` 并行算 hash。
@@ -91,6 +98,8 @@ dirtidy scan /path/to/root --protect path/to/keep --protect another/dir
 - 0 字节文件不参与重复组判定（否则 `.env`/`id_rsa` 这类空文件会被凑成「内容相同」诱导误操作）
 - `scan` / `apply-rules` / `apply-decisions` 都支持 `--dry-run`：先看「会动哪些、哪些被保护拦下」再决定执行
 - 自动隔离可在执行前人工保留（CLI `--keep 相对路径` / 网页勾选「保留」）；保留项本轮不动并记入 `protection.json`，可审计追溯
+- `watch`（定时监视）**只扫描不执行**：源码里不存在任何执行入口，并有静态守护用例守着这条不变量
+- `desktop` 只是启动器，不改变任何行为；就绪判定走 `GET /api/health`，避免「端口通了但页面打不开」
 - 非 quick 扫描将文件 `path + size + mtime + sha256` 缓存在 `<root>/.dirtidy/hash_cache.sqlite`；处理敏感目录时可加 `--quick` 跳过内容 hash 与缓存
 
 ## 规模
@@ -106,7 +115,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 130 个用例
+pytest -q            # 155 个用例
 ruff check src tests
 mypy
 ```
