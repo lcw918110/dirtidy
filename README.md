@@ -104,7 +104,7 @@ dirtidy scan /path/to/root --protect path/to/keep --protect another/dir
 
 ## 规模
 
-面向百万文件 / T 级数据设计，500 万条条目常驻内存预算约 1.0–1.5 GB。
+面向百万文件 / T 级数据设计，500 万条条目常驻内存预算约 1.55 GB（上限 2 GB）。
 内存预算模型、采用的手段与实测数据见 [docs/07-规模与性能.md](docs/07-规模与性能.md)；
 
 ```bash
