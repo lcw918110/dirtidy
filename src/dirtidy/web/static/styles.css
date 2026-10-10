@@ -110,6 +110,25 @@ select, input, textarea { padding: 0.3rem; font: inherit; border: 1px solid var(
 .dup-group { border: 1px solid var(--line); padding: 0.75rem; margin-bottom: 0.5rem; background: rgba(255,255,255,0.65); }
 .hint { color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0 0.6rem; line-height: 1.55; }
 .rowline { padding: 0.25rem 0; font-size: 0.9rem; border-bottom: 1px solid var(--line); }
+
+/* 规则表最后一列是「直删」开关。列宽被前四列挤窄时，
+   「建议直删」会被折成竖排单字，所以这一列不许换行、给它一个下限宽度。 */
+#ruleRows td:last-child { white-space: nowrap; width: 8.5rem; }
+.purge-badge {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: rgba(47, 93, 80, 0.08);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* 空表/空区块：只有表头没有内容会让人以为「加载失败」，统一给一句人话。 */
+.empty-note { color: var(--muted); font-size: 0.88rem; padding: 0.6rem 0.2rem; }
+/* 扫描结果区在没跑过扫描时是个带边框的空盒子，看着像坏了——空着就别占位。 */
+#scanResult:empty { display: none; }
 .rowline code, td code { background: rgba(47,93,80,0.08); padding: 0.05rem 0.25rem; }
 .why {
   background: transparent;

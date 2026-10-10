@@ -99,6 +99,16 @@ function clear(node) {
   node.replaceChildren();
 }
 
+/* 空表提示：往 tbody 塞一行占满整行的说明。
+   只有表头、底下什么都没有，会让人以为是加载失败或者页面坏了。 */
+function emptyRow(tbody, colspan, text) {
+  const tr = document.createElement("tr");
+  const td = el("td", { cls: "empty-note", text });
+  td.setAttribute("colspan", String(colspan));
+  tr.appendChild(td);
+  tbody.appendChild(tr);
+}
+
 /* 统一用 DOM API 建节点：文件名/路径一律走 textContent 或 setAttribute，
    绝不拼 HTML 字符串，避免恶意文件名（如从压缩包解出的文件）注入脚本。 */
 function el(tag, { text, cls, attrs, on } = {}) {
@@ -204,6 +214,9 @@ function renderPending(data) {
   clear(tbody);
   const hits = data.pending_auto_hits || [];
   const purgeRules = new Set(data.auto_purge_rules || []);
+  if (!hits.length) {
+    emptyRow(tbody, 6, "本轮没有规则命中项。切到「扫描」页跑一次，或换一个 run。");
+  }
   // 命中目录会覆盖其内的文件命中（执行时只搬父目录）。这里把它标出来——
   // 否则页面写着「N 项」而实际只搬走更少，用户按数字核对会以为漏了。
   const dirPrefixes = hits.filter((h) => h.is_dir).map((h) => `${h.path}/`);
@@ -293,6 +306,14 @@ function renderQuarantine(data) {
   const entries = data.quarantine_manifest || [];
   const liveIds = new Set(entries.map((e) => e.id));
   for (const id of [...quarantined]) if (!liveIds.has(id)) quarantined.delete(id);
+
+  if (!entries.length) {
+    emptyRow(
+      tbody,
+      7,
+      "隔离区是空的。「审阅」页执行自动隔离、或对候选选「隔离」并执行后，条目会出现在这里。",
+    );
+  }
 
   for (const e of entries) {
     const tr = document.createElement("tr");
@@ -405,6 +426,9 @@ function renderReview(data) {
   }
   for (const p of Object.keys(suggestions)) paths.add(p);
 
+  if (!paths.size) {
+    emptyRow(rows, 5, "本轮没有候选文件。用完整扫描（不勾「跳过内容 hash」）才会产出候选与重复组。");
+  }
   for (const path of [...paths].sort()) {
     const sug = suggestions[path];
     const d = decisionFor(path);
@@ -446,8 +470,16 @@ function renderReview(data) {
   // 重复组：单选保留项，其余可一键标 quarantine
   const dups = document.getElementById("dups");
   clear(dups);
-  for (const c of data.candidates || []) {
-    if (c.kind !== "duplicate_group") continue;
+  const dupGroups = (data.candidates || []).filter((c) => c.kind === "duplicate_group");
+  if (!dupGroups.length) {
+    dups.appendChild(
+      el("div", {
+        cls: "empty-note",
+        text: "本轮没有重复组。重复组需要算内容 hash——「扫描」页不勾「跳过内容 hash」才会产出。",
+      }),
+    );
+  }
+  for (const c of dupGroups) {
     const box = el("div", { cls: "dup-group" });
     box.appendChild(el("div", { text: c.reason }));
     const groupName = `dup-${(c.meta && c.meta.sha256) || ""}`;
@@ -519,8 +551,12 @@ async function loadRules() {
   const tbody = document.getElementById("ruleRows");
   clear(tbody);
   const purgeSafe = new Set(data.purge_safe_ids || []);
+  const rules = data.rules || [];
+  if (!rules.length) {
+    emptyRow(tbody, 5, "这个规则包里没有规则。换一个规则包看看。");
+  }
 
-  for (const r of data.rules || []) {
+  for (const r of rules) {
     const tr = document.createElement("tr");
     tr.appendChild(el("td", { text: r.id }));
     tr.appendChild(el("td", { text: r.action || "candidate_only" }));
@@ -537,7 +573,7 @@ async function loadRules() {
         renderRuleSummary(purgeSafe);
       });
       td.appendChild(cb);
-      if (purgeSafe.has(r.id)) td.appendChild(el("span", { cls: "hint", text: " 建议直删" }));
+      if (purgeSafe.has(r.id)) td.appendChild(el("span", { cls: "hint purge-badge", text: "建议直删" }));
     } else {
       td.appendChild(el("span", { cls: "hint", text: "不适用" }));
     }
@@ -547,7 +583,11 @@ async function loadRules() {
 
   const ptbody = document.getElementById("protectRows");
   clear(ptbody);
-  for (const p of data.protect_policy || []) {
+  const policy = data.protect_policy || [];
+  if (!policy.length) {
+    emptyRow(ptbody, 5, "没有生效的保护规则——这不应该发生，内置保护清单不该为空。");
+  }
+  for (const p of policy) {
     const tr = document.createElement("tr");
     tr.appendChild(el("td", { text: p.builtin ? "内置" : "规则包" }));
     tr.appendChild(el("td", { text: p.id }));
@@ -756,6 +796,7 @@ document.getElementById("statusClose").onclick = () => {
   window.clearTimeout(statusTimer);
   document.getElementById("statusbar").hidden = true;
 };
+document.getElementById("gotoQuarantineBtn").onclick = () => showTab("quarantine");
 
 /* 模型分析（等价于 dirtidy analyze）。未在设置页启用时后端会返回 400，原样展示。 */
 document.getElementById("analyzeBtn").onclick = async () => {

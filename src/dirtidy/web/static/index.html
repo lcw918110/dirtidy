@@ -72,7 +72,7 @@
         <input id="scanApply" type="checkbox" />
         扫描后立即执行自动隔离
       </label>
-      <label class="block">额外保护路径（每行一个，含整棵子树；命中的路径永不自动隔离）
+      <label>额外保护路径（每行一个，含整棵子树；命中的路径永不自动隔离）
         <textarea id="scanProtect" rows="3" placeholder="例如：&#10;projects/client-a&#10;资料/合同"></textarea>
       </label>
       <button id="scanBtn" type="button">开始扫描</button>
@@ -222,7 +222,7 @@
   <section class="tab" id="tab-settings">
     <h2>设置</h2>
 
-    <div class="panel">
+    <div class="panel form">
       <h3>模型分析</h3>
       <label class="inline">
         <input id="useModel" type="checkbox" />
@@ -274,6 +274,10 @@
         彻底删除隔离区条目不可恢复。按条目删除会同步收敛清单；「清空隔离区」等价于
         命令行的 <code>dirtidy purge-quarantine --yes</code>。
       </p>
+      <p class="hint">
+        这些按钮刻意不放在设置页，而是和条目放在一起——你得看着要删的东西再点。
+      </p>
+      <button id="gotoQuarantineBtn" type="button">前往「隔离区」</button>
     </div>
   </section>
 
@@ -299,7 +303,7 @@
         <input id="watchNotify" type="checkbox" />
         发系统通知
       </label>
-      <label class="block">额外保护路径（每行一个）
+      <label>额外保护路径（每行一个）
         <textarea id="watchProtect" rows="2" placeholder="留空即不加额外保护"></textarea>
       </label>
       <button id="watchStartBtn" type="button">启动监视</button>

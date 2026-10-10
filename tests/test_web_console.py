@@ -402,6 +402,80 @@ def test_web_page_explains_direct_delete_semantics() -> None:
     assert "保护判定依然优先" in html
 
 
+def test_web_settings_form_shows_effective_defaults(client: TestClient) -> None:
+    """设置页预填的必须是**实际生效**的默认值，不能是空。
+
+    回归背景：`_model_form` 在「从未配置过模型」时把 summary 返回成 `{}`，
+    界面上「单次分析外发上限（条）」「非候选文件保留层级」两个框于是空着——
+    用户无从知道当前上限是多少，而实际生效的是 500 / 3（空 ≠ 无上限）。
+    """
+    summary = client.get("/api/settings").json()["model_form"]["summary"]
+    assert summary["max_targets"] == 500, "未配置时应回落到实际生效的默认值"
+    assert summary["max_depth"] == 3
+
+    # 配过的值必须盖过默认值，否则「回落到默认」会变成「永远显示默认」
+    client.put(
+        "/api/model",
+        json={"provider": "openai_compatible", "summary": {"max_targets": 42, "max_depth": 1}},
+    )
+    after = client.get("/api/settings").json()["model_form"]["summary"]
+    assert after["max_targets"] == 42
+    assert after["max_depth"] == 1
+
+
+def test_web_form_panels_declare_the_form_class() -> None:
+    """静态守护：含 `<label>` 的面板必须带 `form` 类，否则标签退化成 inline 挤成一团。
+
+    回归背景：设置页写成了 `<div class="panel">`（漏了 `form`），而样式选择器是
+    `.form label` / `.form input`——那一整块模型配置于是横向错位，标签与输入框对不上。
+    静态检查、接口测试全过，**只有截图才看得出来**。这里把 DOM 走一遍补上这条。
+    """
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    offenders = _labels_outside_form_panel(html)
+    assert not offenders, f"这些 <label> 所在的 panel 漏了 form 类，会错位：{offenders}"
+
+
+def _labels_outside_form_panel(html: str) -> list[str]:
+    """返回「所在 panel 没有 form 类」的 label 描述列表。
+
+    判定看**最近的布局祖先**：`toolbar`（flex 行，一行里放标签+控件是有意的）
+    或 `panel form`（竖向表单）都算合格；落在既没 form 又不在 toolbar 里的
+    `panel` 才算错位。
+    """
+    from html.parser import HTMLParser
+
+    void = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source"}
+
+    class Walker(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.open: list[tuple[str, set[str]]] = []  # (标签名, class 集合)
+            self.bad: list[str] = []
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            classes = set((dict(attrs).get("class") or "").split())
+            if tag == "label":
+                for _name, ancestor in reversed(self.open):
+                    if "toolbar" in ancestor:
+                        break  # 工具栏自己排布，inline 是对的
+                    if "panel" in ancestor:
+                        if "form" not in ancestor:
+                            self.bad.append(dict(attrs).get("id") or "<label>")
+                        break
+            if tag not in void:
+                self.open.append((tag, classes))
+
+        def handle_endtag(self, tag: str) -> None:
+            for i in range(len(self.open) - 1, -1, -1):
+                if self.open[i][0] == tag:
+                    del self.open[i:]
+                    return
+
+    walker = Walker()
+    walker.feed(html)
+    return walker.bad
+
+
 def test_frontend_console_avoids_innerhtml() -> None:
     """静态守护：控制台前端同样不得用 innerHTML 拼文件名（防 XSS 回归）。"""
     js = (STATIC / "app.js").read_text(encoding="utf-8")

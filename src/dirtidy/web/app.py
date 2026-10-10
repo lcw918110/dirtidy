@@ -40,6 +40,7 @@ from dirtidy.quarantine.store import (
 from dirtidy.rules.engine import RulePackError, load_rule_pack, protect_policy
 from dirtidy.rules.protect import builtin_protect_rules
 from dirtidy.settings import (
+    DEFAULT_SUMMARY,
     SELECTABLE_PROVIDERS,
     SettingsError,
     load_auto_purge_rules,
@@ -128,7 +129,9 @@ def _model_form(root: Path) -> dict[str, Any]:
             "host": str(ol.get("host") or "http://127.0.0.1:11434"),
             "model": str(ol.get("model") or "llama3.2"),
         },
-        "summary": dict(raw_summary) if isinstance(raw_summary, dict) else {},
+        # 未配置过也要给出**实际生效**的默认值，否则设置页两个数字框是空的，
+        # 用户无从知道当前上限是多少（空 ≠ 无上限）。
+        "summary": {**DEFAULT_SUMMARY, **(raw_summary if isinstance(raw_summary, dict) else {})},
     }
 
 
