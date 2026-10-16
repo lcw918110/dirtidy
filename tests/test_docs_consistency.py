@@ -21,6 +21,7 @@ DOCS_02 = DOCS / "02-需求规格.md"
 DOCS_03 = DOCS / "03-架构设计.md"
 DOCS_04 = DOCS / "04-规则包说明.md"
 DOCS_05 = DOCS / "05-测试与验收.md"
+DOCS_06 = DOCS / "06-已知缺口与后续.md"
 DOCS_07 = DOCS / "07-规模与性能.md"
 DOCS_09 = DOCS / "09-功能与使用汇总.md"
 TESTS_DIR = REPO_ROOT / "tests"
@@ -553,3 +554,57 @@ def test_docs_02_fr9_cli_list_matches_parser() -> None:
         f"docs/02 FR-9 的 CLI 列表与实际不符：文档多出 {sorted(listed - set(subs))}，"
         f"实现多出 {sorted(set(subs) - listed)}"
     )
+
+
+# 待办编号引用，如 `T-1`、**T-8**、T-1 ～ T-5。要求前后是词边界，
+# 避免把 `T-1 ～ T-10` 里的连写或别的含 T- 的串误当成编号。
+_DOC_TASK_ID_RE = re.compile(r"\bT-(\d+)\b")
+
+
+def _parse_docs_06_backlog_ids(doc_text: str) -> set[str]:
+    """解析 docs/06「待办台账」表，返回定义过的编号集合（如 {'T-1', ...}）。"""
+    lines = doc_text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("## 待办台账"):
+            start = i
+            break
+    assert start is not None, "未找到 docs/06「待办台账」标题"
+
+    ids: set[str] = set()
+    for line in lines[start + 1 :]:
+        if line.strip().startswith("## "):
+            break
+        m = re.match(r"^\|\s*(T-\d+)\s*\|", line.strip())
+        if m:
+            ids.add(m.group(1))
+    return ids
+
+
+def test_docs_task_ids_resolve_to_backlog() -> None:
+    """README 与 docs/ 里引用的每个 `T-n` 都必须在 docs/06 的「待办台账」里有定义行。
+
+    回归背景：技术类开放项统一收在 docs/06「待办台账」（T-1 ～ T-10），而 docs/07 / docs/08 /
+    docs/09 里散着「→ 待办 T-6」这类**引用**。台账一旦重编号或删条目，别处的引用就变成悬空编号：
+    读者拿着 `T-9` 去台账里找，找不到，也不知道它到底还开不开放。这类错与之前修过的文档漂移同源
+    ——不会让任何用例变红，只能靠机械核对。
+
+    本用例只查「引用有没有落点」，不查「引用处的描述是否与台账内容一致」——后者无法机械化，
+    强行做只会变成一条靠人肉维护的假守卫。
+    """
+    defined = _parse_docs_06_backlog_ids(DOCS_06.read_text(encoding="utf-8"))
+    assert len(defined) >= 10, f"docs/06 台账只解析出 {len(defined)} 条，结构可能已变"
+
+    problems: list[str] = []
+    seen = 0
+    for path in _doc_markdown_files():
+        rel = path.relative_to(REPO_ROOT)
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for m in _DOC_TASK_ID_RE.finditer(line):
+                tid = f"T-{m.group(1)}"
+                seen += 1
+                if tid not in defined:
+                    problems.append(f"{rel}:{lineno} 引用了 `{tid}`，但台账里没有定义")
+
+    assert seen >= 20, f"只扫到 {seen} 处待办编号引用，正则或文档结构可能已变"
+    assert not problems, "文档引用了台账里不存在的待办编号：\n  " + "\n  ".join(problems)
