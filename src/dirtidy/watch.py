@@ -17,6 +17,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
+from dirtidy.deadline import Deadline, RunTimeout
 from dirtidy.pipeline import protect_rules_from_paths
 from dirtidy.quarantine.store import drop_covered_descendants
 from dirtidy.rules.engine import load_rule_pack, match_rules
@@ -42,13 +43,16 @@ def scan_hits(
     rules: str = "default",
     quick: bool = True,
     protect: Sequence[str] = (),
+    deadline: Deadline | None = None,
 ) -> set[str]:
     """扫一遍，返回会被自动隔离的相对路径集合。
 
     **不落盘、不执行**：watch 只回答「现在有什么」，动不动是人的决定。
     也因此不产生 run 产物——每半小时留一份 run 目录会把 `.dirtidy/` 撑爆。
+
+    deadline 到点会抛 `RunTimeout`，由 `run_watch` 接住并跳过本轮。
     """
-    items, _errors = scan_tree(root, quick=quick)
+    items, _errors = scan_tree(root, quick=quick, deadline=deadline)
     pack = load_rule_pack(rules)
     match = match_rules(root, items, pack, extra_protect_rules=protect_rules_from_paths(protect))
     # 目录命中会覆盖其内的文件命中（执行时只搬父目录）。这里沿用执行侧同一份去重，
@@ -117,6 +121,22 @@ def _report(
         notify("dirtidy 发现新的可清理项", f"{lines}{more}\n\n查看：dirtidy desktop {root}")
 
 
+def _report_timeout(e: RunTimeout, rounds: int, *, first: bool) -> None:
+    """超时也要说话，而且要说清「下一轮照常」——否则用户以为监视已经死了。"""
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(
+        f"[{stamp}] 第 {rounds} 轮扫描超时：{e.phase}阶段超过 {e.seconds:g} 秒"
+        f"（已处理 {e.processed} 项）。",
+        flush=True,
+    )
+    if first:
+        print(
+            "  本轮跳过，下一轮照常。若属正常（盘慢 / 目录很大），"
+            "用 --timeout 调大或设为 0 关闭。",
+            flush=True,
+        )
+
+
 def run_watch(
     root: Path,
     *,
@@ -126,6 +146,7 @@ def run_watch(
     protect: Sequence[str] = (),
     max_rounds: int | None = None,
     notify_enabled: bool = True,
+    timeout: float = 0.0,
     stop_event: StopSignal | None = None,
     on_round: Callable[[dict[str, Any]], None] | None = None,
     _sleep: Callable[[float], None] = time.sleep,
@@ -139,10 +160,17 @@ def run_watch(
     stop_event 非 None 时，等待改用 `stop_event.wait(timeout)`：界面点「停止」
     能立刻退出，而不是傻等满一个 interval（默认 30 分钟，用户会以为按钮坏了）。
     on_round 每轮结束回调一次，供 Web 侧记录进度。
+
+    timeout > 0 时给**每一轮**单独设时限（见 `docs/06` T-3）。监视是无人值守的，
+    一轮卡在慢盘上就等于整个监视静默停摆——超时至少能报一句、并且继续跑下一轮。
+    超时那轮**不动 `previous`**：拿只扫了一半的集合去比，会把没扫到的东西全报成
+    「消失」，那是在编数据。下一轮仍与最后一次**完整**的扫描结果比对。
     """
     previous: set[str] = set()
     rounds = 0
     print(f"开始监视 {root}，每 {interval_minutes:g} 分钟扫描一次（只扫描，不执行任何隔离）。")
+    if timeout > 0:
+        print(f"单轮扫描时限 {timeout:g} 秒；超时只跳过本轮，不影响后续轮次。")
     print("按 Ctrl-C 停止。\n")
 
     def _wait(seconds: float) -> None:
@@ -151,11 +179,46 @@ def run_watch(
         else:
             _sleep(seconds)
 
+    failing = False
+
     try:
         while max_rounds is None or rounds < max_rounds:
             if stop_event is not None and stop_event.is_set():
                 break
-            current = _scan(root, rules=rules, quick=quick, protect=protect)
+            # 每轮一个独立时限：一轮卡住不该把后面的轮次也一起判死刑。
+            deadline = Deadline(timeout)
+            try:
+                current = _scan(
+                    root, rules=rules, quick=quick, protect=protect, deadline=deadline
+                )
+            except RunTimeout as e:
+                rounds += 1
+                _report_timeout(e, rounds, first=not failing)
+                # 只在「进入超时状态」时通知一次，避免每轮都弹一条把人淹掉。
+                if notify_enabled and not failing:
+                    notify(
+                        "dirtidy 监视：单轮扫描超时",
+                        f"{e.phase}阶段超过 {e.seconds:g} 秒（已处理 {e.processed} 项）。\n"
+                        f"本轮已跳过，下一轮照常。\n\n可用 --timeout 调大或设为 0 关闭。",
+                    )
+                failing = True
+                if on_round is not None:
+                    on_round(
+                        {
+                            "rounds": rounds,
+                            "total": len(previous),
+                            "added": [],
+                            "removed": [],
+                            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "timed_out": True,
+                            "error": str(e),
+                        }
+                    )
+                if max_rounds is not None and rounds >= max_rounds:
+                    break
+                _wait(interval_minutes * 60)
+                continue
+            failing = False
             added, removed = diff_hits(previous, current)
             _report(root, added, removed, len(current), notify_enabled=notify_enabled)
             previous = current
@@ -168,6 +231,7 @@ def run_watch(
                         "added": sorted(added),
                         "removed": sorted(removed),
                         "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "timed_out": False,
                     }
                 )
             if max_rounds is not None and rounds >= max_rounds:

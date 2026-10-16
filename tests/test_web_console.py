@@ -630,3 +630,38 @@ def test_review_action_buttons_sit_next_to_their_table() -> None:
     assert html.index('id="applyRulesBtn"') < cand, "「执行自动隔离」属于它上面的「待自动隔离」表"
     for el_id in ("adoptBtn", "saveBtn", "applyBtn"):
         assert html.index(f'id="{el_id}"') > cand, f"{el_id} 必须排在「候选 / 建议」标题之后"
+
+
+# ------------------------------ 扫描超时 ------------------------------
+
+
+def test_ui_warns_when_scan_timed_out() -> None:
+    """只扫了一半的产物，数字看起来和完整的一模一样——界面必须在**所有分页之上**说清楚。
+
+    回归背景：`scan --apply --timeout` 超时后不执行隔离，但 meta 里的 `applied`
+    一度仍是 `true`，界面会显示「本轮已执行过自动隔离」；而「这个目录很干净」
+    那条结论更是拿半棵树的结果下的。这类「界面看起来是完整的 / 做了的」，
+    与审阅页那次静默失效同源。
+    """
+    assert 'id="partialWarn"' in _html(), "警告条要在分页之外，每页都能看到"
+
+    body = _js_function("renderPartialWarning")
+    assert "timed_out" in body
+    assert "不完整" in body and "没有执行任何隔离" in body, "要说清后果，不能只说「超时了」"
+
+    guide = _js_function("renderGuide")
+    assert "timed_out" in guide, "超时的 run 不能走「这个目录很干净」那条分支"
+
+
+def test_timeout_wording_matches_cli() -> None:
+    """界面与 CLI 必须用同一套措辞：同一件事两种说法，用户会以为是两回事。"""
+    from dirtidy.cli import timeout_phrase
+
+    assert timeout_phrase({"timeout": {"phase": "扫描元数据", "seconds": 30, "processed": 12}}) == (
+        "扫描元数据阶段，超过 30 秒，已处理 12 项"
+    )
+    assert timeout_phrase({}) == "未知阶段"  # 兜底不炸，也不该拼出「阶段阶段」
+
+    js = _js_function("timeoutPhrase")
+    for field in ("phase", "seconds", "processed"):
+        assert field in js, f"界面措辞漏了 {field}"

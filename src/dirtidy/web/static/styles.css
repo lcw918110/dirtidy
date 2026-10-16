@@ -117,6 +117,19 @@ select:disabled, input:disabled, textarea:disabled {
 #statusClose:hover { color: var(--danger); }
 .dup-group { border: 1px solid var(--line); padding: 0.75rem; margin-bottom: 0.5rem; background: rgba(255,255,255,0.65); }
 .hint { color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0 0.6rem; line-height: 1.55; }
+/* 跨分页的警告条：只扫了一部分的产物，数字看起来和完整的一模一样，
+   必须摆在所有分页之上，不能只藏在某一页里。 */
+.warn {
+  color: var(--danger);
+  background: #fbeeee;
+  border-left: 3px solid var(--danger);
+  border-radius: 0 6px 6px 0;
+  padding: 0.6rem 0.8rem;
+  margin: 0.6rem 0 0.4rem;
+  font-size: 0.88rem;
+  line-height: 1.55;
+}
+.warn[hidden] { display: none; }
 .rowline { padding: 0.25rem 0; font-size: 0.9rem; border-bottom: 1px solid var(--line); }
 
 /* 规则表最后一列是「直删」开关。列宽被前四列挤窄时，

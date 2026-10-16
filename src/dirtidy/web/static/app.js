@@ -207,6 +207,34 @@ function showTab(name) {
 /* 引导区：先回答「现在该做什么」，再给数字。
    之前首屏是六个卡片 + 一段流程说明，用户看完仍不知道该点哪——
    数字是给已经懂流程的人看的，新用户需要的是一个动作。 */
+/* 超时措辞与 CLI 的 timeout_phrase() 保持一致——同一件事在两处用两套说法，
+   用户会以为是两回事。 */
+function timeoutPhrase(meta) {
+  const info = (meta && meta.timeout) || {};
+  const bits = [info.phase ? `${info.phase}阶段` : "未知阶段"];
+  if (info.seconds) bits.push(`超过 ${info.seconds} 秒`);
+  if (info.processed !== undefined && info.processed !== null) {
+    bits.push(`已处理 ${info.processed} 项`);
+  }
+  return bits.join("，");
+}
+
+/* 跨分页的「这次没跑完」警告。一份只扫了一半的产物，数字看起来和完整产物
+   一模一样，所以必须摆在所有分页之上，不能只藏在概览里。 */
+function renderPartialWarning(data) {
+  const box = document.getElementById("partialWarn");
+  const meta = (data && data.meta) || {};
+  if (!meta.timed_out) {
+    box.hidden = true;
+    box.textContent = "";
+    return;
+  }
+  box.hidden = false;
+  box.textContent =
+    `本次扫描超时（${timeoutPhrase(meta)}），只覆盖了一部分目录：` +
+    "下面的数字不完整，本次也没有执行任何隔离。把扫描时限调大或设为 0 后重新扫描。";
+}
+
 function renderGuide(data) {
   const box = document.getElementById("overviewGuide");
   clear(box);
@@ -219,7 +247,12 @@ function renderGuide(data) {
   let title;
   let sub;
   let actions;
-  if (!currentRun) {
+  if ((data.meta || {}).timed_out) {
+    // 超时的 run 绝不能走「这个目录很干净」那条分支——那是拿半棵树的结果下结论。
+    title = "这次扫描没跑完";
+    sub = `扫描超时（${timeoutPhrase(data.meta)}），下面的数字只覆盖了一部分目录，不能当成完整结论。`;
+    actions = [["重新扫描", "scan"], ["去审阅", "review"]];
+  } else if (!currentRun) {
     title = "还没有扫描结果";
     sub = "先扫描一次，看看这个目录里有什么可以清理。扫描只读元数据，不动任何文件。";
     actions = [["去扫描", "scan"]];
@@ -921,6 +954,7 @@ async function loadRun(runId) {
   currentRun = runId;
   const data = await api(`/api/runs/${runId}`);
   for (const d of data.decisions || []) decisions.set(d.path, d);
+  renderPartialWarning(data);
   renderOverview(data);
   renderReview(data);
   renderQuarantine(data);

@@ -13,9 +13,32 @@ from dirtidy.models import Decision, iter_json_array, quarantine_root, read_json
 from dirtidy.pipeline import apply_pending_rules, create_run
 from dirtidy.quarantine.store import purge_quarantine_dir, restore_entries
 
+#: 单次运行超时时的退出码。与 1（explain 找不到路径）、2（用法错误）区分开，
+#: 脚本能凭它判断「这次是超时，重跑或调大时限即可」，而不是「跑失败了」。
+EXIT_TIMEOUT = 3
+
+_TIMEOUT_HELP = (
+    "单次运行的时限（秒，默认 0 = 不限）。超时**不丢结果**：已扫到的部分照常写进 run 产物，"
+    "但**不执行隔离**；退出码为 3"
+)
+
 
 def _resolve_root(path: str) -> Path:
     return Path(path).expanduser().resolve()
+
+
+def timeout_phrase(meta: dict) -> str:
+    """把 meta 里的超时信息翻成一句人话，供 CLI 与界面共用同一套措辞。"""
+    info = meta.get("timeout") or {}
+    phase = info.get("phase")
+    seconds = info.get("seconds")
+    processed = info.get("processed")
+    bits = [f"{phase}阶段" if phase else "未知阶段"]
+    if seconds:
+        bits.append(f"超过 {seconds:g} 秒")
+    if processed is not None:
+        bits.append(f"已处理 {processed} 项")
+    return "，".join(bits)
 
 
 def _existing_runs(root: Path) -> list[str]:
@@ -53,6 +76,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             workers=args.workers,
             on_progress=None if args.quick else _progress,
             protect=args.protect,
+            timeout=args.timeout,
         )
         run_id = str(meta.get("run_id", ""))
         cpath = run_dir(root, run_id) / "candidates.json"
@@ -61,6 +85,13 @@ def cmd_start(args: argparse.Namespace) -> int:
             f"扫描完成：规则命中 {meta.get('auto_hits', 0)} 项、候选 {n_cand} 项。",
             file=sys.stderr,
         )
+        if meta.get("timed_out"):
+            # 超时的产物**看起来和完整产物一样**，不在这里说清楚，用户会以为目录里就这么多。
+            print(
+                f"注意：本次扫描超时（{timeout_phrase(meta)}），只覆盖了一部分目录，"
+                "结果不完整。可把 --timeout 调大或设为 0 后重新扫描。",
+                file=sys.stderr,
+            )
     else:
         print("已有扫描结果，直接打开界面（想重新扫描加 --rescan）。", file=sys.stderr)
     return launch(
@@ -92,10 +123,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
         workers=args.workers,
         on_progress=None if args.quick else _progress,
         protect=args.protect,
+        timeout=args.timeout,
     )
     if args.dry_run:
         meta = {**meta, "dry_run": True}
     print(json.dumps(meta, ensure_ascii=False, indent=2))
+    if meta.get("timed_out"):
+        print(
+            f"运行超时（{timeout_phrase(meta)}）：已把扫到的部分写进 run 产物，"
+            "**未执行隔离**。可把 --timeout 调大或设为 0 后重跑。",
+            file=sys.stderr,
+        )
+        return EXIT_TIMEOUT
     return 0
 
 
@@ -223,6 +262,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         protect=args.protect,
         max_rounds=args.rounds,
         notify_enabled=not args.no_notify,
+        timeout=args.timeout,
     )
 
 
@@ -248,6 +288,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--protect", action="append", default=[], metavar="REL_PATH",
                    help="额外保护某个相对路径（含其整棵子树），可重复")
     s.add_argument("--rescan", action="store_true", help="即使已有扫描结果也重新扫描")
+    s.add_argument(
+        "--timeout",
+        type=float,
+        default=0.0,
+        metavar="秒",
+        help=_TIMEOUT_HELP,
+    )
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765, help="首选端口；被占用会自动顺延")
     s.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
@@ -263,6 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--protect", action="append", default=[], metavar="REL_PATH",
                    help="额外保护某个相对路径（含其整棵子树），可重复；命中的路径永不自动隔离")
     s.add_argument("--dry-run", action="store_true", help="只预览不落盘（与 --apply 互斥）")
+    s.add_argument("--timeout", type=float, default=0.0, metavar="秒", help=_TIMEOUT_HELP)
     s.set_defaults(func=cmd_scan)
 
     s = sub.add_parser("explain", help="解释某个相对路径会被如何处理（规则/条件/保护逐条摊开）")
@@ -341,6 +389,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--full", action="store_true", help="包含内容 hash（默认跳过，仅看规则命中）")
     s.add_argument("--rounds", type=int, default=None, help="只跑 N 轮后退出（默认无限）")
     s.add_argument("--no-notify", action="store_true", help="不发系统通知")
+    s.add_argument(
+        "--timeout",
+        type=float,
+        default=1800.0,
+        metavar="秒",
+        help="单轮扫描的时限（秒，默认 1800=30 分钟；0 = 不限）。"
+        "监视是无人值守的，一轮卡住就等于整个监视静默停摆，所以这里默认有限时；"
+        "超时只跳过这一轮并报出来，下一轮照常",
+    )
     s.add_argument("--protect", action="append", default=[], metavar="REL_PATH",
                    help="额外保护某个相对路径（含其整棵子树），可重复")
     s.set_defaults(func=cmd_watch)

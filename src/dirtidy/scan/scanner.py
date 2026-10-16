@@ -21,6 +21,7 @@ from collections.abc import Callable, Collection
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from dirtidy.deadline import DEADLINE_CHECK_STEP, Deadline
 from dirtidy.models import InventoryItem, state_root
 from dirtidy.scan.hashcache import HashCache
 
@@ -51,15 +52,29 @@ def legacy_hash_cache_path(root: Path) -> Path:
     return state_root(root) / "hash_cache.json"
 
 
-def _walk_tree(root: Path) -> tuple[list[InventoryItem], list[dict]]:
+def _walk_tree(
+    root: Path, *, deadline: Deadline | None = None
+) -> tuple[list[InventoryItem], list[dict]]:
     """只扫元数据（相对路径 / size / mtime），不碰文件内容。
 
     权限错误记进 errors 并继续，不中止整次扫描。
+
+    传了 deadline 时，在**每个目录**开头和每 `DEADLINE_CHECK_STEP` 个文件后查一次
+    是否到点；到点抛 `RunTimeout` 并把已扫到的 items / errors 带出去，
+    调用方据此落盘「跑了一半的进度」（见 `docs/06` T-3）。
     """
     items: list[InventoryItem] = []
     errors: list[dict] = []
+    since_check = 0
 
     for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        if deadline is not None:
+            deadline.check(
+                phase="扫描元数据",
+                processed=len(items),
+                partial_items=items,
+                partial_errors=errors,
+            )
         current = Path(dirpath)
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
         rel_dir = current.relative_to(root)
@@ -104,6 +119,15 @@ def _walk_tree(root: Path) -> tuple[list[InventoryItem], list[dict]]:
                         error=str(e),
                     )
                 )
+            since_check += 1
+            if deadline is not None and since_check >= DEADLINE_CHECK_STEP:
+                since_check = 0
+                deadline.check(
+                    phase="扫描元数据",
+                    processed=len(items),
+                    partial_items=items,
+                    partial_errors=errors,
+                )
 
     return items, errors
 
@@ -118,6 +142,7 @@ def hash_items(
     workers: int = 4,
     on_progress: Callable[[int, int], None] | None = None,
     use_hash_cache: bool = True,
+    deadline: Deadline | None = None,
 ) -> list[dict]:
     """对**选中**的文件算 sha256，原地写回 `items[i].sha256`；返回 hash 阶段的错误列表。
 
@@ -187,8 +212,17 @@ def hash_items(
                         errors.append({"path": rel, "error": f"hash: {err}"})
                     elif digest:
                         digests[rel] = digest
-                    if on_progress and (done % step == 0 or done == total):
-                        on_progress(done, total)
+                    if done % step == 0 or done == total:
+                        if on_progress:
+                            on_progress(done, total)
+                        if deadline is not None:
+                            # 检查点跟着进度回调走（step ≤ 500），不再另设一套节流，
+                            # 免得两处阈值各写一份、日后只改了一处。
+                            deadline.check(
+                                phase="内容 hash",
+                                processed=done,
+                                partial_errors=errors,
+                            )
 
         for it in items:
             if it.sha256 is None and it.path in digests:
@@ -216,6 +250,7 @@ def scan_tree(
     workers: int = 4,
     on_progress: Callable[[int, int], None] | None = None,
     use_hash_cache: bool = True,
+    deadline: Deadline | None = None,
 ) -> tuple[list[InventoryItem], list[dict]]:
     """递归扫描 root。
 
@@ -230,7 +265,7 @@ def scan_tree(
     才知道哪些 size 值得算（见 `hash_items` 的说明）。
     """
     root = root.resolve()
-    items, errors = _walk_tree(root)
+    items, errors = _walk_tree(root, deadline=deadline)
     if not quick:
         errors.extend(
             hash_items(
@@ -240,6 +275,7 @@ def scan_tree(
                 workers=workers,
                 on_progress=on_progress,
                 use_hash_cache=use_hash_cache,
+                deadline=deadline,
             )
         )
     return items, errors

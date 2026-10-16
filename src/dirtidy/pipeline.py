@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from dirtidy.audit.writer import write_audit_md, write_run_bundle
+from dirtidy.deadline import Deadline, RunTimeout
 from dirtidy.hashing.content import (
     archive_member_sizes,
     candidate_duplicate_sizes,
@@ -87,8 +88,15 @@ def create_run(
     workers: int = 4,
     on_progress: Any | None = None,
     protect: Sequence[str] = (),
+    timeout: float = 0.0,
 ) -> dict[str, Any]:
-    """创建新 run。apply=False 时 auto 命中写入 pending_auto_hits.json，待 apply-rules。"""
+    """创建新 run。apply=False 时 auto 命中写入 pending_auto_hits.json，待 apply-rules。
+
+    timeout > 0 时给整次运行设一个协作式时限（见 `dirtidy.deadline`）。超时**不丢结果**：
+    已经扫到的部分照样跑规则匹配、照样写 run 产物，meta 标 `timed_out`，
+    errors.json 记一条可操作提示。但超时后**不再执行隔离**——基于半棵树的扫描结果去搬文件，
+    比不搬更糟；待隔离项照常进 `pending_auto_hits.json`，用户复核后再 `apply-rules`。
+    """
     root = root.resolve()
     run_id = utc_now_iso().replace(":", "").replace("+00:00", "Z") + "-" + uuid.uuid4().hex[:6]
     rdir = run_dir(root, run_id)
@@ -103,24 +111,51 @@ def create_run(
 
     extra_protect = protect_rules_from_paths(protect)
 
+    deadline = Deadline(timeout)
+    timed_out: dict[str, Any] | None = None
+
+    def _timeout_record(e: RunTimeout) -> dict[str, Any]:
+        return {"phase": e.phase, "seconds": e.seconds, "processed": e.processed}
+
     # 先只扫元数据（路径 / size / mtime），不算 hash——要等归档成员解析出来，
     # 才知道磁盘上哪些文件真的需要 hash（见下面 sizes 的构造）。
-    items, errors = scan_tree(root, quick=True, workers=workers, on_progress=on_progress)
+    try:
+        items, errors = scan_tree(
+            root, quick=True, workers=workers, on_progress=on_progress, deadline=deadline
+        )
+    except RunTimeout as e:
+        # 超时也把扫到的部分带出来——「这次跑了一部分」比「什么都没有」有用得多。
+        items, errors = e.partial_items, e.partial_errors
+        timed_out = _timeout_record(e)
+
     pack = load_rule_pack(rules)
     match = match_rules(root, items, pack, extra_protect_rules=extra_protect)
 
     hits = match.hits
     candidates = list(match.candidates)
-    if not quick:
+    if not quick and timed_out is None:
         # 归档解析提到 hash 之前：成员的「解压后字节数」决定磁盘上哪些文件值得算 hash。
-        probes = probe_archives(root, items)
-        # 只算「size 出现 ≥2 次」与「size 命中某归档成员」的文件。重复组要求同 size，
-        # 归档残留对照也要求同 size（同内容必然同字节数），因此没被算到的文件
-        # 既不可能重复、也不可能与归档成员相同——结论与全量算一致。见 docs/07。
-        sizes = candidate_duplicate_sizes(items) | archive_member_sizes(probes)
-        errors.extend(hash_items(root, items, sizes=sizes, workers=workers, on_progress=on_progress))
-        candidates.extend(find_duplicate_groups(items))
-        candidates.extend(find_extracted_archives(root, items, probes=probes))
+        try:
+            probes = probe_archives(root, items)
+            # 只算「size 出现 ≥2 次」与「size 命中某归档成员」的文件。重复组要求同 size，
+            # 归档残留对照也要求同 size（同内容必然同字节数），因此没被算到的文件
+            # 既不可能重复、也不可能与归档成员相同——结论与全量算一致。见 docs/07。
+            sizes = candidate_duplicate_sizes(items) | archive_member_sizes(probes)
+            errors.extend(
+                hash_items(
+                    root,
+                    items,
+                    sizes=sizes,
+                    workers=workers,
+                    on_progress=on_progress,
+                    deadline=deadline,
+                )
+            )
+            candidates.extend(find_duplicate_groups(items))
+            candidates.extend(find_extracted_archives(root, items, probes=probes))
+        except RunTimeout as e:
+            errors.extend(e.partial_errors)
+            timed_out = _timeout_record(e)
 
     hash_map = select_hashes(items, {h.path for h in hits})
     guard = protect_guard(pack, extra_protect)
@@ -128,7 +163,23 @@ def create_run(
     #: 命中目录因子树内含受保护路径而被拦下的记录。它们既不是「规则没命中」也不是
     #: 「用户保留」，必须与 match.protected 一起进审计，否则用户看到目录没被搬走却查不到原因。
     descendant_blocks: list[dict] = []
-    if apply and hits:
+    if timed_out is not None:
+        # 超时后**不执行隔离**：基于「只扫了一半的树」去搬文件，比不搬更糟——
+        # 用户看到的是一次「跑完了」的隔离，实际只覆盖了半棵树。
+        # 待隔离项照常写进 pending_auto_hits.json，复核后再 apply-rules 即可。
+        errors.append(
+            {
+                "path": "",
+                "error": (
+                    f"运行超时：{timed_out['phase']}阶段超过 {timed_out['seconds']:g} 秒，"
+                    f"已处理 {timed_out['processed']} 项。本次只落盘已扫到的部分，**未执行隔离**。"
+                    "如属正常（盘慢 / 目录很大），把 --timeout 调大或设为 0 关闭。"
+                ),
+            }
+        )
+        write_json(rdir / "pending_auto_hits.json", [h.to_dict() for h in hits])
+        write_json(rdir / "quarantine_manifest.json", [])
+    elif apply and hits:
         qdir.mkdir(parents=True, exist_ok=True)
         entries = quarantine_hits(
             root,
@@ -158,7 +209,11 @@ def create_run(
         "started_at": utc_now_iso(),
         "rules": rules,
         "quick": quick,
-        "applied": apply,
+        # 超时那轮**没有**执行隔离，所以 applied 必须是 False：界面读这个字段决定
+        # 显示「本轮已执行过自动隔离」。写 true 会让人以为已经动过文件了。
+        "applied": bool(apply) and timed_out is None,
+        # 请求了隔离但因超时被跳过——单独留一个字段，免得看起来像「用户没要求执行」。
+        "apply_skipped_by_timeout": bool(apply) and timed_out is not None,
         "protect": list(protect or ()),
         "auto_hits": len(hits),
         # 命中路径**自身**受保护（扫描阶段即可判定）
@@ -168,6 +223,11 @@ def create_run(
         # `scan` 与 `scan --apply` 会为同一棵树报出不同的 protected_blocked。
         "protected_blocked_by_descendant": len(descendant_blocks),
         "protected_downgraded": len(match.downgraded),
+        # 超时标记：界面与 CLI 都靠它区分「跑完了」与「只跑了一部分」。
+        # 不写这个字段的话，一份只扫了半棵树的产物看起来和完整产物一模一样。
+        "timed_out": timed_out is not None,
+        "timeout": timed_out,
+        "timeout_seconds": deadline.seconds,
     }
     write_run_bundle(
         rdir,
