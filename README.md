@@ -125,7 +125,10 @@ $ dirtidy explain . node_modules
   本来想动它的规则: dep_node_modules（Node / 前端依赖目录，可用包管理器重建）
   子树内的受保护路径: node_modules/.npmrc
   保护规则: builtin_protect_secret_files（密钥 / 凭据文件，误删不可恢复）
+  已枚举后代: 2 条
 ```
+
+> 上为**节选**：结论段之后还有「逐条保护规则命中明细」与生成时间。
 
 想额外护住某个目录：
 
@@ -172,7 +175,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 228 个用例
+pytest -q            # 232 个用例
 ruff check src tests
 mypy
 ```

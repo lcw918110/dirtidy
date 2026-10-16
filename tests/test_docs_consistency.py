@@ -6,6 +6,7 @@ docs/05 用例表 vs 实际测试函数。
 
 from __future__ import annotations
 
+import argparse
 import re
 import shutil
 import subprocess
@@ -16,10 +17,12 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS = REPO_ROOT / "docs"
+DOCS_02 = DOCS / "02-需求规格.md"
 DOCS_03 = DOCS / "03-架构设计.md"
 DOCS_04 = DOCS / "04-规则包说明.md"
 DOCS_05 = DOCS / "05-测试与验收.md"
 DOCS_07 = DOCS / "07-规模与性能.md"
+DOCS_09 = DOCS / "09-功能与使用汇总.md"
 TESTS_DIR = REPO_ROOT / "tests"
 FIXTURE_SRC = TESTS_DIR / "fixtures" / "sample_workspace"
 PACKS_DIR = REPO_ROOT / "src" / "dirtidy" / "rules" / "packs"
@@ -364,4 +367,189 @@ def test_docs_05_test_list_matches_actual() -> None:
     assert documented == actual, (
         f"docs/05 用例表与实际不符：文档多出 {sorted(documented - actual)}，"
         f"实现多出 {sorted(actual - documented)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 「读者会照着敲」的两类引用：命令 与 路径。
+#
+# 这两类错误与前面几个守卫性质不同：它们不会让任何用例变红，也不会让代码出错，
+# 只会让照着文档做的人撞墙。而写文档的人几乎不会真去敲一遍、找一遍，
+# 于是它们特别容易长期潜伏。下面把它们变成必跑的一步。
+# ---------------------------------------------------------------------------
+
+
+def _doc_markdown_files() -> list[Path]:
+    """README + docs/ 下全部 md —— 用户会照着敲命令的全部地方。"""
+    return [REPO_ROOT / "README.md", *sorted(DOCS.glob("*.md"))]
+
+
+def _cli_subcommands() -> dict[str, argparse.ArgumentParser]:
+    """argparse 实际注册的子命令 → 其子 parser。"""
+    from dirtidy.cli import build_parser
+
+    for action in build_parser()._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return dict(action.choices)
+    raise AssertionError("argparse 里没有注册任何子命令")  # pragma: no cover
+
+
+def _sub_option_strings(sub: argparse.ArgumentParser) -> set[str]:
+    return {opt for a in sub._actions for opt in a.option_strings}
+
+
+# 行内命令：`dirtidy <子命令> …`。子命令限定 ASCII 小写 / 连字符，
+# 于是「dirtidy 是本地后台程序」「dirtidy — 架构设计」这类中文正文不会被误判成命令。
+_DOC_COMMAND_RE = re.compile(r"(?<![\w./-])dirtidy\s+([a-z][a-z0-9-]*)((?:\s+[^\n`|]*)?)")
+
+
+def test_docs_commands_parse_against_cli() -> None:
+    """文档里每条 `dirtidy <子命令> [--选项]` 都必须能被真实 parser 接受。
+
+    回归背景：README 安装段让用户不激活 venv 就敲 `dirtidy`，用户照做直接
+    `command not found`。那次的错在「前提没交代」，命令本身没问题；但同一类里
+    更常见、也更难靠肉眼发现的是**文档写了不存在的子命令或选项**——读者照抄必然报错，
+    而写文档的人谁也不会真去敲一遍。这里把「敲一遍」变成必跑的一步。
+    """
+    subs = _cli_subcommands()
+    problems: list[str] = []
+    seen = 0
+
+    for path in _doc_markdown_files():
+        rel = path.relative_to(REPO_ROOT)
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for m in _DOC_COMMAND_RE.finditer(line):
+                sub, rest = m.group(1), (m.group(2) or "").split("#")[0]
+                seen += 1
+                if sub not in subs:
+                    problems.append(f"{rel}:{lineno} 未知子命令 `dirtidy {sub}`")
+                    continue
+                valid = _sub_option_strings(subs[sub])
+                for token in rest.split():
+                    if token.startswith("--") and token.split("=")[0] not in valid:
+                        problems.append(f"{rel}:{lineno} `dirtidy {sub}` 无选项 {token.split('=')[0]}")
+
+    # 防止正则失效后「扫到 0 条」也恒绿
+    assert seen >= 40, f"只扫到 {seen} 条命令，正则或文档结构可能已变"
+    assert not problems, "文档命令与 argparse 不一致：\n  " + "\n  ".join(problems)
+
+
+_DOC_PATH_RE = re.compile(r"`((?:src|tests|scripts|docs|\.github)/[^\s`*|（）()【】，。；：]+)`")
+
+# 这些不是「仓库里该有的文件」，而是文档在描述别的东西：
+#   - `::` 是 pytest 节点 ID / 函数引用（如 tests/test_scale.py::test_xxx）
+#   - `__pycache__` 出现在「历史缺陷」的举例里，本就不该入库
+_DOC_PATH_SKIP = ("::", "__pycache__")
+
+# `docs/03/04/07` 这类连写简写
+_DOC_COMBINED_SHORTHAND = re.compile(r"^docs/\d\d(/\d\d)+$")
+
+# `docs/NN` 是文档在**说明简写约定本身**时用的占位符，不是某个具体文档的路径
+_DOC_PLACEHOLDER = re.compile(r"^docs/(NN|nn)$")
+
+
+def test_docs_referenced_repo_paths_exist() -> None:
+    """文档里反引号引用的仓库内路径必须真实存在。
+
+    回归背景：docs/08 把 fixture 写成 `tests/fixtures/payload.txt`，真实路径是
+    `tests/fixtures/sample_workspace/payload.txt`——读者按图索骥找不到，也不会有人发现。
+    这类错同样不会让任何用例变红，只能靠逐条核对。
+
+    `docs/NN` 是本文档体系通用的简写（指 `docs/NN-xxx.md`），按其语义解析后校验。
+    """
+    problems: list[str] = []
+    checked = 0
+
+    for path in _doc_markdown_files():
+        rel = path.relative_to(REPO_ROOT)
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for m in _DOC_PATH_RE.finditer(line):
+                target = m.group(1)
+                if (
+                    any(s in target for s in _DOC_PATH_SKIP)
+                    or _DOC_COMBINED_SHORTHAND.match(target)
+                    or _DOC_PLACEHOLDER.match(target)
+                ):
+                    continue
+                checked += 1
+                shorthand = re.fullmatch(r"docs/(\d\d)", target)
+                if shorthand:
+                    if not list(DOCS.glob(f"{shorthand.group(1)}-*.md")):
+                        problems.append(f"{rel}:{lineno} 简写 `{target}` 找不到对应文档")
+                    continue
+                if not (REPO_ROOT / target).exists():
+                    problems.append(f"{rel}:{lineno} `{target}` 不存在")
+
+    assert checked >= 20, f"只扫到 {checked} 条路径引用，正则或文档结构可能已变"
+    assert not problems, "文档引用了不存在的路径：\n  " + "\n  ".join(problems)
+
+
+def _parse_docs_09_command_table(doc_text: str) -> dict[str, set[str]]:
+    """解析 docs/09 §3.2「命令一览」表，返回 {子命令: 表里声明的选项集合}。"""
+    lines = doc_text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("### 3.2"):
+            start = i
+            break
+    assert start is not None, "未找到 docs/09 §3.2 标题"
+
+    table: dict[str, set[str]] = {}
+    for line in lines[start + 1 :]:
+        if line.strip().startswith("### "):
+            break
+        m = re.match(r"^\|\s*`([a-z][a-z0-9-]*)", line.strip())
+        if m:
+            table[m.group(1)] = set(re.findall(r"`(--[a-z][a-z0-9-]*)`", line))
+    return table
+
+
+def test_docs_09_command_table_matches_parser() -> None:
+    """docs/09 §3.2「命令一览」必须覆盖全部子命令，且选项与 parser 双向一致。
+
+    docs/03 §5 是给实现者看的契约表，docs/09 §3.2 是给用户看的速查表，两张都要守：
+    用户通常只读后者，漏登记一个子命令或选项，就等于那个功能不存在。
+    `--help` 是 argparse 自动加的，不要求登记。
+    """
+    subs = _cli_subcommands()
+    table = _parse_docs_09_command_table(DOCS_09.read_text(encoding="utf-8"))
+    assert table, "docs/09 §3.2 应至少解析出一条命令"
+
+    assert set(table) == set(subs), (
+        f"docs/09 §3.2 与实际不符：文档多出 {sorted(set(table) - set(subs))}，"
+        f"实现多出 {sorted(set(subs) - set(table))}"
+    )
+
+    for name, listed in sorted(table.items()):
+        actual = {o for o in _sub_option_strings(subs[name]) if o.startswith("--")}
+        actual.discard("--help")
+        assert listed == actual, (
+            f"docs/09 §3.2 中 `{name}` 的选项与实际不符："
+            f"文档多出 {sorted(listed - actual)}，实现多出 {sorted(actual - listed)}"
+        )
+
+
+def _parse_docs_02_cli_list(doc_text: str) -> set[str]:
+    """解析 docs/02 FR-9 里「CLI：a、b、c。」这条枚举，返回子命令名集合。"""
+    for line in doc_text.splitlines():
+        m = re.match(r"^-\s*CLI：(.+)$", line.strip())
+        if m:
+            return {t.strip().strip("`。. ") for t in re.split(r"[、,，]", m.group(1)) if t.strip()}
+    raise AssertionError("未找到 docs/02 FR-9 的 CLI 列表")
+
+
+def test_docs_02_fr9_cli_list_matches_parser() -> None:
+    """docs/02 FR-9 枚举的 CLI 子命令必须与 argparse 一致。
+
+    回归背景：这里曾把 `quarantine-restore` / `purge-quarantine` 简写成 `restore` / `purge`——
+    需求文档里读着通顺，读者照着敲却是 `invalid choice`。该清单不归 docs/03 §5 的守卫管
+    （那是表格、这是散文枚举），所以错了很久都没人发现。守卫的价值恰在于此：
+    把「没人会去核对的地方」也变成必跑的一步。
+    """
+    subs = _cli_subcommands()
+    listed = _parse_docs_02_cli_list(DOCS_02.read_text(encoding="utf-8"))
+    assert listed, "docs/02 FR-9 应至少解析出一个子命令"
+    assert listed == set(subs), (
+        f"docs/02 FR-9 的 CLI 列表与实际不符：文档多出 {sorted(listed - set(subs))}，"
+        f"实现多出 {sorted(set(subs) - listed)}"
     )
