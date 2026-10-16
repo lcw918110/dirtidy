@@ -19,6 +19,24 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 ```
 
+**装完必须激活虚拟环境，`dirtidy` 命令才会在 PATH 里**（最容易漏的一步）：
+
+```bash
+source .venv/bin/activate     # 激活后提示符前会出现 (.venv)
+dirtidy --version             # 能打印版本号才算装好
+```
+
+> 不想每次都激活，有两种办法：
+>
+> 1. **直接用 venv 里的可执行文件**——把下文所有 `dirtidy` 换成 `.venv/bin/dirtidy`
+>    （等价写法是 `.venv/bin/python -m dirtidy`）。
+> 2. **一次软链，到处能用**（指向本仓 venv，源码改了立刻生效）：
+>    ```bash
+>    ln -sf "$PWD/.venv/bin/dirtidy" /usr/local/bin/dirtidy
+>    ```
+>    提示权限不足就加 `sudo`，或改链到 `~/bin/`（需已在 PATH 里）。
+>    **注意**：venv 是这条软链的依赖，别删掉本仓的 `.venv/`。
+
 想要桌面壳的托盘图标，再装可选增强（不装也能用，只是没有托盘）：
 
 ```bash
@@ -26,6 +44,9 @@ python3 -m venv .venv
 ```
 
 ## 快速开始
+
+> 下面假设虚拟环境已激活（`source .venv/bin/activate`）；
+> 没激活就把 `dirtidy` 换成 `.venv/bin/dirtidy`。
 
 **最短路径——一条命令：**
 
