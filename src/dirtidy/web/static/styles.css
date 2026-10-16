@@ -71,6 +71,14 @@ table { width: 100%; border-collapse: collapse; background: rgba(255,255,255,0.7
 th, td { border-bottom: 1px solid var(--line); padding: 0.45rem; text-align: left; font-size: 0.9rem; }
 th { font-weight: 600; color: var(--muted); }
 select, input, textarea { padding: 0.3rem; font: inherit; border: 1px solid var(--line); background: #fff; }
+/* 归档目标路径只在决策选「归档」时才用得上；不可用时给灰底，明确「这里现在不适用」，
+   而不是留着一个填好内容却不起作用的框。 */
+select:disabled, input:disabled, textarea:disabled {
+  background: var(--bg);
+  color: var(--muted);
+  border-style: dashed;
+  cursor: not-allowed;
+}
 /* ------------------------------- 状态条 ------------------------------- */
 /* 底部固定的一条人话提示。以前是页面末尾一个黑色 <pre> 直接 JSON.stringify，
    用户看不懂、而且位于所有分页之外，每页都会漏出来。 */

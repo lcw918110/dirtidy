@@ -6,6 +6,11 @@
 
 let currentRun = null;
 const decisions = new Map();
+/* 本轮模型建议（path → suggestion）。只用来「显示建议」和「按建议采纳」，
+   绝不自动写进 decisions——默认决策恒为 keep。 */
+let currentSuggestions = {};
+/* 本轮「待自动隔离」的条数，供执行前确认框报出准确数量 */
+let currentPendingCount = 0;
 /* 审阅时勾选「保留」的自动隔离项：执行自动隔离时随请求发出，本轮不动它们 */
 const keptPaths = new Set();
 /* 隔离区里勾选要还原/彻底删除的条目 id */
@@ -48,6 +53,7 @@ const STATUS_LABELS = {
   skipped: "跳过",
   auto_purge_rules: "直删规则",
   use_model: "启用模型",
+  adopted: "已按建议填入",
   applied: "已按设置执行自动隔离",
   auto_hits: "规则命中",
   running: "运行中",
@@ -140,6 +146,15 @@ function card(k, v, s) {
   if (s) box.appendChild(el("div", { cls: "s", text: s }));
   return box;
 }
+
+/* 决策选项：value 是后端认识的三个动作，显示成人话。
+   默认恒为 `keep`（保留不动）——模型建议**不会**自动变成决策，
+   这是「自动只到候选为止、执行必须人工」在界面上的落点。 */
+const DECISION_LABELS = {
+  keep: "保留不动",
+  quarantine: "隔离",
+  archive: "归档",
+};
 
 function decisionFor(path) {
   return decisions.get(path) || { path, action: "keep", target_relpath: "", note: "" };
@@ -331,6 +346,7 @@ function renderPending(data) {
     tbody.appendChild(tr);
   }
 
+  currentPendingCount = hits.length;
   const btn = document.getElementById("applyRulesBtn");
   btn.disabled = hits.length === 0;
   btn.textContent = hits.length ? `执行自动隔离（${hits.length} 项命中）` : "无待隔离项";
@@ -495,6 +511,7 @@ function renderReview(data) {
   clear(rows);
   const suggestions = {};
   for (const s of data.ai_suggestions || []) suggestions[s.path] = s;
+  currentSuggestions = suggestions;
 
   // 非重复组的候选 + AI 建议路径并集
   const paths = new Set();
@@ -509,6 +526,9 @@ function renderReview(data) {
   }
   for (const path of [...paths].sort()) {
     const sug = suggestions[path];
+    // 唯一真相是 decisions（默认 keep）。这里**刻意不按建议预填**：
+    // 预填只写 DOM、不进 decisions，用户看着预填内容点「执行」会以为已采纳，
+    // 实际什么都不发生。要采纳就点「采纳全部建议」，那是显式的。
     const d = decisionFor(path);
     const tr = document.createElement("tr");
 
@@ -527,9 +547,9 @@ function renderReview(data) {
     const tdAct = document.createElement("td");
     const sel = el("select", { cls: "act", attrs: { "data-path": path } });
     for (const v of ["keep", "quarantine", "archive"]) {
-      sel.appendChild(el("option", { text: v, attrs: { value: v } }));
+      sel.appendChild(el("option", { text: DECISION_LABELS[v], attrs: { value: v } }));
     }
-    sel.value = d.action || (sug && sug.action === "quarantine" ? "quarantine" : "keep");
+    sel.value = d.action;
     tdAct.appendChild(sel);
     tr.appendChild(tdAct);
 
@@ -538,9 +558,12 @@ function renderReview(data) {
       cls: "tgt",
       attrs: { "data-path": path, placeholder: "archive/..." },
     });
-    inp.value = d.target_relpath || (sug && sug.suggested_path) || "";
+    inp.value = d.target_relpath || "";
     tdTgt.appendChild(inp);
     tr.appendChild(tdTgt);
+    // 目标路径只有「归档」才用得上；其余动作下留着内容只会误导
+    // （出现过「决策=保留 而 归档路径已填」的矛盾观感）。
+    syncTargetEnabled(tr);
 
     rows.appendChild(tr);
   }
@@ -598,6 +621,7 @@ function renderReview(data) {
       const cur = decisionFor(path);
       cur.action = node.value;
       decisions.set(path, cur);
+      syncTargetEnabled(node.closest("tr"));
     });
   });
   rows.querySelectorAll(".tgt").forEach((node) => {
@@ -608,6 +632,88 @@ function renderReview(data) {
       decisions.set(path, cur);
     });
   });
+
+  refreshAdoptHint();
+}
+
+/* 归档目标路径只在决策 = 「归档」时可用。其余动作下留着内容会误导——
+   截图里就出现过「决策 = 保留不动 而 归档路径已填」的矛盾观感。 */
+function syncTargetEnabled(tr) {
+  if (!tr) return;
+  const sel = tr.querySelector("select.act");
+  const inp = tr.querySelector("input.tgt");
+  if (!sel || !inp) return;
+  const need = sel.value === "archive";
+  inp.disabled = !need;
+  inp.placeholder = need ? "archive/..." : "（仅「归档」需要）";
+}
+
+/* 可采纳的建议 = 模型**明确**说了隔离 / 归档、**且用户还没表态**的行。
+   - `keep` 与 `review` 不动：`review` 是模型自己说「拿不准」，变成决策等于替用户做主。
+   - 已进过 `decisions` 的行跳过：采纳是「帮你把没表态的填上」，
+     不是「覆盖你已经改过的」——否则用户手动把某行改成保留，再点一次采纳又被翻回去。 */
+function adoptableSuggestions() {
+  const out = [];
+  for (const [path, sug] of Object.entries(currentSuggestions)) {
+    if (sug.action !== "quarantine" && sug.action !== "archive") continue;
+    if (decisions.has(path)) continue;
+    out.push({ path, action: sug.action, target: sug.suggested_path || "" });
+  }
+  return out;
+}
+
+/* 按钮上的条数必须与实际可采纳数一致，否则又是一个「界面说的和实际不一样」。 */
+function refreshAdoptHint() {
+  const btn = document.getElementById("adoptBtn");
+  const hint = document.getElementById("adoptHint");
+  if (!btn || !hint) return;
+
+  const items = adoptableSuggestions();
+  const quarantine = items.filter((i) => i.action === "quarantine").length;
+  const archive = items.length - quarantine;
+  btn.textContent = items.length ? `采纳全部建议（${items.length} 条）` : "采纳全部建议";
+  btn.disabled = items.length === 0;
+
+  if (items.length) {
+    hint.textContent =
+      `将填入：隔离 ${quarantine} 项、归档 ${archive} 项。` +
+      "只填你还没表态的行，不覆盖你在「决策」列做过的修改；" +
+      "填完最后点「执行候选决策」才会真正搬文件。";
+  } else if (Object.keys(currentSuggestions).length) {
+    hint.textContent = "本轮建议里没有可采纳的（模型只给了 keep / review，或你都已逐条表态）。";
+  } else {
+    hint.textContent = "本轮没有模型建议。模型是可选增强，不用它也能靠规则 + 人工完成终审。";
+  }
+}
+
+/* 「采纳全部建议」：把模型明确建议隔离 / 归档的行按建议填进决策。
+   只写 decisions 与界面，**绝不执行**——执行仍要用户点「执行候选决策」。
+   这是唯一会把模型建议变成决策的入口；默认决策恒为 keep。 */
+function adoptSuggestions() {
+  const rows = document.getElementById("rows");
+  const items = adoptableSuggestions();
+  let quarantine = 0;
+  for (const item of items) {
+    const cur = decisionFor(item.path);
+    cur.action = item.action;
+    if (item.action === "archive") cur.target_relpath = item.target || cur.target_relpath || "";
+    cur.note = "adopted ai suggestion";
+    decisions.set(item.path, cur);
+
+    const tr = [...rows.querySelectorAll("tr")].find((r) => {
+      const s = r.querySelector("select.act");
+      return s && s.dataset.path === item.path;
+    });
+    if (tr) {
+      tr.querySelector("select.act").value = item.action;
+      const inp = tr.querySelector("input.tgt");
+      if (inp && item.action === "archive") inp.value = cur.target_relpath;
+      syncTargetEnabled(tr);
+    }
+    if (item.action === "quarantine") quarantine += 1;
+  }
+  setStatus({ adopted: items.length, quarantine, archived: items.length - quarantine });
+  refreshAdoptHint();
 }
 
 /* --------------------------------- 规则 --------------------------------- */
@@ -834,15 +940,37 @@ async function save() {
 }
 
 async function apply() {
+  if (!currentRun) throw new Error("还没有选中 run");
+  // 每行默认「保留不动」，所以「一条都没设就点执行」是很容易发生的事。
+  // 直接调接口会静默地什么都不做——用户以为执行了，其实没有。这里必须说出来。
+  const moving = [...decisions.values()].filter(
+    (d) => d.action === "quarantine" || d.action === "archive",
+  );
+  if (!moving.length) {
+    return setStatus(
+      "还没有可执行的决策：每行默认「保留不动」，请先改「决策」列或点「采纳全部建议」。",
+    );
+  }
+  const quarantine = moving.filter((d) => d.action === "quarantine").length;
+  const archive = moving.length - quarantine;
+  if (!confirm(`将搬走 ${moving.length} 项（隔离 ${quarantine}、归档 ${archive}）到隔离区，可随时还原。继续？`)) {
+    return undefined;
+  }
   await save();
   const res = await api(`/api/runs/${currentRun}/apply-decisions`, { method: "POST" });
   setStatus(res);
   await loadRun(currentRun);
+  return undefined;
 }
 
 /* 执行规则自动隔离；勾选「保留」的项随请求发出，后端本轮不动它们并记入 protection.json */
 async function applyRules() {
+  if (!currentPendingCount) return setStatus("没有待隔离项。");
   const keep_paths = [...keptPaths];
+  const kept = keep_paths.length ? `；已勾「保留」的 ${keep_paths.length} 项本轮不动` : "";
+  if (!confirm(`将把 ${currentPendingCount} 项规则命中搬入隔离区（可还原）${kept}。继续？`)) {
+    return undefined;
+  }
   const res = await api(`/api/runs/${currentRun}/apply-rules`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -851,6 +979,7 @@ async function applyRules() {
   keptPaths.clear();
   setStatus(res);
   await loadRun(currentRun);
+  return undefined;
 }
 
 /* ------------------------------- 事件绑定 ------------------------------- */
@@ -862,6 +991,7 @@ document.querySelectorAll(".tabbtn").forEach((b) => {
 document.getElementById("reloadBtn").onclick = () =>
   loadRun(document.getElementById("runSelect").value);
 document.getElementById("runSelect").onchange = (e) => loadRun(e.target.value);
+document.getElementById("adoptBtn").onclick = () => adoptSuggestions();
 document.getElementById("saveBtn").onclick = () =>
   save().catch((e) => setStatus(e, { error: true }));
 document.getElementById("applyBtn").onclick = () =>

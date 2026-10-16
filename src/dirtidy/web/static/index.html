@@ -89,10 +89,6 @@
   <!-- ============================== 审阅 ============================== -->
   <section class="tab" id="tab-review">
     <h2>审阅</h2>
-    <div class="toolbar">
-      <button id="saveBtn" type="button">保存决策</button>
-      <button id="applyBtn" type="button">执行决策</button>
-    </div>
 
     <h3>待自动隔离（规则命中）</h3>
     <p class="hint">
@@ -114,9 +110,21 @@
       </thead>
       <tbody id="pendingRows"></tbody>
     </table>
-    <button id="applyRulesBtn" type="button">执行自动隔离</button>
+    <div class="toolbar">
+      <button id="applyRulesBtn" type="button">执行自动隔离</button>
+      <span class="hint">把命中项搬入隔离区（可还原）；勾了「保留」的本轮不动。</span>
+    </div>
 
     <h3>候选 / 建议</h3>
+    <p class="hint">
+      「建议」列只是模型的参考，<strong>不会自动生效</strong>——每行默认是「保留不动」。
+      想一次采纳就点下面的「采纳全部建议」；采纳后仍可在「决策」列逐条改，最后点「执行候选决策」。
+      只有决策选「归档」时才需要填右侧的目标路径。
+    </p>
+    <div class="toolbar">
+      <button id="adoptBtn" type="button">采纳全部建议</button>
+      <span class="hint" id="adoptHint"></span>
+    </div>
     <table>
       <thead>
         <tr>
@@ -129,6 +137,11 @@
       </thead>
       <tbody id="rows"></tbody>
     </table>
+    <div class="toolbar">
+      <button id="saveBtn" type="button">保存决策</button>
+      <button id="applyBtn" type="button">执行候选决策</button>
+      <span class="hint">执行按「决策」列搬走隔离 / 归档项；「保留不动」的不碰。</span>
+    </div>
 
     <h3>重复组（人选保留）</h3>
     <div id="dups"></div>

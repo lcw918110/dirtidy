@@ -524,3 +524,109 @@ def test_web_status_labels_cover_action_fields() -> None:
         "use_model",
     ):
         assert f"{key}:" in block, f"STATUS_LABELS 缺少 {key} 的人话标签"
+
+
+# ------------------------------ 审阅页决策流 ------------------------------
+#
+# 这一组守的是「界面看起来做了什么」与「实际发生了什么」是否一致。
+# 起因：候选表把模型建议预填进「决策」下拉，但预填只写 DOM、不写 decisions，
+# 用户看着预填好的内容点「执行决策」，实际什么都不发生。
+# 这类问题只有读 JS 或真点一遍才发现，接口测试全绿也照样漏。
+
+
+def _html() -> str:
+    return (STATIC / "index.html").read_text(encoding="utf-8")
+
+
+def _js_function(name: str) -> str:
+    """取出 app.js 里某个顶层函数的源码（`function name(` 到其收尾的顶层 `}`）。"""
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    start = js.index(f"function {name}(")
+    end = js.index("\n}\n", start)
+    return js[start:end]
+
+
+def test_review_does_not_prefill_decision_from_ai_suggestion() -> None:
+    """候选表**不得**按模型建议预填「决策」下拉。
+
+    回归背景：原先写的是
+        sel.value = d.action || (sug && sug.action === "quarantine" ? "quarantine" : "keep");
+    而 `decisionFor()` 永远返回 `action:"keep"` 兜底，`d.action` 恒真 → `||` 右边
+    永远执行不到（死代码）。更要命的是预填只写 DOM、**不写 `decisions`**，
+    用户看着预填好的下拉点「执行决策」，`decisions` 其实是空的 → 什么都不会发生。
+
+    现在默认恒为 `keep`，采纳建议走显式的「采纳全部建议」按钮。
+    """
+    body = _js_function("renderReview")
+    assert "sel.value = d.action;" in body, "决策下拉必须只认 decisions（默认 keep）"
+    assert '? "quarantine" : "keep"' not in body, "渲染时不得按模型建议预填决策"
+    assert "sug.suggested_path" not in body, "渲染时不得按模型建议预填归档路径"
+    assert "inp.value = d.target_relpath" in body
+
+
+def test_review_target_input_only_enabled_for_archive() -> None:
+    """归档目标路径只在决策选「归档」时可用。
+
+    否则会出现「决策 = 保留不动，归档路径却填着 archive/doc/」的矛盾观感——
+    用户不知道该信哪一列。
+    """
+    body = _js_function("syncTargetEnabled")
+    assert 'sel.value === "archive"' in body, "应按决策判断是否需要目标路径"
+    assert "inp.disabled = !need" in body, "非归档时必须禁用目标路径框"
+
+
+def test_review_execute_buttons_ask_for_confirmation() -> None:
+    """两个执行按钮都会搬文件，必须先确认。
+
+    按钮挨得近（都在候选表附近），误点一次的代价是白搬一轮再还原。
+    """
+    for name in ("apply", "applyRules"):
+        assert "confirm(" in _js_function(name), f"{name} 缺二次确认"
+
+
+def test_apply_decisions_explains_when_nothing_to_do() -> None:
+    """一条决策都没设就点「执行候选决策」，必须明说，而不是静默无事发生。
+
+    默认决策是 `keep`，所以「点了个寂寞」是很容易踩到的路径——这正是
+    上面那个预填缺陷的后果：用户以为已经采纳了建议。
+    """
+    body = _js_function("apply")
+    assert "还没有可执行的决策" in body, "无可执行决策时应给出明确提示"
+    assert "api(" in body, "有可执行决策时仍应真的调用执行接口"
+
+
+def test_adopt_button_fills_decisions_without_executing() -> None:
+    """「采纳全部建议」只填决策，绝不执行——执行必须由人再点一次。"""
+    html = _html()
+    assert 'id="adoptBtn"' in html, "缺少「采纳全部建议」按钮"
+    assert 'id="adoptHint"' in html, "缺少采纳按钮的说明位（要报出将填入的条数）"
+
+    body = _js_function("adoptSuggestions")
+    assert "decisions.set(" in body, "采纳必须写进 decisions，否则又是只改界面的假象"
+    assert "api(" not in body, "采纳建议不得调用任何接口——它只填决策，不执行"
+
+
+def test_adopt_only_takes_explicit_quarantine_or_archive() -> None:
+    """只有模型**明确**说隔离 / 归档的建议才可采纳；`keep` 与 `review` 不动。
+
+    `review` 是模型自己说「拿不准」，把它变成决策等于替用户做主。
+    """
+    body = _js_function("adoptableSuggestions")
+    assert '"quarantine"' in body and '"archive"' in body
+    assert '"keep"' not in body, "keep 不需要采纳"
+    assert '"review"' not in body, "review 是「拿不准」，不能替用户做决定"
+
+
+def test_review_action_buttons_sit_next_to_their_table() -> None:
+    """执行按钮必须紧挨它作用的那张表，否则用户会点错另一个执行按钮。
+
+    回归背景：「保存决策 / 执行决策」原先摆在审阅页**顶部**，而它们真正作用的
+    「候选 / 建议」表在整个「待自动隔离」区块之后。用户在候选表设完下拉，
+    视线内最近的按钮是「执行自动隔离」——那是另一条路径（`apply-rules`），
+    **完全不读这些下拉**。点了会搬走文件（可还原），但白干一轮。
+    """
+    html = _html()
+    cand = html.index("候选 / 建议")
+    assert html.index('id="applyRulesBtn"') < cand, "「执行自动隔离」属于它上面的「待自动隔离」表"
+    for el_id in ("adoptBtn", "saveBtn", "applyBtn"):
+        assert html.index(f'id="{el_id}"') > cand, f"{el_id} 必须排在「候选 / 建议」标题之后"
