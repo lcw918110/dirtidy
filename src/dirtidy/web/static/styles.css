@@ -159,6 +159,76 @@ select, input, textarea { padding: 0.3rem; font: inherit; border: 1px solid var(
 .card .v { font-size: 1.35rem; font-weight: 600; letter-spacing: 0.02em; }
 .card .s { color: var(--muted); font-size: 0.76rem; }
 
+/* ------------------------------- 引导区 ------------------------------- */
+/* 概览页第一眼要回答「现在该做什么」。之前是六个数字 + 一段说明，
+   用户看完仍不知道该点哪——数字是给已经懂流程的人看的。 */
+.guide {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  background: rgba(47, 93, 80, 0.06);
+  padding: 1rem 1.2rem;
+  margin-bottom: 1rem;
+}
+.guide.done { border-left-color: #6b8f5e; }
+.guide .g-text { flex: 1; min-width: 14rem; }
+.guide .g-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.2rem; }
+.guide .g-sub { color: var(--muted); font-size: 0.88rem; line-height: 1.5; }
+.guide .g-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+.guide button { padding: 0.6rem 1.4rem; font-size: 0.98rem; }
+
+/* 步骤条：四步一屏看清自己在哪一步，可点击跳转 */
+.steps { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.step {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.84rem;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+  background: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+}
+.step .n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 50%;
+  background: var(--line);
+  color: var(--ink);
+  font-size: 0.72rem;
+}
+.step[data-state="now"] {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(47, 93, 80, 0.1);
+  font-weight: 600;
+}
+.step[data-state="now"] .n { background: var(--accent); color: #fff; }
+.step[data-state="done"] { color: var(--accent); }
+.step[data-state="done"] .n { background: rgba(47, 93, 80, 0.25); }
+
+/* 折叠区：高级选项与长说明默认收起，首屏只留一个动作 */
+details.panel > summary,
+.form details > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+details.panel > summary:hover,
+.form details > summary:hover { color: var(--accent); }
+details.panel[open] > summary { margin-bottom: 0.7rem; }
+.form details > summary { margin-bottom: 0.6rem; }
+.form details[open] > summary { margin-bottom: 0.8rem; }
+button.primary { padding: 0.6rem 1.5rem; font-size: 1rem; }
+
 /* ------------------------------- 弹窗 ------------------------------- */
 dialog { border: 1px solid var(--line); border-radius: 6px; padding: 0; max-width: min(920px, 92vw); }
 .dlg-head {

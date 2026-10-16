@@ -29,25 +29,25 @@
   <!-- ============================== 概览 ============================== -->
   <section class="tab" id="tab-overview">
     <h2>概览</h2>
+    <div class="guide" id="overviewGuide"></div>
+    <div class="steps" id="overviewSteps"></div>
     <div class="cards" id="overviewCards"></div>
-    <div class="panel">
-      <div class="toolbar">
-        <label>当前 run
-          <select id="runSelect"></select>
-        </label>
-        <button id="reloadBtn" type="button">刷新</button>
-        <span class="hint" id="runHint"></span>
-      </div>
+    <div class="toolbar">
+      <label>当前 run
+        <select id="runSelect"></select>
+      </label>
+      <button id="reloadBtn" type="button">刷新</button>
+      <span class="hint" id="runHint"></span>
     </div>
-    <div class="panel">
-      <h3>下一步</h3>
+    <details class="panel">
+      <summary>完整流程说明</summary>
       <p class="hint">
         完整流程：<strong>扫描</strong>（产出候选与待隔离清单）→ <strong>审阅</strong>（逐条确认或保留）
         → <strong>执行</strong>（搬进隔离区）→ 确认无误后在<strong>隔离区</strong>页彻底删除释放空间。
         规则命中项<strong>永远先搬进隔离区</strong>，不会直接删除；只有你在「规则」页显式开启
         「直删」的规则，才会在搬入后立刻物理删除。
       </p>
-    </div>
+    </details>
   </section>
 
   <!-- ============================== 扫描 ============================== -->
@@ -58,24 +58,30 @@
       勾选「扫描后立即执行自动隔离」才会搬走规则命中项——它们进入隔离区，仍可还原。
     </p>
     <div class="panel form">
-      <label>规则包
-        <select id="scanRules"></select>
-      </label>
-      <label>内容 hash 并行线程数
-        <input id="scanWorkers" type="number" min="1" max="64" value="4" />
-      </label>
-      <label class="inline">
-        <input id="scanQuick" type="checkbox" />
-        跳过内容 hash 与解压对照（大目录下快很多，但看不到重复组与归档残留）
-      </label>
-      <label class="inline">
-        <input id="scanApply" type="checkbox" />
-        扫描后立即执行自动隔离
-      </label>
-      <label>额外保护路径（每行一个，含整棵子树；命中的路径永不自动隔离）
-        <textarea id="scanProtect" rows="3" placeholder="例如：&#10;projects/client-a&#10;资料/合同"></textarea>
-      </label>
-      <button id="scanBtn" type="button">开始扫描</button>
+      <button id="scanBtn" type="button" class="primary">开始扫描</button>
+      <p class="hint">
+        默认设置就够用。想换规则包、调并行线程数，或加额外保护路径，展开下面的「高级选项」。
+      </p>
+      <details>
+        <summary>高级选项</summary>
+        <label>规则包
+          <select id="scanRules"></select>
+        </label>
+        <label>内容 hash 并行线程数
+          <input id="scanWorkers" type="number" min="1" max="64" value="4" />
+        </label>
+        <label class="inline">
+          <input id="scanQuick" type="checkbox" />
+          跳过内容 hash 与解压对照（大目录下快很多，但看不到重复组与归档残留）
+        </label>
+        <label class="inline">
+          <input id="scanApply" type="checkbox" />
+          扫描后立即执行自动隔离
+        </label>
+        <label>额外保护路径（每行一个，含整棵子树；命中的路径永不自动隔离）
+          <textarea id="scanProtect" rows="3" placeholder="例如：&#10;projects/client-a&#10;资料/合同"></textarea>
+        </label>
+      </details>
     </div>
     <div class="panel" id="scanResult"></div>
   </section>

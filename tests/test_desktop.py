@@ -169,3 +169,84 @@ def test_cli_registers_desktop() -> None:
     assert args.root == "."
     assert args.no_tray is True
     assert args.no_browser is True
+
+
+def test_cli_registers_start() -> None:
+    """`start` 是最短入口：root 可省，且默认不强制重扫。"""
+    from dirtidy.cli import build_parser
+
+    args = build_parser().parse_args(["start", "--no-tray", "--no-browser"])
+    assert args.root == "."
+    assert args.rescan is False
+
+
+def test_start_scans_when_no_run_then_launches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有扫描结果时，start 必须先扫一次，再起界面——用户不该自己先跑 scan。"""
+    from dirtidy import cli
+    from dirtidy import desktop as desktop_mod
+
+    called: dict[str, object] = {}
+
+    def fake_create_run(root: Path, **kw: object) -> dict[str, object]:
+        called["scanned"] = str(root)
+        return {"run_id": "r1", "auto_hits": 3}
+
+    def fake_launch(root: Path, **kw: object) -> int:
+        called["launched"] = str(root)
+        return 0
+
+    monkeypatch.setattr(cli, "create_run", fake_create_run)
+    monkeypatch.setattr(desktop_mod, "launch", fake_launch)
+
+    args = cli.build_parser().parse_args(["start", str(tmp_path), "--no-tray", "--no-browser"])
+    assert cli.cmd_start(args) == 0
+    assert "scanned" in called, "没有 run 时必须先扫描"
+    assert "launched" in called, "扫描后必须起界面"
+
+
+def test_start_skips_scan_when_run_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """已有扫描结果时不重扫——否则每次打开界面都要白等一遍全量扫描。"""
+    from dirtidy import cli
+    from dirtidy import desktop as desktop_mod
+    from dirtidy.models import state_root
+
+    root = tmp_path.resolve()
+    (state_root(root) / "runs" / "old-run").mkdir(parents=True)
+
+    def boom(*a: object, **kw: object) -> dict[str, object]:
+        raise AssertionError("已有 run 时不该重扫")
+
+    monkeypatch.setattr(cli, "create_run", boom)
+    monkeypatch.setattr(desktop_mod, "launch", lambda root, **kw: 0)
+
+    args = cli.build_parser().parse_args(["start", str(root), "--no-tray", "--no-browser"])
+    assert cli.cmd_start(args) == 0
+
+
+def test_start_rescan_forces_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--rescan 是唯一的强制重扫路径；不写就永远复用已有结果。"""
+    from dirtidy import cli
+    from dirtidy import desktop as desktop_mod
+    from dirtidy.models import state_root
+
+    root = tmp_path.resolve()
+    (state_root(root) / "runs" / "old-run").mkdir(parents=True)
+
+    seen: dict[str, object] = {}
+
+    def fake_create_run(r: Path, **kw: object) -> dict[str, object]:
+        seen["scanned"] = str(r)
+        return {"run_id": "r2", "auto_hits": 0}
+
+    monkeypatch.setattr(cli, "create_run", fake_create_run)
+    monkeypatch.setattr(desktop_mod, "launch", lambda root, **kw: 0)
+
+    args = cli.build_parser().parse_args(
+        ["start", str(root), "--rescan", "--no-tray", "--no-browser"]
+    )
+    assert cli.cmd_start(args) == 0
+    assert "scanned" in seen, "--rescan 必须重扫"

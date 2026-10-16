@@ -27,6 +27,18 @@ python3 -m venv .venv
 
 ## 快速开始
 
+**最短路径——一条命令：**
+
+```bash
+dirtidy start ~/Downloads
+```
+
+它会：没有扫描结果就先扫一次 → 起本地服务 → 自动打开浏览器。
+剩下的在界面上点——概览页会直接告诉你「现在该做什么」。
+（想重新扫描加 `--rescan`；已有结果时它不会重复扫。）
+
+**想拆开做（脚本化 / 精细控制）：**
+
 ```bash
 # 扫描（不立刻隔离）
 dirtidy scan /path/to/root --rules server_workspace
@@ -139,7 +151,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 224 个用例
+pytest -q            # 228 个用例
 ruff check src tests
 mypy
 ```

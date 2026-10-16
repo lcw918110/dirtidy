@@ -189,7 +189,83 @@ function showTab(name) {
 
 /* --------------------------------- 概览 --------------------------------- */
 
+/* 引导区：先回答「现在该做什么」，再给数字。
+   之前首屏是六个卡片 + 一段流程说明，用户看完仍不知道该点哪——
+   数字是给已经懂流程的人看的，新用户需要的是一个动作。 */
+function renderGuide(data) {
+  const box = document.getElementById("overviewGuide");
+  clear(box);
+  const cand = (data.candidates || []).length;
+  const pending = (data.pending_auto_hits || []).length;
+  const summary = data.quarantine_summary || {};
+  const qCount = summary.count || 0;
+  const todo = cand + pending;
+
+  let title;
+  let sub;
+  let actions;
+  if (!currentRun) {
+    title = "还没有扫描结果";
+    sub = "先扫描一次，看看这个目录里有什么可以清理。扫描只读元数据，不动任何文件。";
+    actions = [["去扫描", "scan"]];
+  } else if (todo) {
+    title = `发现 ${todo} 项待处理`;
+    sub = `规则命中 ${pending} 项（可直接执行），另有 ${cand} 项需要你逐条判断。`;
+    actions = [["去审阅", "review"], ["重新扫描", "scan"]];
+  } else if (qCount) {
+    title = `隔离区有 ${qCount} 项，占用 ${humanSize(summary.size)}`;
+    sub = "确认不需要了就彻底删除释放空间；发现删错了可以还原回原位。";
+    actions = [["去清理隔离区", "quarantine"]];
+  } else {
+    title = "这个目录很干净";
+    sub = "没有待处理项，隔离区也是空的。可以换个目录，或重新扫描看最新状态。";
+    actions = [["重新扫描", "scan"]];
+  }
+
+  const textBox = el("div", { cls: "g-text" });
+  textBox.appendChild(el("div", { cls: "g-title", text: title }));
+  textBox.appendChild(el("div", { cls: "g-sub", text: sub }));
+  box.appendChild(textBox);
+
+  const act = el("div", { cls: "g-actions" });
+  for (const [label, tab] of actions) {
+    const b = el("button", { text: label, attrs: { type: "button" } });
+    b.addEventListener("click", () => showTab(tab));
+    act.appendChild(b);
+  }
+  box.appendChild(act);
+  box.classList.toggle("done", !todo && !qCount);
+}
+
+/* 步骤条：四步一屏看清自己在哪一步；点击可跳到对应页 */
+function renderSteps(data) {
+  const box = document.getElementById("overviewSteps");
+  clear(box);
+  const cand = (data.candidates || []).length;
+  const pending = (data.pending_auto_hits || []).length;
+  const summary = data.quarantine_summary || {};
+  const hasRun = !!currentRun;
+  const todo = cand + pending;
+  const qCount = summary.count || 0;
+
+  const steps = [
+    ["扫描", "scan", hasRun ? "done" : "now"],
+    ["审阅", "review", !hasRun ? "todo" : todo ? "now" : "done"],
+    ["执行", "review", qCount ? "done" : "todo"],
+    ["清理隔离区", "quarantine", qCount ? "now" : "todo"],
+  ];
+  steps.forEach(([label, tab, state], i) => {
+    const s = el("div", { cls: "step", attrs: { "data-state": state, title: `去「${label}」` } });
+    s.appendChild(el("span", { cls: "n", text: String(i + 1) }));
+    s.appendChild(el("span", { text: label }));
+    s.addEventListener("click", () => showTab(tab));
+    box.appendChild(s);
+  });
+}
+
 function renderOverview(data) {
+  renderGuide(data);
+  renderSteps(data);
   const box = document.getElementById("overviewCards");
   clear(box);
   const meta = data.meta || {};
@@ -282,12 +358,14 @@ function renderProtection(data) {
     box.appendChild(line);
   }
   if (policy.length) {
-    box.appendChild(
-      el("div", {
-        cls: "hint",
-        text: `生效保护策略 ${policy.length} 条：${policy.map((p) => p.id).join("、")}`,
-      }),
+    // 11 条内部规则 ID 直接铺在页面上没人看得懂，还把这一屏撑得很长。
+    // 收进折叠区：想知道细节的点开，不需要的不被它干扰。
+    const det = document.createElement("details");
+    det.appendChild(
+      el("summary", { text: `生效保护策略 ${policy.length} 条（点开看清单）` }),
     );
+    det.appendChild(el("div", { cls: "hint", text: policy.map((p) => p.id).join("、") }));
+    box.appendChild(det);
   }
 }
 

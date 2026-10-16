@@ -9,13 +9,67 @@ from pathlib import Path
 from dirtidy import __version__
 from dirtidy.ai.providers import analyze_run
 from dirtidy.decision.store import apply_decisions, save_decisions
-from dirtidy.models import Decision, quarantine_root, read_json, run_dir
+from dirtidy.models import Decision, iter_json_array, quarantine_root, read_json, run_dir, state_root
 from dirtidy.pipeline import apply_pending_rules, create_run
 from dirtidy.quarantine.store import purge_quarantine_dir, restore_entries
 
 
 def _resolve_root(path: str) -> Path:
     return Path(path).expanduser().resolve()
+
+
+def _existing_runs(root: Path) -> list[str]:
+    """已有 run 的 id，最新的在前。"""
+    runs_root = state_root(root) / "runs"
+    if not runs_root.is_dir():
+        return []
+    return sorted((p.name for p in runs_root.iterdir() if p.is_dir()), reverse=True)
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    """一条命令起步：没有扫描结果就先扫一次，然后起界面并打开浏览器。
+
+    这是给「不想记命令」的人用的最短路径：`dirtidy start <目录>`。
+    其余子命令是它的可拆解步骤，需要脚本化时再单独用。
+    """
+    import sys
+
+    from dirtidy.desktop import launch
+
+    root = _resolve_root(args.root)
+    if args.rescan or not _existing_runs(root):
+        print(f"正在扫描 {root} …", file=sys.stderr)
+
+        def _progress(done: int, total: int) -> None:
+            print(f"\rhash {done}/{total}", end="", file=sys.stderr, flush=True)
+            if done == total:
+                print(file=sys.stderr)
+
+        meta = create_run(
+            root,
+            rules=args.rules,
+            quick=args.quick,
+            apply=False,
+            workers=args.workers,
+            on_progress=None if args.quick else _progress,
+            protect=args.protect,
+        )
+        run_id = str(meta.get("run_id", ""))
+        cpath = run_dir(root, run_id) / "candidates.json"
+        n_cand = sum(1 for _ in iter_json_array(cpath)) if cpath.exists() else 0
+        print(
+            f"扫描完成：规则命中 {meta.get('auto_hits', 0)} 项、候选 {n_cand} 项。",
+            file=sys.stderr,
+        )
+    else:
+        print("已有扫描结果，直接打开界面（想重新扫描加 --rescan）。", file=sys.stderr)
+    return launch(
+        root,
+        host=args.host,
+        port=args.port,
+        open_browser=not args.no_browser,
+        use_tray=not args.no_tray,
+    )
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
@@ -185,6 +239,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dirtidy", description="本地目录整理：规则隔离 + 模型建议 + 人工终审")
     p.add_argument("--version", action="version", version=f"dirtidy {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
+
+    s = sub.add_parser("start", help="★ 一条命令起步：必要时先扫描，然后起界面并打开浏览器")
+    s.add_argument("root", nargs="?", default=".", help="目标根目录（默认当前目录）")
+    s.add_argument("--rules", default="default", help="规则包名或 YAML 路径")
+    s.add_argument("--quick", action="store_true", help="跳过内容 hash / 解压对照（大目录更快）")
+    s.add_argument("--workers", type=int, default=4, help="内容 hash 并行线程数")
+    s.add_argument("--protect", action="append", default=[], metavar="REL_PATH",
+                   help="额外保护某个相对路径（含其整棵子树），可重复")
+    s.add_argument("--rescan", action="store_true", help="即使已有扫描结果也重新扫描")
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--port", type=int, default=8765, help="首选端口；被占用会自动顺延")
+    s.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    s.add_argument("--no-tray", action="store_true", help="不显示托盘图标")
+    s.set_defaults(func=cmd_start)
 
     s = sub.add_parser("scan", help="扫描并生成 run；可选立即 apply 高置信规则")
     s.add_argument("root", help="目标根目录")

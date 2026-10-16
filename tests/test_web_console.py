@@ -352,8 +352,8 @@ CLI_TO_UI: dict[str, tuple[str, str]] = {
     "watch": ("watchStartBtn", "html"),
 }
 
-#: 这两个子命令本身就是「起界面」，不需要再给它们做界面入口。
-CLI_UI_EXEMPT = {"serve", "desktop"}
+#: 这三个子命令本身就是「起界面」（`start` 是「扫描 + 起界面」），不需要再给它们做界面入口。
+CLI_UI_EXEMPT = {"start", "serve", "desktop"}
 
 
 def test_web_page_covers_every_cli_command() -> None:
