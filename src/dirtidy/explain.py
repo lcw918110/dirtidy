@@ -55,6 +55,33 @@ SOURCE_LABELS = {
 }
 
 
+def _human_size(n: int) -> str:
+    """字节数 → 人读的「12.3 MB」。目录的 size 恒为 0，此时由调用方决定是否显示。"""
+    if n <= 0:
+        return "0 B"
+    units = ("B", "KB", "MB", "GB", "TB")
+    x = float(n)
+    i = 0
+    while x >= 1024 and i < len(units) - 1:
+        x /= 1024
+        i += 1
+    if i == 0:
+        return f"{int(x)} B"
+    return f"{x:.1f} {units[i]}"
+
+
+#: 每个 decision 的人话回答。四问顺序即「用户站在这条路径前会按什么顺序想」：
+#: 这是什么 → 系统会怎么办 → 为什么 → 删了怎么恢复。
+_WHAT: dict[str, str] = {
+    "protected": "受保护，不能动",
+    "blocked_by_descendant": "这个目录整体动不了",
+    "auto_quarantine": "会被搬进隔离区",
+    "candidate_only": "先列出来，等你决定",
+    "no_match": "保持原样",
+    "missing": "这个路径不存在",
+}
+
+
 @dataclass(slots=True)
 class RuleTrace:
     """单条规则对目标路径的判定明细。"""
@@ -81,6 +108,10 @@ class Explanation:
     decision: str
     rule_id: str | None = None
     reason: str = ""
+    #: 命中规则的「中文短名」与「删了怎么恢复」。人话摘要要回答「这是什么 / 删了怎么办」，
+    #: 而 `rule_id`（`dep_node_modules`）是内部编号，不能直接给人看。
+    rule_label: str = ""
+    recover: str = ""
     protected: bool = False
     protect_rule_id: str | None = None
     protect_reason: str | None = None
@@ -98,6 +129,86 @@ class Explanation:
         d = asdict(self)
         d["decision_label"] = DECISION_LABELS.get(self.decision, self.decision)
         return d
+
+    #: 每个 decision 的人话回答见模块级 `_WHAT`，这里不再重复定义类字段。
+
+    def human_summary(self) -> dict[str, str]:
+        """四段自然语言结论，供网页弹窗直接渲染，也供 `to_text()` 复用。
+
+        刻意**不**在网页前端再拼一份措辞——同一个语义散两处迟早漂移（本项目已四次
+        栽在「同一个判定写两份」上）。前端只负责显示这里算好的四段字。
+        """
+        what = _WHAT.get(self.decision, self.decision)
+        kind = "目录" if self.is_dir else "文件"
+
+        if self.decision == "missing":
+            return {
+                "what": what,
+                "action": "没有这个路径，谈不上动不动。",
+                "why": "它要么已被移走，要么路径写错了。",
+                "recover": "无需处理。",
+            }
+
+        # 这是什么：优先用规则的中文短名，没有就退到「内部规则编号」。
+        what_detail = self.rule_label or (f"内部规则 {self.rule_id}" if self.rule_id else "")
+        if self.decision == "protected":
+            action = "系统不会自动动它，也不把它列进候选。"
+            why = (
+                f"它命中了保护规则「{self.protect_reason or self.protect_rule_id}」；"
+                "保护优先级最高，任何规则或直删都压不过它。"
+            )
+            if self.rule_id:
+                why += f"本来有条规则（{what_detail}）想动它，被保护拦下了。"
+            recover = "不适用——它根本不会被删。"
+        elif self.decision == "blocked_by_descendant":
+            action = "这条目录不会被搬走，整条拦下。"
+            blocker = self.blocking_path or "子树里的某个受保护文件"
+            why = (
+                f"规则（{what_detail}）本来要搬走它，但它的子树里躺着受保护文件 "
+                f"「{blocker}」（{self.blocking_reason or self.blocking_rule_id}）。"
+                "搬走父目录等于把受保护文件一起搬走，所以整条不动。"
+            )
+            recover = "不适用——它这次不会被删。"
+        elif self.decision == "auto_quarantine":
+            action = "系统会在「执行」时把它搬进隔离区（可还原，不会直接删除）。"
+            why = f"它命中了规则「{what_detail}」——{self.reason or '按规则判定可清理'}。"
+            recover = self.recover or "从隔离区还原即可找回。"
+        elif self.decision == "candidate_only":
+            action = "它进了候选，但不会自动动；要你在审阅页明确选「隔离 / 归档」才搬。"
+            why = f"它命中了候选规则「{what_detail}」——{self.reason or '需要人工确认'}。"
+            recover = self.recover or "不删就还在原位，什么都不用做。"
+        elif self.protected:
+            # 没有规则想动它、但它仍受保护——说清楚，避免「没命中 = 可以随便动」
+            action = "系统不会动它；即便以后有规则命中，也不会自动隔离。"
+            why = f"它受保护（{self.protect_reason or self.protect_rule_id}），只是本轮没有规则命中它。"
+            recover = "不适用——它不会被自动删。"
+        else:  # no_match
+            action = "系统不会动它，保持原样。"
+            why = "没有规则命中它：既不是可清理的依赖/缓存，也不是需要确认的候选。"
+            recover = "不适用——它不会被删。"
+
+        return {
+            "what": f"{what}（{kind}）",
+            "action": action,
+            "why": why,
+            "recover": recover,
+        }
+
+    def _human_lines(self) -> list[str]:
+        """人话结论段：四问分层，不含逐条规则日志。"""
+        s = self.human_summary()
+        lines = [
+            f"这是什么：{s['what']}",
+            f"系统会怎么办：{s['action']}",
+            f"为什么：{s['why']}",
+            f"删了怎么办：{s['recover']}",
+        ]
+        if self.path:
+            lines.insert(0, f"路径：{self.path}")
+        if self.is_dir and self.enumerated_descendants:
+            suffix = "（已达枚举上限）" if self.truncated else ""
+            lines.append(f"已枚举后代：{self.enumerated_descendants} 条{suffix}")
+        return lines
 
     def to_text(self) -> str:
         from dirtidy.models import utc_now_iso
@@ -353,4 +464,13 @@ def explain_path(
         if guard is not None:
             explanation.protect_rule_id, explanation.protect_reason = guard
     explanation.protected = explanation.protect_rule_id is not None
+
+    # 命中规则的中文短名与「删了怎么恢复」，从规则包**同源**查（不另写一份措辞）。
+    # 找不到就留空：human_summary 会回落到内部编号或通用说法，而不是编一个。
+    if explanation.rule_id:
+        for rule in pack.get("rules") or []:
+            if str(rule.get("id")) == explanation.rule_id:
+                explanation.rule_label = str(rule.get("label") or "")
+                explanation.recover = str(rule.get("recover") or "")
+                break
     return explanation

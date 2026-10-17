@@ -526,6 +526,37 @@ def test_web_status_labels_cover_action_fields() -> None:
         assert f"{key}:" in block, f"STATUS_LABELS 缺少 {key} 的人话标签"
 
 
+def test_web_action_status_is_a_transfer_summary() -> None:
+    """执行隔离 / 决策 / 还原 / 删除后，状态条要出「搬走多少 + 还剩多少」的汇总，
+    而不是零碎的 `quarantined: 3`。
+
+    回归背景：原先 setStatus 只把后端字段逐条翻成人话，用户点完「执行隔离」看到的是
+    「隔离 3　直删 1」——既不知道还剩下多少，也不知道这动作的整体后果。现在动作完成
+    后走 transferStatus → loadRun → finishTransferStatus 两步，拼成一句「✓ 搬进隔离区
+    3 项。当前待处理 0 项，隔离区累计 3 项（1.2 MB）」。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "function transferSummary(" in js, "应有把返回体折成转移动词的辅助函数"
+    assert "function transferStatus(" in js, "动作完成应先记转移摘要"
+    assert "function finishTransferStatus(" in js, "载入后应补「还剩多少」"
+    # 三个搬文件/删文件的动作都必须走转移摘要，而不是零散的 setStatus
+    for name in ("apply", "applyRules", "quarantineAction"):
+        body = _js_function(name)
+        assert "transferStatus(" in body, f"{name} 完成后应显示转移摘要"
+    # 摘要要含「还剩多少」的后续词
+    assert "当前还有" in js and "隔离区累计" in js, "转移摘要应补上待处理与隔离区累计"
+
+
+def test_web_tab_switch_is_smooth() -> None:
+    """切 tab 要丝滑：淡入动画 + 回到内容顶部，不跳高度、不闪屏。"""
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    assert "animation: tab-in" in css, "激活页应有 tab-in 入场动画（精确匹配，防泛泛的 animation:none 兜底）"
+    assert "@keyframes tab-in" in css, "应有 tab-in 关键帧"
+    assert "prefers-reduced-motion" in css, "应尊重系统「减少动态效果」设置"
+    body = _js_function("showTab")
+    assert "scrollTop" in body, "切页应回到内容顶部，避免从上一页的滚动位置半路切入"
+
+
 # ------------------------------ 审阅页决策流 ------------------------------
 #
 # 这一组守的是「界面看起来做了什么」与「实际发生了什么」是否一致。

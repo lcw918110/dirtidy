@@ -81,7 +81,19 @@ function setStatus(obj, opts = {}) {
   const text = document.getElementById("status");
   if (!bar || !text) return;
   const isError = opts.error === true || obj instanceof Error;
-  text.textContent = isError ? String((obj && obj.message) || obj) : humanStatus(obj);
+  // 转移摘要：先显示「搬走多少」，等 loadRun 完成后 finishTransferStatus
+  // 再补上「还剩多少」——两步走，否则数字只有一半。
+  if (opts.transfer && !isError) {
+    const head = transferSummary(obj).length
+      ? `✓ ${transferSummary(obj).join("，")}`
+      : humanStatus(obj);
+    text.textContent = head;
+  } else {
+    text.textContent = isError ? String((obj && obj.message) || obj) : humanStatus(obj);
+    // 非转移动作（保存、采纳、批量设决策等）一旦写状态条，上一次的转移摘要
+    // 就该作废——否则下次 loadRun 会误把它当成「刚做完的动作」再补一句「还剩多少」。
+    lastTransferSummary = "";
+  }
   bar.classList.toggle("error", isError);
   bar.hidden = false;
   window.clearTimeout(statusTimer);
@@ -107,6 +119,76 @@ function humanStatus(obj) {
     } else bits.push(`${label} ${v}`);
   }
   return bits.join("　") || "完成";
+}
+
+/* --------------------- 状态转移后的统计汇总摘要 ---------------------
+   执行隔离 / 候选决策 / 还原 / 彻底删除 / 采纳建议等动作做完后，
+   用户要的不只是「隔离 3」这种零散字段，而是「搬走了多少、留下多少、
+   拦下多少、当前还剩多少、隔离区累计多少」的一整句话。
+   这里不重新算任何判定——数字全部来自后端返回体，前端只负责说人话。 */
+
+/* 后端动作返回体里的字段名 → 人话。与 STATUS_LABELS 分开：
+   这是「转移发生了多少」的动词，不是「这是个什么字段」的名词。 */
+const TRANSFER_WORDS = {
+  quarantined: "搬进隔离区",
+  purged_directly: "直删",
+  purged: "彻底删除",
+  restored: "还原",
+  archived: "归档",
+  kept: "保留",
+  kept_by_user: "人工保留",
+  blocked_by_protect: "受保护拦下",
+  skipped: "跳过",
+  adopted: "填入决策",
+};
+
+function transferSummary(obj) {
+  if (!obj || typeof obj !== "object") return "";
+  const done = [];
+  for (const k of Object.keys(TRANSFER_WORDS)) {
+    const v = obj[k];
+    if (typeof v === "number" && v > 0) done.push(`${TRANSFER_WORDS[k]} ${v} 项`);
+  }
+  return done;
+}
+
+/* 操作完成后、loadRun 重载前先记住一次结果，待新数据到位后补上
+   「当前待处理 / 隔离区累计」，合起来才是完整的「转移摘要」。 */
+let lastTransferSummary = "";
+
+function transferStatus(res) {
+  const parts = transferSummary(res);
+  const head = parts.length ? `✓ ${parts.join("，")}` : "";
+  lastTransferSummary = head;
+  if (!head) {
+    setStatus(res);
+    return;
+  }
+  setStatus(res, { transfer: true });
+}
+
+/* loadRun 之后调用：把「搬走了多少」与「现在还剩多少」拼成一句话。 */
+function finishTransferStatus() {
+  if (!lastTransferSummary) return;
+  const tail = transferAftermath();
+  setStatus(tail ? `${lastTransferSummary}。${tail}` : lastTransferSummary);
+  lastTransferSummary = "";
+}
+
+/* 从当前载入的数据里算「现在还剩多少」：待处理项 + 隔离区累计。
+   纯显示，不碰任何判定。 */
+function transferAftermath() {
+  const d = currentRunData;
+  if (!d) return "";
+  const pending = (d.pending_auto_hits || []).length;
+  const cand = (d.candidates || []).length;
+  const q = (d.quarantine_summary || {}).count || 0;
+  const qsize = (d.quarantine_summary || {}).size || 0;
+  const bits = [];
+  if (pending + cand) bits.push(`当前还有 ${pending + cand} 项待处理`);
+  else bits.push("待处理项已清空");
+  if (q) bits.push(`隔离区累计 ${q} 项（${humanSize(qsize)}）`);
+  return bits.join("，");
 }
 
 function clear(node) {
@@ -229,15 +311,39 @@ function whyButton(path) {
 async function explain(path) {
   const dlg = document.getElementById("explainDlg");
   document.getElementById("explainPath").textContent = path;
+  document.getElementById("explainSummary").textContent = "";
   document.getElementById("explainBody").textContent = "加载中…";
   dlg.showModal();
   try {
     const data = await api(
       `/api/runs/${currentRun}/explain?path=${encodeURIComponent(path)}`,
     );
+    renderExplainSummary(data.summary);
     document.getElementById("explainBody").textContent = data.text;
   } catch (e) {
+    document.getElementById("explainSummary").textContent = "";
     document.getElementById("explainBody").textContent = String(e);
+  }
+}
+
+/* 四段人话结论：后端 human_summary 给什么就显示什么，不在这里拼措辞——
+   同一个语义散两处迟早漂移（本项目已四次栽在「同一个判定写两份」上）。 */
+function renderExplainSummary(summary) {
+  const box = document.getElementById("explainSummary");
+  clear(box);
+  if (!summary) return;
+  const rows = [
+    ["这是什么", summary.what],
+    ["系统会怎么办", summary.action],
+    ["为什么", summary.why],
+    ["删了怎么办", summary.recover],
+  ];
+  for (const [k, v] of rows) {
+    if (!v) continue;
+    const line = el("div", { cls: "explain-row" });
+    line.appendChild(el("div", { cls: "explain-k", text: k }));
+    line.appendChild(el("div", { cls: "explain-v", text: v }));
+    box.appendChild(line);
   }
 }
 
@@ -250,6 +356,10 @@ function showTab(name) {
   for (const s of document.querySelectorAll(".tab")) {
     s.classList.toggle("active", s.id === `tab-${name}`);
   }
+  // 切页回到内容顶部：`.app-main` 是滚动容器，切页时若保留上一次的滚动位置，
+  // 新页会从半中间开始显示——像「页面自己跳了一下」。归零让每次切入都从头看起。
+  const main = document.querySelector(".app-main");
+  if (main) main.scrollTop = 0;
   if (name === "rules") loadRules();
   if (name === "settings") loadSettings();
   if (name === "watch") refreshWatch();
@@ -1560,8 +1670,10 @@ async function loadRun(runId) {
   renderScanSummary(data);
   renderReview(data);
   renderQuarantine(data);
-  // 这里刻意不写状态条：动作类操作会先 setStatus(结果) 再 loadRun，
-  // 若载入时也写一次，用户刚看到的「隔离 3」会立刻被「已载入 run」冲掉。
+  // 动作类操作会先 setStatus(结果) 再 loadRun；载入时不再写一次状态，
+  // 避免「隔离 3」被「已载入 run」冲掉。但转移摘要需要在新数据到位后
+  // 补上「还剩多少」，这里只补、不覆盖。
+  finishTransferStatus();
 }
 
 async function save() {
@@ -1628,7 +1740,7 @@ async function apply() {
   }
   await save();
   const res = await api(`/api/runs/${currentRun}/apply-decisions`, { method: "POST" });
-  setStatus(res);
+  transferStatus(res);
   await loadRun(currentRun);
   return undefined;
 }
@@ -1649,7 +1761,7 @@ async function applyRules() {
     body: JSON.stringify({ keep_paths }),
   });
   keptPaths.clear();
-  setStatus(res);
+  transferStatus(res);
   await loadRun(currentRun);
   return undefined;
 }
@@ -1752,8 +1864,17 @@ function keepBatch(kind) {
    剪贴板 API 只在 https / localhost 下可用（局域网 IP 打开网页就没有），
    所以留一条 `execCommand` 兜底——先选中 <pre> 内容再走老接口。 */
 async function copyExplain(btn) {
+  // 复制「人话四段 + 技术明细」的合体：发给人看时，人话在前说明结论，
+  // 技术明细在后供对方复核——只给技术日志对方也看不懂。
   const body = document.getElementById("explainBody");
-  const text = body ? body.textContent || "" : "";
+  const summary = explainSummaryText();
+  const detail = body ? body.textContent || "" : "";
+  let text = detail;
+  if (summary && detail && detail !== "加载中…") {
+    text = `${summary}\n\n—— 技术判定明细 ——\n${detail}`;
+  } else if (summary) {
+    text = summary;
+  }
   if (!text || text === "加载中…") return;
 
   let ok = false;
@@ -1784,6 +1905,20 @@ async function copyExplain(btn) {
   window.setTimeout(() => {
     btn.textContent = old;
   }, 1600);
+}
+
+/* 把「这是什么 / 系统会怎么办 / 为什么 / 删了怎么办」拼成纯文本，
+   供复制时放在技术明细前面。 */
+function explainSummaryText() {
+  const box = document.getElementById("explainSummary");
+  if (!box) return "";
+  const lines = [];
+  for (const row of box.querySelectorAll(".explain-row")) {
+    const k = row.querySelector(".explain-k");
+    const v = row.querySelector(".explain-v");
+    if (k && v && v.textContent) lines.push(`${k.textContent}：${v.textContent}`);
+  }
+  return lines.join("\n");
 }
 
 document.getElementById("keepAllBtn").onclick = () => keepBatch("all");
@@ -1895,7 +2030,7 @@ async function quarantineAction(kind, payload) {
     body: JSON.stringify(payload),
   });
   quarantined.clear();
-  setStatus(res);
+  transferStatus(res);
   await loadRun(currentRun);
 }
 

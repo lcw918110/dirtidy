@@ -169,6 +169,11 @@ def test_web_explain_returns_cli_text(workspace: Path) -> None:
     assert body["decision"] == "auto_quarantine"
     assert body["path"] == "node_modules"
 
+    # 人话摘要：四段齐全，且含规则中文短名（不是内部编号 dep_node_modules 打头）
+    summary = body["summary"]
+    assert summary and set(summary) >= {"what", "action", "why", "recover"}
+    assert "Node 依赖" in summary["why"], "人话摘要应给规则中文短名，而非内部编号"
+
     expected = explain_path(workspace, "node_modules", rules="default").to_text()
     # 归一化必须真的生效，否则文本格式一变，这个用例就悄悄退化成「比原样」的假守卫
     assert _GENERATED_AT.search(body["text"]), "解释文本应含「（生成于 …）」时间戳"

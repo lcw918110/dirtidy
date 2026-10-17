@@ -527,9 +527,13 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
     def get_explain(run_id: str, path: str) -> dict:
         """解释某路径为什么被/不被动。
 
-        复用 CLI `explain` 的同一套判定（进而复用 engine 的匹配与条件函数），
-        并直接返回 `to_text()` 的文本 —— 网页与命令行看到的是同一份解释，
-        不会出现「网页说的和 CLI 说的不一样」。
+        复用 CLI `explain` 的同一套判定（进而复用 engine 的匹配与条件函数）。
+        返回三样东西：
+        - `summary`：四段人话（这是什么 / 系统会怎么办 / 为什么 / 删了怎么办），
+          网页弹窗直接渲染它，不自己再拼一份措辞；
+        - `text`：`to_text()` 的完整文本 —— 与 CLI `explain` **逐字一致**，
+          不会出现「网页说的和 CLI 说的不一样」；
+        - `decision` / `decision_label`：供深链与调试使用。
         """
         rdir = _run_path(run_id)
         meta = read_json(rdir / "meta.json")
@@ -546,6 +550,7 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
             "path": exp.path,
             "decision": exp.decision,
             "decision_label": exp.to_dict()["decision_label"],
+            "summary": exp.human_summary(),
             "text": exp.to_text(),
         }
 

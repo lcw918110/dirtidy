@@ -48,6 +48,39 @@ def test_explain_auto_quarantine(tmp_path: Path) -> None:
     assert "dep_node_modules" in exp.to_text()
 
 
+def test_explain_human_summary_is_plain_language(tmp_path: Path) -> None:
+    """人话摘要四段齐全，且给规则中文短名、说清「删了怎么恢复」。
+
+    回归背景：解释首屏过去是「结论: 自动隔离——apply-rules / --apply 时会移入隔离区」
+    加 20+ 条 [未命中] protect_xxx 规则日志，技术化到用户看不懂。现在拆成
+    「这是什么 / 系统会怎么办 / 为什么 / 删了怎么办」四段自然语言，技术明细收进折叠。
+    """
+    root = _ws(tmp_path)
+    (root / "node_modules").mkdir()
+    exp = explain_path(root, "node_modules")
+    s = exp.human_summary()
+    assert set(s) >= {"what", "action", "why", "recover"}, "四段人话缺段"
+    assert "Node 依赖" in s["why"], "为什么里应给规则中文短名（Node 依赖），不是内部编号"
+    assert "npm install" in s["recover"], "删了怎么办应如实给出重建命令"
+    assert "**" not in s["why"] and "**" not in s["action"], "人话是纯文本，不带 Markdown 加粗标记"
+
+    # no_match 也要有人话，不能只给技术日志
+    (root / "notes.txt").write_text("hi", encoding="utf-8")
+    no = explain_path(root, "notes.txt").human_summary()
+    assert no["what"] and no["why"], "无命中也应给四段人话"
+
+
+def test_explain_human_summary_for_blocked_by_descendant(tmp_path: Path) -> None:
+    """「整条拦下」的人话要点名是哪个受保护文件挡的——只说「子树里有受保护内容」查不到责任人。"""
+    root = _ws(tmp_path)
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / ".npmrc").write_text("TOKEN=abc", encoding="utf-8")
+    exp = explain_path(root, "node_modules")
+    s = exp.human_summary()
+    assert "整条拦下" in s["action"]
+    assert "node_modules/.npmrc" in s["why"]
+
+
 def test_explain_dir_with_protected_descendant_matches_execution(tmp_path: Path) -> None:
     """命中目录但子树里有受保护文件时，explain 必须与 apply-rules 给同一个结论。
 

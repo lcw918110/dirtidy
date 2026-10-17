@@ -71,7 +71,17 @@ header { margin-bottom: 0.3rem; }
   font-weight: 600;
 }
 .tab { display: none; }
-.tab.active { display: block; }
+.tab.active { display: block; animation: tab-in 0.16s ease-out; }
+/* 淡入 + 轻微上移：让切页有「进来」的感觉，而不是生硬地闪现。
+   幅度刻意压小（3px / 0.16s），不抢内容、也不造成滚动跳动。 */
+@keyframes tab-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+/* 尊重系统「减少动态效果」设置：关了动画就一步到位 */
+@media (prefers-reduced-motion: reduce) {
+  .tab.active { animation: none; }
+}
 
 /* ======================== 通用元件 ======================== */
 /* 工具栏：统一间距，不让按钮贴得太紧或太远 */
@@ -394,12 +404,27 @@ dialog { border: 1px solid var(--line); border-radius: 6px; padding: 0; max-widt
 /* 弹窗头部两个按钮（复制 / 关闭）不许折行：路径一长，flex 会把它们压窄，
    「复制这段解释」折成两行会顶高整条头部。 */
 .dlg-head button { white-space: nowrap; flex: 0 0 auto; }
+/* 弹窗主体：人话四段在上、技术明细折叠在下 */
+.dlg-body { padding: 0.9rem; overflow: auto; max-height: 62vh; }
+/* 四段人话结论：左标签右正文，一眼扫出「这是什么 → 怎么办 → 为什么 → 删了怎么办」。 */
+.explain-row { display: flex; gap: 0.7rem; padding: 0.25rem 0; font-size: 0.88rem; line-height: 1.55; }
+.explain-k {
+  flex: 0 0 auto;
+  min-width: 5.2rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  padding-top: 0.1rem;
+}
+.explain-v { flex: 1; word-break: break-word; }
+.explain-detail { margin-top: 0.7rem; border-top: 1px solid var(--line); padding-top: 0.5rem; }
+.explain-detail summary { cursor: pointer; color: var(--muted); font-size: 0.82rem; }
+.explain-detail summary:hover { color: var(--accent); }
 #explainBody {
-  margin: 0;
-  padding: 0.9rem;
+  margin: 0.4rem 0 0;
+  padding: 0.6rem 0;
   overflow: auto;
-  max-height: 62vh;
-  font-size: 0.85rem;
+  max-height: 40vh;
+  font-size: 0.8rem;
   line-height: 1.5;
   white-space: pre-wrap;
 }

@@ -445,7 +445,15 @@
       <button id="explainCopy" type="button" title="把这段解释复制到剪贴板，方便发给别人">复制这段解释</button>
       <button id="explainClose" type="button">关闭</button>
     </div>
-    <pre id="explainBody"></pre>
+    <div class="dlg-body">
+      <!-- 四段人话结论：这是什么 / 系统会怎么办 / 为什么 / 删了怎么办。
+           措辞全部来自后端 human_summary，前端只显示、不自己拼。 -->
+      <div id="explainSummary"></div>
+      <details class="explain-detail">
+        <summary>技术判定明细（逐条规则日志）</summary>
+        <pre id="explainBody"></pre>
+      </details>
+    </div>
   </dialog>
 
   <div id="statusbar" class="statusbar" role="status" aria-live="polite" hidden>
