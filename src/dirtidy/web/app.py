@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from dirtidy.models import (
     read_json,
     run_dir,
     state_root,
+    utc_now_iso,
 )
 from dirtidy.pipeline import apply_pending_rules, create_run, protect_rules_from_paths
 from dirtidy.quarantine.store import (
@@ -171,10 +173,17 @@ def _pack_detail(pack_id: str) -> dict[str, Any]:
 # 「有的有大小、有的没有」比「都没有」更让人怀疑数据坏了。
 MAX_SIZE_ENTRIES = 300
 
-# 这几类候选由 hashing 模块生成，规则包里查不到，但用户同样需要知道「删了会怎样」。
-BUILTIN_RECOVER: dict[str, str] = {
-    "duplicate_content": "保留任意一份即可，其余删掉不影响",
-    "archive_hash_match": "磁盘文件与压缩包里的成员逐字节相同，压缩包留着就行",
+# 这几类候选由 hashing 模块生成，规则包里查不到，但用户同样需要知道
+# 「这叫什么」和「删了会怎样」。
+BUILTIN_CANDIDATE_META: dict[str, dict[str, str]] = {
+    "duplicate_content": {
+        "label": "重复文件",
+        "recover": "保留任意一份即可，其余删掉不影响",
+    },
+    "archive_hash_match": {
+        "label": "已解压的压缩包",
+        "recover": "磁盘文件与压缩包里的成员逐字节相同，压缩包留着就行",
+    },
 }
 
 
@@ -217,9 +226,27 @@ def _attach_advice(
         # 中文说明：产物里有就用产物的，没有才回落到当前规则包。
         if not e.get("rule_reason"):
             e["rule_reason"] = str(e.get("reason") or rule.get("reason") or "")
+        # 规则的中文短名。`dep_node_modules` 这种内部编号摆在界面上，用户只能猜；
+        # 规则包没写 label 就留空，前端回落到 rule_id（排查时还得看得到编号）。
+        builtin = BUILTIN_CANDIDATE_META.get(rid) or {}
+        e["rule_label"] = str(rule.get("label") or builtin.get("label") or "")
         # 「删了怎么恢复」比「可以清理」更能让人敢下手：说清代价，而不是给个形容词。
-        e["recover"] = str(rule.get("recover") or BUILTIN_RECOVER.get(rid) or "")
+        e["recover"] = str(rule.get("recover") or builtin.get("recover") or "")
         e["size_bytes"] = -1 if too_many else _entry_size(root, e)
+
+
+def _attach_rule_label(entries: list[Any], rules: dict[str, dict[str, Any]]) -> None:
+    """给已隔离 / 已直删的条目补规则中文短名。
+
+    这些条目早就落盘了（`quarantine_manifest.json` / `purged_directly.json`），
+    里面只有 `rule_id`。不补的话，隔离区「哪条规则搬的」一列又变回
+    `dep_node_modules`——和刚在审阅页改掉的是同一个毛病。
+    """
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        rule = rules.get(str(e.get("rule_id") or "")) or {}
+        e["rule_label"] = str(rule.get("label") or "")
 
 
 def _entry_size(root: Path, entry: dict[str, Any]) -> int:
@@ -262,6 +289,22 @@ def _rule_context(
     return rules, purge_ids
 
 
+def _reload_target() -> FastAPI:
+    """`dirtidy serve --reload` 的工厂入口（仅开发时使用）。
+
+    uvicorn 的 reload 模式要在子进程里重新导入 app，所以 app 必须是 import string；
+    而 `create_app` 需要 root / run_id 两个参数，只能经环境变量传进来。
+    参数由 `cli.cmd_serve` 写入，这里读不到就退回当前目录——不会因为漏设环境变量
+    而让服务起不来。
+    """
+    raw_root = os.environ.get("DIRTIDY_RELOAD_ROOT") or "."
+    root = Path(raw_root).expanduser().resolve()
+    return create_app(
+        default_root=root,
+        default_run_id=os.environ.get("DIRTIDY_RELOAD_RUN_ID") or None,
+    )
+
+
 def create_app(*, default_root: Path, default_run_id: str | None = None) -> FastAPI:
     app = FastAPI(title="dirtidy", version="0.1.0")
     static_dir = Path(__file__).resolve().parent / "static"
@@ -283,6 +326,18 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
         "rules": "",
     }
     watch_lock = threading.Lock()
+
+    # 扫描进度：大目录扫几分钟，界面上一直写着「扫描中…」和卡死没区别，用户会去点
+    # 第二次（于是产生两个 run、两份隔离清单）。这里把进度摊出来，前端轮询。
+    # 状态放闭包，与 watch_state 同款：多实例互不干扰。
+    scan_state: dict[str, Any] = {
+        "running": False,
+        "phase": "",
+        "done": 0,
+        "total": 0,
+        "started_at": "",
+    }
+    scan_lock = threading.Lock()
 
     # 安全响应头：审阅页不加载任何外部资源，用严格 CSP 兜底 XSS
     @app.middleware("http")
@@ -398,6 +453,9 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
                 _attach_advice(
                     out[key], root=default_root, rules=rules, purge_ids=purge_ids
                 )
+        for key in ("quarantine_manifest", "purged_directly"):
+            if isinstance(out.get(key), list):
+                _attach_rule_label(out[key], rules)
         out["auto_purge_rules"] = sorted(purge_ids)
         return out
 
@@ -456,11 +514,34 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
             "text": exp.to_text(),
         }
 
+    @app.get("/api/scan/progress")
+    def scan_progress() -> dict:
+        """当前扫描进度。没在扫就返回 running=False，前端据此停轮询。"""
+        with scan_lock:
+            return dict(scan_state)
+
     @app.post("/api/scan")
     def post_scan(body: ScanBody) -> dict:
         """新建一次扫描。apply=True 时顺带执行高置信规则的隔离。"""
         if body.workers < 1:
             raise HTTPException(400, "workers 必须 ≥ 1")
+        with scan_lock:
+            # 同时点两次会产生两个 run、两份隔离清单，事后很难对上账。
+            # 与其让用户自己发现，不如直接挡住。
+            if scan_state["running"]:
+                raise HTTPException(409, "已有一次扫描正在进行，等它结束再点。")
+            scan_state.update(
+                running=True,
+                phase="正在遍历目录",
+                done=0,
+                total=0,
+                started_at=utc_now_iso(),
+            )
+
+        def on_progress(done: int, total: int) -> None:
+            with scan_lock:
+                scan_state.update(phase="内容 hash", done=done, total=total)
+
         try:
             return create_run(
                 default_root,
@@ -469,6 +550,7 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
                 apply=body.apply,
                 workers=body.workers,
                 protect=body.protect,
+                on_progress=on_progress,
             )
         except FileNotFoundError as e:
             raise HTTPException(400, f"找不到规则包: {e}") from e
@@ -476,6 +558,13 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
             raise HTTPException(400, f"规则包非法: {e}") from e
         except PermissionError as e:
             raise HTTPException(403, str(e)) from e
+        finally:
+            with scan_lock:
+                # started_at 一并清掉：留着的话「running=False 但 started_at 有值」
+                # 会让读接口的人以为扫描还在跑（或者刚结束）。
+                scan_state.update(
+                    running=False, phase="", done=0, total=0, started_at=""
+                )
 
     @app.post("/api/runs/{run_id}/analyze")
     def post_analyze(run_id: str, body: AnalyzeBody | None = None) -> dict:

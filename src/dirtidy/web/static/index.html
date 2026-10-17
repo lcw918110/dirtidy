@@ -109,6 +109,18 @@
       被上层目录命中的条目会被标成「已含在上层目录里」（执行时只搬父目录）。
       前两者都登记进 protection.json 便于审计追溯。点路径旁的「为什么？」看逐条判定。
     </p>
+    <div class="toolbar filterbar">
+      <label>只看
+        <select id="pendingAdvice">
+          <option value="">全部</option>
+          <option value="safe_clean">建议清理</option>
+          <option value="clean">可以清理</option>
+          <option value="review">需要你判断</option>
+        </select>
+      </label>
+      <input id="pendingSearch" type="search" placeholder="按路径筛选…" />
+      <span class="hint" id="pendingCount"></span>
+    </div>
     <table>
       <thead>
         <tr>
@@ -126,6 +138,13 @@
       <button id="applyRulesBtn" type="button">执行自动隔离</button>
       <span class="hint">把命中项搬入隔离区（可还原）；勾了「保留」的本轮不动。</span>
     </div>
+    <div class="toolbar">
+      <span class="hint">批量勾选「保留」：</span>
+      <button id="keepAllBtn" type="button">全部保留</button>
+      <button id="keepReviewBtn" type="button">只保留需要判断的</button>
+      <button id="keepNoneBtn" type="button">全部不保留</button>
+      <span class="hint">只改勾选状态，不碰任何文件。</span>
+    </div>
 
     <h3>候选 / 建议</h3>
     <p class="hint">
@@ -137,6 +156,8 @@
     </p>
     <div class="toolbar">
       <button id="adoptBtn" type="button">采纳全部建议</button>
+      <input id="candSearch" type="search" placeholder="按路径筛选候选…" />
+      <span class="hint" id="candCount"></span>
       <span class="hint" id="adoptHint"></span>
     </div>
     <table>
@@ -229,7 +250,7 @@
       <table>
         <thead>
           <tr>
-            <th>id</th>
+            <th>名称</th>
             <th>动作</th>
             <th>匹配</th>
             <th>原因</th>

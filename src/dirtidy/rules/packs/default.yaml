@@ -13,6 +13,7 @@ version: 2
 rules:
   # ============================ 保护：最高优先级 ============================
   - id: protect_vcs
+    label: "版本库元数据"
     action: protect
     match:
       type: dir_name
@@ -20,6 +21,7 @@ rules:
     reason: "版本控制元数据，删除即丢失历史"
 
   - id: protect_credentials
+    label: "凭据目录"
     action: protect
     match:
       type: dir_name
@@ -27,6 +29,7 @@ rules:
     reason: "凭据 / 云与容器配置目录"
 
   - id: protect_system_reserved
+    label: "系统保留目录"
     action: protect
     match:
       type: dir_name
@@ -43,6 +46,7 @@ rules:
     reason: "操作系统 / 文件系统保留目录"
 
   - id: protect_secrets
+    label: "密钥文件"
     action: protect
     match:
       type: name_glob
@@ -73,6 +77,7 @@ rules:
     reason: "密钥 / 凭据文件，误删不可恢复"
 
   - id: protect_project_markers
+    label: "项目清单"
     action: protect
     match:
       type: file_name
@@ -106,6 +111,7 @@ rules:
     reason: "项目标记与依赖清单，重建成本高"
 
   - id: protect_ci_config
+    label: "CI 配置"
     action: protect
     match:
       type: path_glob
@@ -121,6 +127,7 @@ rules:
 
   # ========================== 自动隔离：可重建 / 无源价值 ==========================
   - id: dep_node_modules
+    label: "Node 依赖"
     action: auto_quarantine
     match:
       type: dir_name
@@ -129,6 +136,7 @@ rules:
     recover: "npm install（或 yarn / pnpm install）"
 
   - id: dep_python_cache
+    label: "Python 缓存"
     action: auto_quarantine
     purge_safe: true
     match:
@@ -150,6 +158,7 @@ rules:
     recover: "无需恢复，下次运行自动重建"
 
   - id: dep_python_venv
+    label: "虚拟环境"
     action: auto_quarantine
     match:
       type: dir_name
@@ -158,6 +167,7 @@ rules:
     recover: "python -m venv .venv && pip install -r requirements.txt"
 
   - id: dep_jvm_cache
+    label: "JVM 缓存"
     action: auto_quarantine
     match:
       type: dir_name
@@ -166,6 +176,7 @@ rules:
     recover: "无需恢复，下次构建自动重建"
 
   - id: dep_web_cache
+    label: "前端构建缓存"
     action: auto_quarantine
     match:
       type: dir_name
@@ -184,6 +195,7 @@ rules:
     recover: "无需恢复，下次构建自动重建"
 
   - id: dep_tool_cache
+    label: "工具链缓存"
     action: auto_quarantine
     match:
       type: dir_name
@@ -200,6 +212,7 @@ rules:
     recover: "无需恢复，下次运行自动重建"
 
   - id: dep_os_metadata
+    label: "系统元数据文件"
     action: auto_quarantine
     purge_safe: true
     match:
@@ -209,6 +222,7 @@ rules:
     recover: "无需恢复，系统自动重建"
 
   - id: dep_editor_swap
+    label: "编辑器临时文件"
     action: auto_quarantine
     purge_safe: true
     match:
@@ -218,6 +232,7 @@ rules:
     recover: "无需恢复，编辑器残留"
 
   - id: dep_python_bytecode
+    label: "Python 字节码"
     action: auto_quarantine
     purge_safe: true
     match:
@@ -227,6 +242,7 @@ rules:
     recover: "无需恢复，下次导入自动重建"
 
   - id: dep_temp_partial
+    label: "临时文件"
     action: auto_quarantine
     match:
       type: suffix
@@ -235,6 +251,7 @@ rules:
     recover: "需要时重新下载"
 
   - id: log_suffix
+    label: "旧日志"
     action: auto_quarantine
     match:
       type: suffix
@@ -245,6 +262,7 @@ rules:
     recover: "无需恢复，日志仅作历史记录"
 
   - id: empty_dir
+    label: "空目录"
     action: auto_quarantine
     match:
       type: empty_dir
@@ -253,6 +271,7 @@ rules:
 
   # ============================== 候选：需人工确认 ==============================
   - id: empty_file
+    label: "空文件"
     action: candidate_only
     match:
       type: empty_file
@@ -260,6 +279,7 @@ rules:
     recover: "无法恢复，删前确认不是占位文件"
 
   - id: build_dir_candidate
+    label: "构建产物"
     action: candidate_only
     match:
       type: name_glob
@@ -269,6 +289,7 @@ rules:
     recover: "重新构建（构建命令因项目而异）"
 
   - id: installer_suffix
+    label: "安装包"
     action: candidate_only
     match:
       type: suffix
@@ -277,6 +298,7 @@ rules:
     recover: "需要时重新下载"
 
   - id: archive_suffix
+    label: "压缩包"
     action: candidate_only
     match:
       type: suffix
@@ -285,6 +307,7 @@ rules:
     recover: "无法恢复，可能存着唯一副本"
 
   - id: backup_suffix
+    label: "备份文件"
     action: candidate_only
     match:
       type: suffix
@@ -293,6 +316,7 @@ rules:
     recover: "无法恢复，备份可能就是唯一副本"
 
   - id: database_suffix
+    label: "本地数据库"
     action: candidate_only
     match:
       type: suffix

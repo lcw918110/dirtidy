@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from dirtidy import __version__
@@ -234,6 +235,26 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from dirtidy.web.app import create_app
 
     root = _resolve_root(args.root) if args.root else Path.cwd().resolve()
+    if args.reload:
+        # uvicorn 的 reload 模式要在子进程里重新导入 app，因此 app 必须是 import string；
+        # 而 create_app 需要 root / run_id，只能经环境变量传进去（见 web/app.py 的
+        # `_reload_target`）。**只用于开发**：改 src/ 下的 Python 代码自动重启，
+        # 省掉每次手动 Ctrl+C。默认关闭，不影响正常使用。
+        os.environ["DIRTIDY_RELOAD_ROOT"] = str(root)
+        if args.run_id:
+            os.environ["DIRTIDY_RELOAD_RUN_ID"] = args.run_id
+        else:
+            os.environ.pop("DIRTIDY_RELOAD_RUN_ID", None)
+        # 只盯包目录：盯整个 cwd 的话，扫一个几万文件的目录会不断触发重载。
+        uvicorn.run(
+            "dirtidy.web.app:_reload_target",
+            factory=True,
+            host=args.host,
+            port=args.port,
+            reload=True,
+            reload_dirs=[str(Path(__file__).resolve().parent)],
+        )
+        return 0
     app = create_app(default_root=root, default_run_id=args.run_id)
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
@@ -372,6 +393,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--run-id", dest="run_id", default=None)
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8765)
+    s.add_argument(
+        "--reload",
+        action="store_true",
+        help="开发用：改了 src/ 下的 Python 代码自动重启服务（默认关闭；"
+        "前端静态文件仍建议硬刷新浏览器）",
+    )
     s.set_defaults(func=cmd_serve)
 
     s = sub.add_parser("desktop", help="薄壳启动器：起本地服务并打开浏览器（降低启动门槛）")

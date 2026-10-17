@@ -51,6 +51,10 @@ header { margin-bottom: 0.5rem; }
 
 /* ------------------------------- 通用元件 ------------------------------- */
 .toolbar { display: flex; gap: 0.75rem; align-items: end; margin: 0.6rem 0 1rem; flex-wrap: wrap; }
+/* 筛选条贴着表格上方，与底部「执行」按钮分开——它只改显示，不动任何文件。 */
+.filterbar { margin-bottom: 0.4rem; }
+.filterbar .hint { margin: 0; }
+input[type="search"] { padding: 0.3rem 0.5rem; min-width: 14rem; }
 .panel {
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.6);
@@ -183,6 +187,8 @@ select:disabled, input:disabled, textarea:disabled {
 
 /* 占用列右对齐 + 等宽数字：竖着比大小时，个位不对齐就看不出谁更大 */
 td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* 短字段（动作 / 类型这类 2-4 个字）不许折行：匹配列一长，它们会被挤成竖排单字。 */
+td.nowrap { white-space: nowrap; }
 
 /* 四色图例：颜色必须配解释，否则用户只能猜绿的好还是橙的好 */
 .legend {

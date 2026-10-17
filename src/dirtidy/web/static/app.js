@@ -20,6 +20,10 @@ let rulePurge = new Set();
 let savedPurge = new Set();
 let currentPack = "";
 let watchTimer = null;
+/* 最近一次 /api/runs/{id} 的响应。筛选、批量勾选「保留」之后要按同一份数据重渲染，
+   否则得再请求一次接口——而重渲染只是把 DOM 按已有状态重画，不必联网。 */
+let currentRunData = null;
+let scanPollTimer = null;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -164,6 +168,20 @@ const DECISION_LABELS = {
   archive: "归档",
 };
 
+/* 规则动作的中文说法。规则页原先直接铺 `auto_quarantine` 这种内部词，
+   而它决定的是「这行会不会被自动搬走」——正是用户最该看懂的一列。
+   措辞取短（列窄，长句子会折成三行），详细含义放 title。 */
+const ACTION_LABELS = {
+  protect: "保护",
+  auto_quarantine: "自动隔离",
+  candidate_only: "只进候选",
+};
+const ACTION_HINTS = {
+  protect: "永不自动隔离，最高优先级",
+  auto_quarantine: "进待隔离清单，执行时搬入隔离区（可还原）",
+  candidate_only: "只进候选，交人工判断，不会自动动",
+};
+
 /* 建议标签。判定在 `dirtidy/advice.py`，这里只负责好看。
    刻意**不在前端按 rule_id 拼措辞**：那会变成第二份判定，规则包一改名或加
    `purge_safe`，界面就会说「可以清理」而实际执行是「直接删除」——本项目
@@ -178,6 +196,14 @@ function adviceTag(entry) {
     text: entry.advice_label || "需要你判断",
     attrs: hint ? { title: hint } : {},
   });
+}
+
+/* 规则的中文短名（规则包里的 `label`）。
+   没有 label 就回落到 rule_id——排查时还得看得到内部编号，
+   但它不该是用户看到的第一信息（`dep_node_modules` 只能靠猜）。 */
+function ruleLabel(entry) {
+  if (!entry) return "";
+  return entry.rule_label || entry.rule_id || "";
 }
 
 function decisionFor(path) {
@@ -442,7 +468,7 @@ function scanGroup(g) {
   );
   const metaBits = [`${g.paths.length} 项`];
   if (g.size > 0) metaBits.push(sizeText(g.size));
-  metaBits.push(`规则 ${g.rule_id}`);
+  metaBits.push(`规则：${ruleLabel(g.sample)}`);
   title.appendChild(el("span", { cls: "tiny", text: metaBits.join(" · ") }));
   head.appendChild(title);
   wrap.appendChild(head);
@@ -471,20 +497,39 @@ function scanGroup(g) {
    路径 → 这是什么（中文说明）→ 建议怎么办 → 动了会怎样。
    规则 ID 不是给人看的，缩成小字放说明下面；原先它占着「命中规则」一整列，
    用户看到 `dep_node_modules` 只能猜。 */
+/* 审阅页的筛选状态。放模块级而不是每次渲染重建：勾了「保留」会触发重渲染，
+   筛选条件必须跟着留住，否则用户筛完点一下就跳回全部，等于白筛。 */
+const pendingFilter = { advice: "", q: "" };
+const candFilter = { q: "" };
+
+function matchesPendingFilter(h) {
+  if (pendingFilter.advice && h.advice !== pendingFilter.advice) return false;
+  if (pendingFilter.q && !String(h.path || "").toLowerCase().includes(pendingFilter.q)) {
+    return false;
+  }
+  return true;
+}
+
 function renderPending(data) {
   const tbody = document.getElementById("pendingRows");
   clear(tbody);
   // 按占用降序：用户第一眼要看的是「谁最占地方」，不是「谁字母序靠前」。
   // Windows 磁盘清理、CleanMyMac、dupeGuru 都是这个排法。
-  const hits = [...(data.pending_auto_hits || [])].sort(
+  const all = [...(data.pending_auto_hits || [])].sort(
     (a, b) => (Number(b.size_bytes) || 0) - (Number(a.size_bytes) || 0),
   );
-  if (!hits.length) {
+  const hits = all.filter(matchesPendingFilter);
+  if (!all.length) {
     emptyRow(tbody, 6, "本轮没有规则命中项。切到「扫描」页跑一次，或换一个 run。");
+  } else if (!hits.length) {
+    // 有命中但被筛掉了：必须说清是「筛没了」而不是「本来就没有」，
+    // 否则用户会以为扫描结果丢了。
+    emptyRow(tbody, 6, "当前筛选没有匹配项。把「只看」改回「全部」，或清空搜索框。");
   }
   // 命中目录会覆盖其内的文件命中（执行时只搬父目录）。这里把它标出来——
   // 否则页面写着「N 项」而实际只搬走更少，用户按数字核对会以为漏了。
-  const dirPrefixes = hits.filter((h) => h.is_dir).map((h) => `${h.path}/`);
+  // 用全量而不是筛后结果：筛掉父目录不该让子项的标记凭空消失。
+  const dirPrefixes = all.filter((h) => h.is_dir).map((h) => `${h.path}/`);
   const coveredByParent = (p) => dirPrefixes.some((d) => p.startsWith(d));
 
   for (const h of hits) {
@@ -518,7 +563,15 @@ function renderPending(data) {
     // 这是什么：中文说明为主，规则 ID 退成小字（要排查时还在，不占视线）
     const tdWhat = document.createElement("td");
     tdWhat.appendChild(el("div", { text: h.rule_reason || h.reason || "（规则未给出说明）" }));
-    if (h.rule_id) tdWhat.appendChild(el("div", { cls: "tiny", text: `规则 ${h.rule_id}` }));
+    if (h.rule_id) {
+      tdWhat.appendChild(
+        el("div", {
+          cls: "tiny",
+          text: `规则：${ruleLabel(h)}`,
+          attrs: { title: h.rule_id },
+        }),
+      );
+    }
     tr.appendChild(tdWhat);
 
     const tdAdvice = document.createElement("td");
@@ -537,10 +590,18 @@ function renderPending(data) {
     tbody.appendChild(tr);
   }
 
-  currentPendingCount = hits.length;
+  // 执行范围始终是**全部命中**（勾「保留」的除外），与筛选无关。
+  // 按钮与确认框都按全量报数，否则「筛了 3 项、搬走 30 项」会像丢了东西。
+  currentPendingCount = all.length;
   const btn = document.getElementById("applyRulesBtn");
-  btn.disabled = hits.length === 0;
-  btn.textContent = hits.length ? `执行自动隔离（${hits.length} 项命中）` : "无待隔离项";
+  btn.disabled = all.length === 0;
+  btn.textContent = all.length ? `执行自动隔离（${all.length} 项命中）` : "无待隔离项";
+  const cnt = document.getElementById("pendingCount");
+  if (cnt) {
+    cnt.textContent = all.length
+      ? `显示 ${hits.length} / 共 ${all.length} 项（筛选只影响显示，执行仍按全部命中处理）`
+      : "";
+  }
 }
 
 function renderProtection(data) {
@@ -618,10 +679,16 @@ function renderQuarantine(data) {
     tdPath.appendChild(whyButton(e.original_path));
     tr.appendChild(tdPath);
 
-    // 原因在前、规则 ID 在后：用户要判断「这条要不要还原」，先看的是「为什么被搬走」，
-    // 规则编号只在排查时才有用。
+    // 原因在前、规则名在后：用户要判断「这条要不要还原」，先看的是「为什么被搬走」，
+    // 规则编号只在排查时才有用（所以显示中文短名，id 挂在 title 上）。
     tr.appendChild(el("td", { text: e.reason || "-" }));
-    tr.appendChild(el("td", { cls: "tiny", text: e.rule_id || "-" }));
+    tr.appendChild(
+      el("td", {
+        cls: "tiny",
+        text: ruleLabel(e) || "-",
+        attrs: e.rule_id ? { title: e.rule_id } : {},
+      }),
+    );
     tr.appendChild(el("td", { text: e.is_dir ? "目录" : "文件" }));
     // 用后端实算的 size_actual：清单里的 size 对目录恒为 0，
     // 逐行显示 0 B 而合计显示 293 KB 会自相矛盾。
@@ -652,7 +719,9 @@ function renderQuarantine(data) {
     const line = el("div", { cls: "rowline" });
     line.appendChild(el("code", { text: p.original_path }));
     line.appendChild(
-      document.createTextNode(` ← 规则 ${p.rule_id || "-"}，于 ${p.quarantined_at || ""} 删除`),
+      document.createTextNode(
+        ` ← 规则 ${ruleLabel(p) || "-"}，于 ${p.quarantined_at || ""} 删除`,
+      ),
     );
     purgedBox.appendChild(line);
   }
@@ -720,11 +789,17 @@ function renderReview(data) {
   }
   for (const p of Object.keys(suggestions)) paths.add(p);
 
-  if (!paths.size) {
+  const allPaths = [...paths];
+  const shownPaths = allPaths.filter(
+    (p) => !candFilter.q || p.toLowerCase().includes(candFilter.q),
+  );
+  if (!allPaths.length) {
     emptyRow(rows, 6, "本轮没有候选文件。用完整扫描（不勾「跳过内容 hash」）才会产出候选与重复组。");
+  } else if (!shownPaths.length) {
+    emptyRow(rows, 6, "当前搜索没有匹配的候选。清空搜索框看全部。");
   }
   // 按占用降序，与「待自动隔离」表一致：先看大的。
-  const sortedPaths = [...paths].sort((a, b) => {
+  const sortedPaths = shownPaths.sort((a, b) => {
     const sa = Number((candByPath.get(a) || {}).size_bytes) || 0;
     const sb = Number((candByPath.get(b) || {}).size_bytes) || 0;
     return sb - sa;
@@ -753,6 +828,15 @@ function renderReview(data) {
     );
     const why = cand.rule_reason || cand.reason || "";
     if (why) tdWhy.appendChild(el("div", { cls: "tiny", text: why }));
+    if (cand.rule_id) {
+      tdWhy.appendChild(
+        el("div", {
+          cls: "tiny",
+          text: `规则：${ruleLabel(cand)}`,
+          attrs: { title: cand.rule_id },
+        }),
+      );
+    }
     tr.appendChild(tdWhy);
 
     // 建议：规则给的是「需要你判断」，模型给了就一并摆出来（仍然只是参考）
@@ -865,6 +949,12 @@ function renderReview(data) {
   });
 
   refreshAdoptHint();
+  const candCount = document.getElementById("candCount");
+  if (candCount) {
+    candCount.textContent = allPaths.length
+      ? `显示 ${shownPaths.length} / 共 ${allPaths.length} 项`
+      : "";
+  }
 }
 
 /* 归档目标路径只在决策 = 「归档」时可用。其余动作下留着内容会误导——
@@ -973,8 +1063,18 @@ async function loadRules() {
 
   for (const r of rules) {
     const tr = document.createElement("tr");
-    tr.appendChild(el("td", { text: r.id }));
-    tr.appendChild(el("td", { text: r.action || "candidate_only" }));
+    // 名称在前、内部 id 退成小字：这一页要能看懂「哪条规则」，而不是背编号。
+    const tdName = document.createElement("td");
+    tdName.appendChild(el("div", { text: r.label || r.id }));
+    if (r.label) tdName.appendChild(el("div", { cls: "tiny", text: r.id }));
+    tr.appendChild(tdName);
+    tr.appendChild(
+      el("td", {
+        cls: "nowrap",
+        text: ACTION_LABELS[r.action] || r.action || "只进候选",
+        attrs: ACTION_HINTS[r.action] ? { title: ACTION_HINTS[r.action] } : {},
+      }),
+    );
     tr.appendChild(el("td", { text: matchSummary(r) }));
     tr.appendChild(el("td", { text: r.reason || "" }));
 
@@ -1151,6 +1251,7 @@ async function loadRuns() {
 async function loadRun(runId) {
   currentRun = runId;
   const data = await api(`/api/runs/${runId}`);
+  currentRunData = data;
   for (const d of data.decisions || []) decisions.set(d.path, d);
   renderPartialWarning(data);
   renderOverview(data);
@@ -1231,6 +1332,46 @@ document.getElementById("applyBtn").onclick = () =>
   apply().catch((e) => setStatus(e, { error: true }));
 document.getElementById("applyRulesBtn").onclick = () =>
   applyRules().catch((e) => setStatus(e, { error: true }));
+
+/* 审阅页筛选：只改显示，不改判定。执行范围永远是全部命中（勾了保留的除外），
+   否则「筛了 3 项却搬走 30 项」会像丢了东西。 */
+document.getElementById("pendingAdvice").onchange = (e) => {
+  pendingFilter.advice = e.target.value;
+  if (currentRunData) renderPending(currentRunData);
+};
+document.getElementById("pendingSearch").oninput = (e) => {
+  pendingFilter.q = e.target.value.trim().toLowerCase();
+  if (currentRunData) renderPending(currentRunData);
+};
+document.getElementById("candSearch").oninput = (e) => {
+  candFilter.q = e.target.value.trim().toLowerCase();
+  if (currentRunData) renderReview(currentRunData);
+};
+
+/* 批量勾选「保留」。三个按钮只改 keptPaths，**不碰任何文件**——
+   真正的移动仍然只在「执行自动隔离」里发生。 */
+function keepBatch(kind) {
+  if (!currentRunData) return;
+  const hits = currentRunData.pending_auto_hits || [];
+  if (kind === "all") {
+    for (const h of hits) keptPaths.add(h.path);
+  } else if (kind === "none") {
+    keptPaths.clear();
+  } else {
+    // 「只保留需要判断的」：把拿不准的留下，明确可清的照常执行。
+    // 这是最常用的一键——用户不必逐条去认哪些该留。
+    keptPaths.clear();
+    for (const h of hits) if (h.advice === "review") keptPaths.add(h.path);
+  }
+  renderPending(currentRunData);
+  setStatus(
+    `已勾选保留 ${keptPaths.size} 项（本轮不动）。点「执行自动隔离」才会搬走其余项。`,
+  );
+}
+
+document.getElementById("keepAllBtn").onclick = () => keepBatch("all");
+document.getElementById("keepReviewBtn").onclick = () => keepBatch("review");
+document.getElementById("keepNoneBtn").onclick = () => keepBatch("none");
 document.getElementById("explainClose").onclick = () =>
   document.getElementById("explainDlg").close();
 document.getElementById("statusClose").onclick = () => {
@@ -1256,10 +1397,46 @@ document.getElementById("analyzeBtn").onclick = async () => {
 };
 
 /* 扫描 */
+/* 扫描进度轮询：大目录扫几分钟，状态条一直写着「扫描中…」和卡死没区别，
+   用户会去点第二次（于是产生两个 run、两份隔离清单）。
+   这里同时显示「已用 N 秒」与 hash 进度——quick 模式下没有 hash，光有时间也算交代。 */
+let scanPollSeq = 0;
+
+function stopScanPolling() {
+  // 序号自增：让已经发出去、还没回来的那次轮询作废，
+  // 否则迟到的响应会把「扫描完成」的结论覆盖回「扫描中…」。
+  scanPollSeq += 1;
+  if (scanPollTimer) {
+    window.clearInterval(scanPollTimer);
+    scanPollTimer = null;
+  }
+}
+
+function startScanPolling() {
+  stopScanPolling();
+  const seq = scanPollSeq;
+  const startedAt = Date.now();
+  const tick = async () => {
+    let text = `扫描中… 已用 ${Math.max(0, Math.round((Date.now() - startedAt) / 1000))} 秒`;
+    try {
+      const p = await api("/api/scan/progress");
+      if (p && p.total) text += ` · 内容 hash ${p.done}/${p.total}`;
+      else if (p && p.phase) text += ` · ${p.phase}`;
+    } catch (_e) {
+      /* 轮询失败不影响扫描本身，也不该弹错 */
+    }
+    if (seq !== scanPollSeq) return;
+    setStatus(text);
+  };
+  scanPollTimer = window.setInterval(tick, 800);
+  tick();
+}
+
 document.getElementById("scanBtn").onclick = async () => {
   const btn = document.getElementById("scanBtn");
   btn.disabled = true;
   setStatus("扫描中…");
+  startScanPolling();
   try {
     const protect = document
       .getElementById("scanProtect")
@@ -1287,6 +1464,7 @@ document.getElementById("scanBtn").onclick = async () => {
   } catch (e) {
     setStatus(e, { error: true });
   } finally {
+    stopScanPolling();
     btn.disabled = false;
   }
 };
