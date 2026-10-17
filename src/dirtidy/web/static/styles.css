@@ -120,6 +120,14 @@ select:disabled, input:disabled, textarea:disabled {
 }
 #statusClose:hover { color: var(--danger); }
 .dup-group { border: 1px solid var(--line); padding: 0.75rem; margin-bottom: 0.5rem; background: rgba(255,255,255,0.65); }
+/* 重复组的报账行：「几份 · 每份多大 · 保留一份可释放多少」。
+   这是用户决定留哪份的唯一依据，给它加粗、单独成行，别混进说明里。 */
+.dup-head { font-weight: 600; margin-bottom: 0.15rem; }
+/* 组内每份：路径靠左、大小与状态靠右对齐，竖着扫能一眼比出各份大小。 */
+.dup-row { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.2rem 0; }
+.dup-row label { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.dup-size { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dup-state { color: var(--muted); font-size: 0.82rem; white-space: nowrap; min-width: 3.6rem; text-align: right; }
 .hint { color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0 0.6rem; line-height: 1.55; }
 /* 跨分页的警告条：只扫了一部分的产物，数字看起来和完整的一模一样，
    必须摆在所有分页之上，不能只藏在某一页里。 */
@@ -343,6 +351,9 @@ dialog { border: 1px solid var(--line); border-radius: 6px; padding: 0; max-widt
   background: rgba(47, 93, 80, 0.07);
 }
 .dlg-head code { flex: 1; word-break: break-all; }
+/* 弹窗头部两个按钮（复制 / 关闭）不许折行：路径一长，flex 会把它们压窄，
+   「复制这段解释」折成两行会顶高整条头部。 */
+.dlg-head button { white-space: nowrap; flex: 0 0 auto; }
 #explainBody {
   margin: 0;
   padding: 0.9rem;

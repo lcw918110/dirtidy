@@ -1,7 +1,9 @@
-"""使用便利性：规则中文短名、列表筛选、批量勾选保留、扫描进度、开发热重载。
+"""使用便利性：规则中文短名、列表筛选、批量勾选保留、扫描进度、开发热重载、
+重复组报账、解释可复制。
 
 这一批改动的共同点是「让界面少让人猜」：规则不再只显示 `dep_node_modules`，
-几百项的列表能筛，拿不准的能一键留下，扫描时能看到进度而不是盯着「扫描中…」。
+几百项的列表能筛，拿不准的能一键留下，扫描时能看到进度而不是盯着「扫描中…」，
+重复组直接说清「保留一份能释放多少」，解释能一键复制发给别人。
 
 每条用例都既测「做了」，也测「没顺手做错」——尤其是
 **筛选只改显示**（执行范围仍是全量）与 **批量勾选不碰任何文件**（本项目承诺
@@ -353,3 +355,134 @@ def test_reload_target_builds_app_from_env(
     monkeypatch.delenv("DIRTIDY_RELOAD_RUN_ID", raising=False)
     meta = TestClient(_reload_target()).get("/api/meta").json()
     assert meta["root"] == str(tmp_path.resolve())
+
+
+# ------------------------- 重复组：把账算给人看 -------------------------
+
+
+def test_duplicate_group_reports_per_file_size(tmp_path: Path) -> None:
+    """重复组要给逐份大小，不能只给合计。
+
+    「保留一份能释放多少」正是用户决定留哪份的唯一依据；只给合计的话，
+    界面只能拿总数除以份数去猜——那是在编数字。
+    """
+    root = tmp_path / "ws"
+    (root / "sub").mkdir(parents=True)
+    payload = b"x" * 2048
+    for rel in ("a.bin", "b.bin", "sub/c.bin"):
+        (root / rel).write_bytes(payload)
+
+    client = TestClient(create_app(default_root=root))
+    run_id = client.post("/api/scan", json={"quick": False, "workers": 2}).json()["run_id"]
+    data = client.get(f"/api/runs/{run_id}").json()
+
+    groups = [c for c in data["candidates"] if c["kind"] == "duplicate_group"]
+    assert len(groups) == 1
+    g = groups[0]
+    assert g["path_sizes"] == {"a.bin": 2048, "b.bin": 2048, "sub/c.bin": 2048}
+    assert g["size_bytes"] == 2048 * 3, "合计仍要保留：列表排序按它排"
+
+
+def test_dup_group_box_states_what_can_be_freed() -> None:
+    """面板标题要说清「几份 · 每份多大 · 保留一份可释放多少」。
+
+    原先是「相同内容 hash，需人工选留」一句话——账全留给用户自己算。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = _js_function(js, "dupGroupBox")
+
+    assert "path_sizes" in body, "要用逐份大小，不能拿合计去除以份数"
+    assert "保留一份可释放" in body
+    assert "humanSize(" in body
+    # 截断的组少算了几份，报出来的数会偏小——宁可不报
+    assert "truncated" in body, "截断的组不该给出偏小的「可释放」数"
+    assert "dup-size" in body and "dup-state" in body, "每份要带各自大小与当前状态"
+    # 新建 run 里所有路径默认决策都是 keep，全勾等于没勾（radio 只留最后一个）
+    assert "kept.length === 1" in body
+    # 只改决策、只重绘；执行仍要用户去点「执行候选决策」
+    assert "api(" not in body and "fetch(" not in body
+    assert "apply-decisions" not in body
+    assert "其余标记隔离" in body
+    assert "dupGroupBox(c)" in _js_function(js, "renderReview")
+
+
+def test_dup_state_distinguishes_undecided_from_keep() -> None:
+    """没进过 decisions 的行是「未表态」，不能显示成「保留」。
+
+    默认决策就是保留，但把它画成「保留」会让人以为这组已经选好了。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = _js_function(js, "dupStateText")
+    assert "未表态" in body
+    assert "DECISION_LABELS" in body, "动作要翻人话，不能直接铺 quarantine"
+
+
+def test_dup_group_pick_frees_exactly_what_ui_promised(tmp_path: Path) -> None:
+    """界面承诺「保留一份可释放 X」，执行后就该正好移走 X。
+
+    这条是「界面说的」与「实际做的」对账：`可释放 = 合计 − 被保留那份的大小`。
+    数字对不上说明要么算错、要么执行的不是用户选的那一份。
+    """
+    from dirtidy.models import quarantine_root
+
+    root = tmp_path / "ws"
+    (root / "sub").mkdir(parents=True)
+    payload = b"y" * 4096
+    for rel in ("a.bin", "b.bin", "sub/c.bin"):
+        (root / rel).write_bytes(payload)
+
+    client = TestClient(create_app(default_root=root))
+    run_id = client.post("/api/scan", json={"quick": False, "workers": 2}).json()["run_id"]
+    data = client.get(f"/api/runs/{run_id}").json()
+    g = [c for c in data["candidates"] if c["kind"] == "duplicate_group"][0]
+
+    keep = "a.bin"
+    promised = g["size_bytes"] - g["path_sizes"][keep]
+    assert promised == 4096 * 2
+
+    # 模拟界面「其余标记隔离」写进去的 decisions
+    decs = [
+        {
+            "path": p,
+            "action": "keep" if p == keep else "quarantine",
+            "target_relpath": "",
+            "note": "duplicate pick",
+        }
+        for p in g["paths"]
+    ]
+    client.put(f"/api/runs/{run_id}/decisions", json={"decisions": decs})
+    out = client.post(f"/api/runs/{run_id}/apply-decisions").json()
+
+    assert out["quarantined"] == 2, out
+    assert (root / keep).exists(), "选中的那份必须留在原处"
+    qdir = quarantine_root(root, run_id)
+    moved = [p for p in qdir.rglob("*") if p.is_file()]
+    assert sum(p.stat().st_size for p in moved) == promised, (
+        "实际移走的字节数与界面承诺的「可释放」不一致"
+    )
+
+
+# ------------------------- 解释弹窗：能复制 -------------------------
+
+
+def test_explain_dialog_offers_copy_button() -> None:
+    """排查时要把结论发给别人，手选整段很别扭——给个复制按钮。"""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert 'id="explainCopy"' in html
+    assert 'id="explainBody"' in html, "复制的是解释正文，不是别的"
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert 'getElementById("explainCopy").onclick' in js, "按钮要有绑定，不然是个摆设"
+
+
+def test_copy_explain_falls_back_when_clipboard_unavailable() -> None:
+    """剪贴板 API 只在 https / localhost 下可用（局域网 IP 打开网页就没有），
+    必须留一条兜底，否则按钮在这类环境下永远失败。"""
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = _js_function(js, "copyExplain")
+
+    assert "clipboard.writeText" in body
+    assert "execCommand" in body, "没有兜底的话，非安全上下文下复制必然失败"
+    assert "加载中" in body, "正文还没回来时不该把「加载中…」复制出去"
+    # 失败要有话说，不能静默
+    assert "复制失败" in body
+

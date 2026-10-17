@@ -971,40 +971,7 @@ function renderReview(data) {
       }),
     );
   }
-  for (const c of dupGroups) {
-    const box = el("div", { cls: "dup-group" });
-    box.appendChild(el("div", { text: c.reason }));
-    const groupName = `dup-${(c.meta && c.meta.sha256) || ""}`;
-    for (const p of c.paths) {
-      const d = decisionFor(p);
-      const label = document.createElement("label");
-      const radio = el("input", { attrs: { type: "radio", name: groupName, value: p } });
-      radio.checked = d.action === "keep";
-      label.appendChild(radio);
-      label.appendChild(document.createTextNode(" 保留 "));
-      label.appendChild(el("code", { text: p }));
-      const line = document.createElement("div");
-      line.appendChild(label);
-      box.appendChild(line);
-    }
-    const btn = el("button", { text: "其余标记隔离", attrs: { type: "button" } });
-    btn.onclick = () => {
-      const kept = box.querySelector(`input[name="${CSS.escape(groupName)}"]:checked`);
-      if (!kept) return alert("请先选择保留项");
-      for (const p of c.paths) {
-        decisions.set(p, {
-          path: p,
-          action: p === kept.value ? "keep" : "quarantine",
-          target_relpath: "",
-          note: "duplicate pick",
-        });
-      }
-      setStatus({ updated_duplicates: c.paths });
-      loadRun(currentRun);
-    };
-    box.appendChild(btn);
-    dups.appendChild(box);
-  }
+  for (const c of dupGroups) dups.appendChild(dupGroupBox(c));
 
   rows.querySelectorAll(".act").forEach((node) => {
     node.addEventListener("change", () => {
@@ -1031,6 +998,94 @@ function renderReview(data) {
       ? `显示 ${shownPaths.length} / 共 ${allPaths.length} 项`
       : "";
   }
+}
+
+/* 重复组：同一份内容散落在好几处，留哪份只能人来定。
+   标题直接把账报出来——「几份 · 每份多大 · 保留一份能释放多少」。
+   原先是「相同内容 hash，需人工选留」一句话，账全留给用户自己算，
+   而这个决定恰恰就是「省下多少空间」换「删错哪一份」的权衡。 */
+function dupGroupBox(c) {
+  const paths = Array.isArray(c.paths) ? c.paths.map(String) : [];
+  const sizes = c.path_sizes || {};
+  const info = c.meta || {};
+  const total = Number(info.count) || paths.length;
+  const truncated = Boolean(info.truncated);
+  const box = el("div", { cls: "dup-group" });
+
+  // 同内容 hash 的各份字节数必然相同，取第一份算出来即可。
+  const known = paths.filter((p) => Number.isFinite(sizes[p]));
+  const each = known.length ? sizes[known[0]] : NaN;
+  const bits = [`${total} 份`];
+  if (Number.isFinite(each) && each > 0) bits.push(`每份 ${humanSize(each)}`);
+  // 「可释放」只在列表完整、且每份大小都算得出来时才给：截断的组少算了几份，
+  // 报出来的数会偏小，那还不如不报——数字错了比没有数字更糟。
+  if (
+    Number.isFinite(each) &&
+    each > 0 &&
+    !truncated &&
+    known.length === paths.length &&
+    paths.length >= 2
+  ) {
+    bits.push(`保留一份可释放 ${humanSize(each * (paths.length - 1))}`);
+  }
+  box.appendChild(el("div", { cls: "dup-head", text: bits.join(" · ") }));
+  box.appendChild(
+    el("div", {
+      cls: "tiny",
+      text: c.rule_reason || c.reason || "内容完全相同，保留任意一份即可",
+    }),
+  );
+
+  const groupName = `dup-${info.sha256 || paths[0] || ""}`;
+  // 只有「恰好一份被明确标为保留」时才回填单选：新建 run 里所有路径的默认决策
+  // 都是 keep，全勾等于没勾（radio 组只会留下最后一个，看起来像随便挑了一份）。
+  const kept = paths.filter((p) => {
+    const d = decisions.get(p);
+    return d && d.action === "keep";
+  });
+  const radios = [];
+  for (const p of paths) {
+    const d = decisions.get(p);
+    const radio = el("input", { attrs: { type: "radio", name: groupName, value: p } });
+    radio.checked = kept.length === 1 && kept[0] === p;
+    radios.push(radio);
+
+    const line = el("div", { cls: "dup-row" });
+    const label = document.createElement("label");
+    label.appendChild(radio);
+    label.appendChild(document.createTextNode(" 保留 "));
+    label.appendChild(el("code", { text: p }));
+    line.appendChild(label);
+    line.appendChild(el("span", { cls: "dup-size", text: sizeText(sizes[p]) }));
+    line.appendChild(el("span", { cls: "dup-state", text: dupStateText(d) }));
+    box.appendChild(line);
+  }
+
+  const btn = el("button", { text: "其余标记隔离", attrs: { type: "button" } });
+  btn.onclick = () => {
+    const picked = radios.find((r) => r.checked);
+    if (!picked) return alert("请先选一份要保留的");
+    for (const p of paths) {
+      decisions.set(p, {
+        path: p,
+        action: p === picked.value ? "keep" : "quarantine",
+        target_relpath: "",
+        note: "duplicate pick",
+      });
+    }
+    setStatus({ updated_duplicates: paths });
+    loadRun(currentRun);
+  };
+  box.appendChild(btn);
+  return box;
+}
+
+/* 组内每份的当前状态。没进过 decisions 的行是「未表态」而不是「保留」——
+   默认决策是保留，但把它显示成「保留」会让人以为这组已经选好了。 */
+function dupStateText(d) {
+  if (!d) return "未表态";
+  if (d.action === "keep") return "保留";
+  return `待${DECISION_LABELS[d.action] || d.action}`;
 }
 
 /* 归档目标路径只在决策 = 「归档」时可用。其余动作下留着内容会误导——
@@ -1488,11 +1543,50 @@ function keepBatch(kind) {
   );
 }
 
+/* 「复制这段解释」：排查时要把结论发给别人，手选整段很别扭。
+   剪贴板 API 只在 https / localhost 下可用（局域网 IP 打开网页就没有），
+   所以留一条 `execCommand` 兜底——先选中 <pre> 内容再走老接口。 */
+async function copyExplain(btn) {
+  const body = document.getElementById("explainBody");
+  const text = body ? body.textContent || "" : "";
+  if (!text || text === "加载中…") return;
+
+  let ok = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch (e) {
+    ok = false;
+  }
+  if (!ok && body) {
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    try {
+      ok = document.execCommand("copy");
+    } catch (e) {
+      ok = false;
+    }
+    sel.removeAllRanges();
+  }
+
+  const old = btn.textContent;
+  btn.textContent = ok ? "已复制" : "复制失败，请手动选择";
+  window.setTimeout(() => {
+    btn.textContent = old;
+  }, 1600);
+}
+
 document.getElementById("keepAllBtn").onclick = () => keepBatch("all");
 document.getElementById("keepReviewBtn").onclick = () => keepBatch("review");
 document.getElementById("keepNoneBtn").onclick = () => keepBatch("none");
 document.getElementById("explainClose").onclick = () =>
   document.getElementById("explainDlg").close();
+document.getElementById("explainCopy").onclick = (e) => copyExplain(e.currentTarget);
 document.getElementById("statusClose").onclick = () => {
   window.clearTimeout(statusTimer);
   document.getElementById("statusbar").hidden = true;

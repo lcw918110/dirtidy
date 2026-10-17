@@ -232,7 +232,15 @@ def _attach_advice(
         e["rule_label"] = str(rule.get("label") or builtin.get("label") or "")
         # 「删了怎么恢复」比「可以清理」更能让人敢下手：说清代价，而不是给个形容词。
         e["recover"] = str(rule.get("recover") or builtin.get("recover") or "")
-        e["size_bytes"] = -1 if too_many else _entry_size(root, e)
+        if too_many:
+            e["size_bytes"] = -1
+        else:
+            sizes = _entry_sizes(root, e)
+            e["size_bytes"] = sum(sizes.values())
+            # 重复组（候选带 paths 列表）额外给出逐份大小：界面要说清
+            # 「保留一份、其余可释放多少」，光有合计只能靠猜。
+            if len(sizes) > 1:
+                e["path_sizes"] = sizes
 
 
 def _attach_rule_label(entries: list[Any], rules: dict[str, dict[str, Any]]) -> None:
@@ -249,23 +257,27 @@ def _attach_rule_label(entries: list[Any], rules: dict[str, dict[str, Any]]) -> 
         e["rule_label"] = str(rule.get("label") or "")
 
 
-def _entry_size(root: Path, entry: dict[str, Any]) -> int:
-    """一条命中项占多少字节。路径可能是单个 `path`，也可能是候选的 `paths` 列表。"""
+def _entry_sizes(root: Path, entry: dict[str, Any]) -> dict[str, int]:
+    """每条路径各占多少字节（目录算整棵子树）。
+
+    返回逐路径的映射而不是一个总数：重复组要回答「保留一份，其余能释放多少」，
+    只给合计的话界面只能拿总数除以份数去猜——那是在编数字。
+    """
     rels: list[str] = []
     if entry.get("path"):
         rels.append(str(entry["path"]))
     for p in entry.get("paths") or []:
         rels.append(str(p))
-    total = 0
+    out: dict[str, int] = {}
     for rel in rels:
         try:
             target = root / rel
             if target.exists():
-                total += tree_size(target)
+                out[rel] = tree_size(target)
         except OSError:
             # 没权限 / 读一半消失：算 0，不让一条坏路径拖垮整个列表。
-            continue
-    return total
+            out[rel] = 0
+    return out
 
 
 def _rule_context(

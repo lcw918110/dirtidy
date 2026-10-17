@@ -253,7 +253,8 @@ def find_duplicate_groups(items: list[InventoryItem]) -> list[Candidate]:
                 kind="duplicate_group",
                 paths=sorted(paths),
                 rule_id="duplicate_content",
-                reason="相同内容 hash，需人工选留" + ("（该组过大，列表已截断）" if truncated else ""),
+                reason="内容逐字节相同，只是散在不同位置"
+                + ("（该组过大，列表已截断）" if truncated else ""),
                 meta={"sha256": digest, "count": total, "truncated": truncated},
             )
         )
