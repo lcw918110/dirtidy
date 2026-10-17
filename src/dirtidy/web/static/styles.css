@@ -5,31 +5,55 @@
   --accent: #2f5d50;
   --danger: #9b2c2c;
   --muted: #6b6459;
+  --header-h: 6.2rem;   /* app-header 近似高度，用于 calc */
 }
 * { box-sizing: border-box; }
+
+/* ======================== 布局骨架 ========================
+   核心目标：切页时视口高度不变。
+   body = flex column；header 固定高度；main 占满剩余、内部滚动。
+   以前 header+nav+warn 和内容全在文档流里，哪页内容多页面就撑多高——切页像在跳。 */
+html, body { height: 100%; }
 body {
   margin: 0;
   font-family: "IBM Plex Sans", "Noto Sans SC", sans-serif;
   background: linear-gradient(160deg, #eef3ef, var(--bg) 40%, #ebe4d8);
   color: var(--ink);
-  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
-h1 { margin: 0; letter-spacing: 0.04em; }
-h2 { margin: 0 0 0.6rem; font-size: 1.15rem; }
-h3 { margin: 1.4rem 0 0.4rem; font-size: 1rem; }
-header { margin-bottom: 0.5rem; }
+.app-header {
+  flex: 0 0 auto;
+  padding: 0.8rem 1.5rem 0;
+  background: rgba(246, 244, 239, 0.92);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--line);
+  z-index: 10;
+}
+.app-main {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0.6rem 1.5rem 4.5rem; /* 底部留够状态条 + 呼吸空间 */
+  scroll-behavior: smooth;
+}
+
+/* ======================== 字体层级 ======================== */
+h1 { margin: 0; letter-spacing: 0.04em; font-size: 1.35rem; }
+h2 { margin: 0 0 0.5rem; font-size: 1.15rem; }
+h3 { margin: 1.2rem 0 0.35rem; font-size: 1rem; }
+header { margin-bottom: 0.3rem; }
 .brand { display: flex; align-items: baseline; gap: 0.7rem; flex-wrap: wrap; }
 .tag { color: var(--muted); font-size: 0.85rem; }
-#meta { margin: 0.4rem 0 0; font-size: 0.88rem; }
-#stateDir { margin: 0.15rem 0 0; }
+#meta { margin: 0.3rem 0 0; font-size: 0.88rem; }
+#stateDir { margin: 0.1rem 0 0; }
 
-/* ------------------------------- 分页导航 ------------------------------- */
+/* ======================== 分页导航 ======================== */
 .tabs {
   display: flex;
-  gap: 0.25rem;
+  gap: 0.15rem;
   flex-wrap: wrap;
-  border-bottom: 1px solid var(--line);
-  margin: 1rem 0 1.2rem;
+  margin: 0.4rem 0 0.2rem;
 }
 .tabbtn {
   background: transparent;
@@ -37,8 +61,8 @@ header { margin-bottom: 0.5rem; }
   border: 1px solid transparent;
   border-bottom: 2px solid transparent;
   border-radius: 0;
-  padding: 0.5rem 0.9rem;
-  font-size: 0.95rem;
+  padding: 0.45rem 0.85rem;
+  font-size: 0.92rem;
 }
 .tabbtn:hover { color: var(--accent); }
 .tabbtn[aria-selected="true"] {
@@ -49,34 +73,50 @@ header { margin-bottom: 0.5rem; }
 .tab { display: none; }
 .tab.active { display: block; }
 
-/* ------------------------------- 通用元件 ------------------------------- */
-.toolbar { display: flex; gap: 0.75rem; align-items: end; margin: 0.6rem 0 1rem; flex-wrap: wrap; }
-/* 筛选条贴着表格上方，与底部「执行」按钮分开——它只改显示，不动任何文件。 */
-.filterbar { margin-bottom: 0.4rem; }
-.filterbar .hint { margin: 0; }
-input[type="search"] { padding: 0.3rem 0.5rem; min-width: 14rem; }
-.panel {
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.6);
-  padding: 0.9rem 1rem;
-  margin-bottom: 1rem;
+/* ======================== 通用元件 ======================== */
+/* 工具栏：统一间距，不让按钮贴得太紧或太远 */
+.toolbar {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  margin: 0.5rem 0 0.8rem;
+  flex-wrap: wrap;
 }
+.toolbar > .hint { margin: 0; }
+/* 筛选条贴着表格上方，与底部「执行」按钮分开——它只改显示，不动任何文件。 */
+.filterbar { margin-bottom: 0.3rem; }
+
 button {
   background: var(--accent);
   color: white;
   border: 0;
-  padding: 0.45rem 0.9rem;
+  padding: 0.42rem 0.85rem;
   cursor: pointer;
   border-radius: 3px;
+  font-size: 0.9rem;
 }
 button.danger { background: var(--danger); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
-table { width: 100%; border-collapse: collapse; background: rgba(255,255,255,0.7); }
-th, td { border-bottom: 1px solid var(--line); padding: 0.45rem; text-align: left; font-size: 0.9rem; }
-th { font-weight: 600; color: var(--muted); }
-select, input, textarea { padding: 0.3rem; font: inherit; border: 1px solid var(--line); background: #fff; }
-/* 归档目标路径只在决策选「归档」时才用得上；不可用时给灰底，明确「这里现在不适用」，
-   而不是留着一个填好内容却不起作用的框。 */
+button.primary { padding: 0.55rem 1.4rem; font-size: 0.98rem; }
+
+/* 面板：所有「一块内容」都用同一个容器，不要有的带边框有的不带 */
+.panel {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.6);
+  padding: 0.8rem 1rem;
+  margin-bottom: 0.9rem;
+  border-radius: 4px;
+}
+
+/* 表格：统一背景、边框、字重 */
+table { width: 100%; border-collapse: collapse; background: rgba(255,255,255,0.65); border-radius: 4px; overflow: hidden; }
+th, td { border-bottom: 1px solid var(--line); padding: 0.42rem 0.5rem; text-align: left; font-size: 0.88rem; }
+th { font-weight: 600; color: var(--muted); background: rgba(255,255,255,0.45); }
+
+/* 表单控件 */
+select, input, textarea { padding: 0.3rem; font: inherit; border: 1px solid var(--line); background: #fff; border-radius: 3px; }
+input[type="search"] { padding: 0.3rem 0.5rem; min-width: 12rem; }
+/* 归档目标路径只在决策选「归档」时才用得上；不可用时给灰底 */
 select:disabled, input:disabled, textarea:disabled {
   background: var(--bg);
   color: var(--muted);
@@ -136,8 +176,8 @@ select:disabled, input:disabled, textarea:disabled {
   background: #fbeeee;
   border-left: 3px solid var(--danger);
   border-radius: 0 6px 6px 0;
-  padding: 0.6rem 0.8rem;
-  margin: 0.6rem 0 0.4rem;
+  padding: 0.5rem 0.8rem;
+  margin: 0.35rem 0 0.2rem;
   font-size: 0.88rem;
   line-height: 1.55;
 }
@@ -216,7 +256,7 @@ tr.group-row td {
   gap: 0.9rem;
   flex-wrap: wrap;
   align-items: center;
-  margin: 0 0 1rem;
+  margin: 0 0 0.8rem;
   font-size: 0.82rem;
   color: var(--muted);
 }
@@ -259,7 +299,7 @@ tr.group-row td {
 #openaiFields, #ollamaFields { border-left: 3px solid var(--line); padding-left: 0.8rem; margin-bottom: 0.8rem; }
 
 /* -------------------------------- 卡片 -------------------------------- */
-.cards { display: flex; gap: 0.8rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.cards { display: flex; gap: 0.8rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
 .card {
   border: 1px solid var(--line);
   background: rgba(255,255,255,0.75);
@@ -282,7 +322,7 @@ tr.group-row td {
   border-left: 4px solid var(--accent);
   background: rgba(47, 93, 80, 0.06);
   padding: 1rem 1.2rem;
-  margin-bottom: 1rem;
+  margin-bottom: 0.9rem;
 }
 .guide.done { border-left-color: #6b8f5e; }
 .guide .g-text { flex: 1; min-width: 14rem; }
@@ -292,7 +332,7 @@ tr.group-row td {
 .guide button { padding: 0.6rem 1.4rem; font-size: 0.98rem; }
 
 /* 步骤条：四步一屏看清自己在哪一步，可点击跳转 */
-.steps { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.steps { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
 .step {
   display: flex;
   align-items: center;

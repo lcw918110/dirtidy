@@ -7,29 +7,33 @@
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-  <header>
-    <div class="brand">
-      <h1>dirtidy</h1>
-      <span class="tag">本地目录整理 · 规则隔离 + 人工终审</span>
-    </div>
-    <p id="meta"></p>
-    <p class="hint" id="stateDir"></p>
-  </header>
+  <div class="app-header">
+    <header>
+      <div class="brand">
+        <h1>dirtidy</h1>
+        <span class="tag">本地目录整理 · 规则隔离 + 人工终审</span>
+      </div>
+      <p id="meta"></p>
+      <p class="hint" id="stateDir"></p>
+    </header>
 
-  <nav class="tabs" id="tabs">
-    <button type="button" class="tabbtn" data-tab="overview">概览</button>
-    <button type="button" class="tabbtn" data-tab="scan">扫描</button>
-    <button type="button" class="tabbtn" data-tab="review">审阅</button>
-    <button type="button" class="tabbtn" data-tab="execute">执行</button>
-    <button type="button" class="tabbtn" data-tab="quarantine">隔离区</button>
-    <button type="button" class="tabbtn" data-tab="rules">规则</button>
-    <button type="button" class="tabbtn" data-tab="settings">设置</button>
-    <button type="button" class="tabbtn" data-tab="watch">监视</button>
-  </nav>
+    <nav class="tabs" id="tabs">
+      <button type="button" class="tabbtn" data-tab="overview">概览</button>
+      <button type="button" class="tabbtn" data-tab="scan">扫描</button>
+      <button type="button" class="tabbtn" data-tab="review">审阅</button>
+      <button type="button" class="tabbtn" data-tab="execute">执行</button>
+      <button type="button" class="tabbtn" data-tab="quarantine">隔离区</button>
+      <button type="button" class="tabbtn" data-tab="rules">规则</button>
+      <button type="button" class="tabbtn" data-tab="settings">设置</button>
+      <button type="button" class="tabbtn" data-tab="watch">监视</button>
+    </nav>
 
-  <!-- 扫描超时的提示。摆在所有分页之上：一份只扫了一半的产物，数字看起来和完整产物
-       一模一样，不在这里说清楚，用户会以为「目录里就这么多」。 -->
-  <p class="warn" id="partialWarn" hidden></p>
+    <!-- 扫描超时的提示。摆在所有分页之上：一份只扫了一半的产物，数字看起来和完整产物
+         一模一样，不在这里说清楚，用户会以为「目录里就这么多」。 -->
+    <p class="warn" id="partialWarn" hidden></p>
+  </div>
+
+  <main class="app-main">
 
   <!-- ============================== 概览 ============================== -->
   <section class="tab" id="tab-overview">
@@ -431,6 +435,8 @@
     <div class="cards" id="watchCards"></div>
     <div class="panel" id="watchDetail"></div>
   </section>
+
+  </main>
 
   <dialog id="explainDlg">
     <div class="dlg-head">
