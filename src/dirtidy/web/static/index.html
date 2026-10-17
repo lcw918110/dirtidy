@@ -20,6 +20,7 @@
     <button type="button" class="tabbtn" data-tab="overview">概览</button>
     <button type="button" class="tabbtn" data-tab="scan">扫描</button>
     <button type="button" class="tabbtn" data-tab="review">审阅</button>
+    <button type="button" class="tabbtn" data-tab="execute">执行</button>
     <button type="button" class="tabbtn" data-tab="quarantine">隔离区</button>
     <button type="button" class="tabbtn" data-tab="rules">规则</button>
     <button type="button" class="tabbtn" data-tab="settings">设置</button>
@@ -56,11 +57,12 @@
 
   <!-- ============================== 扫描 ============================== -->
   <section class="tab" id="tab-scan">
-    <h2>扫描</h2>
+    <h2>扫描 <span class="step-no">第 1 步 · 看看有什么</span></h2>
     <p class="hint">
       扫描只读取元数据与内容 hash，<strong>不移动、不删除任何文件</strong>。
-      勾选「扫描后立即执行自动隔离」才会搬走规则命中项——它们进入隔离区，仍可还原。
       结果会显示在下方，按规则分组，并标出「建议清理 / 可以清理 / 需要你判断」。
+      看完点「去审阅」逐条判断——<strong>「扫描后立即执行自动隔离」是跳过审阅的捷径</strong>，
+      想按流程走就别勾它。
     </p>
     <div class="panel form">
       <button id="scanBtn" type="button" class="primary">开始扫描</button>
@@ -93,7 +95,11 @@
 
   <!-- ============================== 审阅 ============================== -->
   <section class="tab" id="tab-review">
-    <h2>审阅</h2>
+    <h2>审阅 <span class="step-no">第 2 步 · 人工介入</span></h2>
+    <p class="hint lead">
+      这一步<strong>只做判断，不动任何文件</strong>：勾「保留」、改「决策」，判断完去「执行」页动手。
+      两张表都支持批量选择，不必逐行点。
+    </p>
 
     <p class="legend">
       <span class="advice advice-safe_clean">建议清理</span> 重建免费，删了不影响
@@ -102,7 +108,7 @@
       <span class="advice advice-protected">受保护</span> 永不自动动
     </p>
 
-    <h3>待自动隔离（规则命中）</h3>
+    <h3>① 待自动隔离（规则命中）</h3>
     <p class="hint">
       这里是<strong>规则命中</strong>的项，执行时未必都会搬走：勾选「保留」的项本轮不动；
       某项的子树里若躺着受保护路径（如 <code>node_modules/.npmrc</code>），会被整条拦下；
@@ -125,10 +131,19 @@
       </label>
       <span class="hint" id="pendingCount"></span>
     </div>
+    <!-- 批量勾选放在表格**上方**：先定规则再看表，而不是看完表再回头找按钮。
+         上一版把它摆在「执行」按钮下面，顺序正好是反的。 -->
+    <div class="toolbar">
+      <span class="hint">批量勾选「保留」：</span>
+      <button id="keepAllBtn" type="button">全部保留</button>
+      <button id="keepReviewBtn" type="button">只保留需要判断的</button>
+      <button id="keepNoneBtn" type="button">全部不保留</button>
+      <span class="hint">只改勾选状态，不碰任何文件。</span>
+    </div>
     <table>
       <thead>
         <tr>
-          <th>保留</th>
+          <th><input id="pendingAll" type="checkbox" title="全选 / 全不选「保留」" aria-label="全选保留" /></th>
           <th class="sortable" data-sort="path">路径</th>
           <th>这是什么</th>
           <th class="sortable" data-sort="advice">建议 / 删了怎么办</th>
@@ -138,24 +153,17 @@
       </thead>
       <tbody id="pendingRows"></tbody>
     </table>
-    <div class="toolbar">
-      <button id="applyRulesBtn" type="button">执行自动隔离</button>
-      <span class="hint">把命中项搬入隔离区（可还原）；勾了「保留」的本轮不动。</span>
-    </div>
-    <div class="toolbar">
-      <span class="hint">批量勾选「保留」：</span>
-      <button id="keepAllBtn" type="button">全部保留</button>
-      <button id="keepReviewBtn" type="button">只保留需要判断的</button>
-      <button id="keepNoneBtn" type="button">全部不保留</button>
-      <span class="hint">只改勾选状态，不碰任何文件。</span>
+    <div class="toolbar nextbar">
+      <span class="hint" id="pendingNext"></span>
+      <button id="gotoExecuteBtn" type="button">下一步：去执行 →</button>
     </div>
 
-    <h3>候选 / 建议</h3>
+    <h3>② 候选 / 建议</h3>
     <p class="hint">
       「建议」列分两部分：上面是<strong>规则给出的判断</strong>（这类东西能不能清），
       下面是<strong>模型的参考</strong>（跑过模型分析才有）。两者都<strong>不会自动生效</strong>——
-      每行默认是「保留不动」。想一次采纳模型建议就点下面的「采纳全部建议」；
-      采纳后仍可在「决策」列逐条改，最后点「执行候选决策」。
+      每行默认是「保留不动」。想一次采纳模型建议就点「采纳全部建议」；
+      也可以用下面的批量选择一次改多行，最后去「执行」页动手。
       只有决策选「归档」时才需要填右侧的目标路径。
     </p>
     <div class="toolbar">
@@ -164,9 +172,28 @@
       <span class="hint" id="candCount"></span>
       <span class="hint" id="adoptHint"></span>
     </div>
+    <!-- 批量选择：勾若干行 → 选一个动作 → 应用。只写 decisions，不调任何接口、
+         不碰任何文件；真正搬文件只在「执行」页。 -->
+    <div class="toolbar">
+      <label class="inline">
+        <input id="candAll" type="checkbox" />
+        全选（当前显示）
+      </label>
+      <span class="hint" id="candPicked">已选 0 项</span>
+      <label>批量设为
+        <select id="candBulkAction">
+          <option value="keep">保留不动</option>
+          <option value="quarantine">隔离</option>
+          <option value="archive">归档</option>
+        </select>
+      </label>
+      <button id="candBulkBtn" type="button">应用到选中的</button>
+      <span class="hint">只改决策，不碰文件。</span>
+    </div>
     <table>
       <thead>
         <tr>
+          <th>选择</th>
           <th>路径</th>
           <th>为什么在列表里</th>
           <th>建议 / 删了怎么办</th>
@@ -177,10 +204,9 @@
       </thead>
       <tbody id="rows"></tbody>
     </table>
-    <div class="toolbar">
-      <button id="saveBtn" type="button">保存决策</button>
-      <button id="applyBtn" type="button">执行候选决策</button>
-      <span class="hint">执行按「决策」列搬走隔离 / 归档项；「保留不动」的不碰。</span>
+    <div class="toolbar nextbar">
+      <span class="hint" id="candNext"></span>
+      <button id="gotoExecuteBtn2" type="button">下一步：去执行 →</button>
     </div>
 
     <h3>重复组（人选保留）</h3>
@@ -199,9 +225,43 @@
     <div id="aiBox"></div>
   </section>
 
+  <!-- ============================== 执行 ============================== -->
+  <!-- 单独成页，是因为步骤条一直写着「执行」这一步，点进去却还是审阅页——
+       界面说有这一步、实际没有，是最典型的「前后不搭」。
+       两个按钮各带自己那份清单，仍然「紧挨它作用的对象」。 -->
+  <section class="tab" id="tab-execute">
+    <h2>执行 <span class="step-no">第 3 步 · 动手</span></h2>
+    <p class="hint lead">
+      到这一步才会真正搬文件。搬进<strong>隔离区</strong>（不是删除），随时可还原；
+      确认无误后再去「隔离区」页彻底删除释放空间。
+    </p>
+    <div class="cards" id="execCards"></div>
+
+    <div class="panel">
+      <h3>规则命中的自动隔离</h3>
+      <p class="hint" id="execRulesHint"></p>
+      <div class="execlist" id="execRulesList"></div>
+      <div class="toolbar">
+        <button id="applyRulesBtn" type="button">执行自动隔离</button>
+        <span class="hint">勾了「保留」的本轮不动；搬入后可在「隔离区」还原。</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>候选的决策</h3>
+      <p class="hint" id="execCandHint"></p>
+      <div class="execlist" id="execCandList"></div>
+      <div class="toolbar">
+        <button id="saveBtn" type="button">保存决策</button>
+        <button id="applyBtn" type="button">执行候选决策</button>
+        <span class="hint">执行按「决策」列搬走隔离 / 归档项；「保留不动」的不碰。</span>
+      </div>
+    </div>
+  </section>
+
   <!-- ============================== 隔离区 ============================== -->
   <section class="tab" id="tab-quarantine">
-    <h2>隔离区</h2>
+    <h2>隔离区 <span class="step-no">第 4 步 · 确认后释放空间</span></h2>
     <p class="hint">
       隔离区是<strong>中间状态</strong>：文件已离开原位但还在磁盘上，占着空间。
       确认不需要了就在这一页<strong>彻底删除</strong>释放空间；发现删错了就<strong>还原</strong>回原位
@@ -235,7 +295,7 @@
 
   <!-- ============================== 规则 ============================== -->
   <section class="tab" id="tab-rules">
-    <h2>规则</h2>
+    <h2>规则 <span class="step-no">配置</span></h2>
     <div class="toolbar">
       <label>规则包
         <select id="rulePackSelect"></select>
@@ -279,7 +339,7 @@
 
   <!-- ============================== 设置 ============================== -->
   <section class="tab" id="tab-settings">
-    <h2>设置</h2>
+    <h2>设置 <span class="step-no">配置</span></h2>
 
     <div class="panel form">
       <h3>模型分析</h3>
@@ -342,7 +402,7 @@
 
   <!-- ============================== 监视 ============================== -->
   <section class="tab" id="tab-watch">
-    <h2>监视</h2>
+    <h2>监视 <span class="step-no">长期运行</span></h2>
     <p class="hint">
       监视会<strong>定期扫描并报告新增命中</strong>，但<strong>绝不执行任何隔离</strong>——
       它只回答「现在有什么」，动不动是人的决定。命令行等价于 <code>dirtidy watch</code>。

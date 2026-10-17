@@ -363,3 +363,20 @@ dialog { border: 1px solid var(--line); border-radius: 6px; padding: 0; max-widt
   line-height: 1.5;
   white-space: pre-wrap;
 }
+
+/* 步骤编号：h2 旁边的小标签，让页面一眼看出自己在哪一步 */
+.step-no { color: var(--muted); font-size: 0.78rem; font-weight: 400; margin-left: 0.6rem; vertical-align: middle; }
+/* 顶部引导语：每页最上面一句，回答「这页做什么」 */
+.lead { font-size: 0.95rem; border-left: 3px solid var(--accent); padding-left: 0.6rem; margin: 0.4rem 0 0.8rem; }
+/* 审阅页底部「下一步」栏 */
+.nextbar { display: flex; justify-content: space-between; align-items: center; margin-top: 0.6rem; }
+/* 执行页清单：不用 table（长度不确定，空 thead 不好看），用窄边框行列表 */
+.execlist { margin: 0.4rem 0; }
+.execrow { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--line); font-size: 0.9rem; }
+.execrow code { flex: 1; word-break: break-all; }
+.execrow .exec-meta { color: var(--muted); font-size: 0.82rem; white-space: nowrap; }
+.execrow .exec-size { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 4.2rem; text-align: right; }
+.execrow .exec-tag { color: var(--accent); font-size: 0.8rem; margin-left: 0.3rem; }
+.execrow.kept { opacity: 0.55; }
+/* 候选表批量选择：缩小复选框列宽，不占太多地方 */
+.cand-pick { margin: 0; }

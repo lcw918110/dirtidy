@@ -15,6 +15,9 @@ let currentPendingCount = 0;
 const keptPaths = new Set();
 /* 隔离区里勾选要还原/彻底删除的条目 id */
 const quarantined = new Set();
+/* 候选表批量选择：只记「勾了哪些路径」。它不参与任何判定，
+   也不影响执行范围——真正决定搬什么的是 decisions。 */
+const candPicked = new Set();
 /* 规则页：待保存的直删规则 id 与已保存的，用于标出改动 */
 let rulePurge = new Set();
 let savedPurge = new Set();
@@ -23,6 +26,7 @@ let watchTimer = null;
 /* 最近一次 /api/runs/{id} 的响应。筛选、批量勾选「保留」之后要按同一份数据重渲染，
    否则得再请求一次接口——而重渲染只是把 DOM 按已有状态重画，不必联网。 */
 let currentRunData = null;
+let currentCandShown = [];
 let scanPollTimer = null;
 
 async function api(path, opts) {
@@ -349,7 +353,7 @@ function renderSteps(data) {
   const steps = [
     ["扫描", "scan", hasRun ? "done" : "now"],
     ["审阅", "review", !hasRun ? "todo" : todo ? "now" : "done"],
-    ["执行", "review", qCount ? "done" : "todo"],
+    ["执行", "execute", qCount ? "done" : "todo"],
     ["清理隔离区", "quarantine", qCount ? "now" : "todo"],
   ];
   steps.forEach(([label, tab, state], i) => {
@@ -595,15 +599,27 @@ function renderPending(data) {
   // 执行范围始终是**全部命中**（勾「保留」的除外），与筛选、排序、分组都无关。
   // 按钮与确认框都按全量报数，否则「筛了 3 项、搬走 30 项」会像丢了东西。
   currentPendingCount = all.length;
-  const btn = document.getElementById("applyRulesBtn");
-  btn.disabled = all.length === 0;
-  btn.textContent = all.length ? `执行自动隔离（${all.length} 项命中）` : "无待隔离项";
+  const keptCount = all.filter((h) => keptPaths.has(h.path)).length;
+  const next = document.getElementById("pendingNext");
+  if (next) {
+    next.textContent = all.length
+      ? `本轮将搬走 ${all.length - keptCount} 项（命中 ${all.length} 项，其中 ${keptCount} 项勾了「保留」）。`
+      : "本轮没有规则命中项。";
+  }
+  // 表头全选框：全勾 = 全选保留，半勾 = 部分保留（indeterminate 才不会骗人）
+  const allBox = document.getElementById("pendingAll");
+  if (allBox) {
+    allBox.checked = all.length > 0 && keptCount === all.length;
+    allBox.indeterminate = keptCount > 0 && keptCount < all.length;
+  }
   const cnt = document.getElementById("pendingCount");
   if (cnt) {
     cnt.textContent = all.length
       ? `显示 ${hits.length} / 共 ${all.length} 项（筛选只影响显示，执行仍按全部命中处理）`
       : "";
   }
+  // 「保留」勾选会影响执行页的清单与数字，改完就地重画那一页，别等用户切过去才发现是旧的。
+  renderExecute(currentRunData);
 }
 
 /* 分组标题行：一条占满整行的横条，回答「这一档是什么、多少项、共占多少」。 */
@@ -870,9 +886,9 @@ function renderReview(data) {
     (p) => !candFilter.q || p.toLowerCase().includes(candFilter.q),
   );
   if (!allPaths.length) {
-    emptyRow(rows, 6, "本轮没有候选文件。用完整扫描（不勾「跳过内容 hash」）才会产出候选与重复组。");
+    emptyRow(rows, 7, "本轮没有候选文件。用完整扫描（不勾「跳过内容 hash」）才会产出候选与重复组。");
   } else if (!shownPaths.length) {
-    emptyRow(rows, 6, "当前搜索没有匹配的候选。清空搜索框看全部。");
+    emptyRow(rows, 7, "当前搜索没有匹配的候选。清空搜索框看全部。");
   }
   // 按占用降序，与「待自动隔离」表一致：先看大的。
   const sortedPaths = shownPaths.sort((a, b) => {
@@ -888,6 +904,22 @@ function renderReview(data) {
     // 实际什么都不发生。要采纳就点「采纳全部建议」，那是显式的。
     const d = decisionFor(path);
     const tr = document.createElement("tr");
+
+    // 批量选择：勾选只进 candPicked，不改决策、不碰文件。
+    // 勾完再选一个动作点「应用到选中的」，才是写 decisions。
+    const tdPick = document.createElement("td");
+    const pick = el("input", {
+      cls: "cand-pick",
+      attrs: { type: "checkbox", "data-path": path },
+    });
+    pick.checked = candPicked.has(path);
+    pick.addEventListener("change", () => {
+      if (pick.checked) candPicked.add(path);
+      else candPicked.delete(path);
+      refreshCandPicked(currentCandShown);
+    });
+    tdPick.appendChild(pick);
+    tr.appendChild(tdPick);
 
     const tdPath = document.createElement("td");
     tdPath.appendChild(el("code", { text: path }));
@@ -958,6 +990,8 @@ function renderReview(data) {
 
     rows.appendChild(tr);
   }
+  currentCandShown = sortedPaths;
+  refreshCandPicked(sortedPaths);
 
   // 重复组：单选保留项，其余可一键标 quarantine
   const dups = document.getElementById("dups");
@@ -997,6 +1031,119 @@ function renderReview(data) {
     candCount.textContent = allPaths.length
       ? `显示 ${shownPaths.length} / 共 ${allPaths.length} 项`
       : "";
+  }
+  const candNext = document.getElementById("candNext");
+  if (candNext) {
+    const moving = [...decisions.values()].filter(
+      (d) => paths.has(d.path) && d.action !== "keep",
+    ).length;
+    candNext.textContent = moving
+      ? `已有 ${moving} 项设为隔离 / 归档，去「执行」页才会真正搬走。`
+      : "每行默认「保留不动」；改完决策去「执行」页动手。";
+  }
+  // 决策改了、或者采纳了模型建议，执行页的数字和清单都要重画
+  renderExecute(currentRunData);
+}
+
+/* --------------------------- 执行页：动手 --------------------------- */
+
+/* 这一页是步骤条上一直写着、但之前并不存在的那一步。
+   它只做一件事：把「将要发生什么」摆清楚，然后让用户按下去。
+   两个按钮各自紧挨自己那份清单——原先两个执行按钮分散在两张表下面，
+   用户在候选表设完下拉，视线内最近的却是「执行自动隔离」（另一条路径）。 */
+function renderExecute(data) {
+  if (!data) return;
+  const hits = data.pending_auto_hits || [];
+  const kept = hits.filter((h) => keptPaths.has(h.path));
+  const willMove = hits.length - kept.length;
+
+  const cands = (data.candidates || []).filter((c) => c.kind !== "duplicate_group");
+  const candPaths = new Set();
+  for (const c of cands) for (const p of c.paths || []) candPaths.add(p);
+  const moving = [];
+  for (const [path, d] of decisions) {
+    if (!candPaths.has(path)) continue;
+    if (d.action === "keep") continue;
+    moving.push({ path, action: d.action, target: d.target_relpath || "" });
+  }
+  const q = moving.filter((m) => m.action === "quarantine").length;
+  const arch = moving.length - q;
+
+  const box = document.getElementById("execCards");
+  if (box) {
+    clear(box);
+    box.appendChild(card("将搬走（规则命中）", willMove, kept.length ? `已勾保留 ${kept.length} 项` : "无保留"));
+    box.appendChild(card("将隔离（候选）", q, "来自决策列"));
+    box.appendChild(card("将归档（候选）", arch, "来自决策列"));
+  }
+
+  // 规则命中清单
+  const rl = document.getElementById("execRulesList");
+  if (rl) {
+    clear(rl);
+    if (!hits.length) {
+      rl.appendChild(el("div", { cls: "empty-note", text: "本轮没有规则命中项。" }));
+    } else if (!willMove) {
+      rl.appendChild(el("div", { cls: "empty-note", text: `全部 ${hits.length} 项都勾了「保留」，这一轮不会搬任何东西。` }));
+    } else {
+      for (const h of hits.slice(0, 30)) {
+        const line = el("div", { cls: keptPaths.has(h.path) ? "execrow kept" : "execrow" });
+        line.appendChild(el("code", { text: h.path }));
+        line.appendChild(el("span", { cls: "exec-meta", text: ruleLabel(h) }));
+        line.appendChild(el("span", { cls: "exec-size", text: sizeText(h.size_bytes) }));
+        if (keptPaths.has(h.path)) line.appendChild(el("span", { cls: "exec-tag", text: "保留" }));
+        rl.appendChild(line);
+      }
+      if (hits.length > 30) {
+        rl.appendChild(el("div", { cls: "tiny", text: `……还有 ${hits.length - 30} 项未列出` }));
+      }
+    }
+  }
+
+  const rh = document.getElementById("execRulesHint");
+  if (rh) {
+    rh.textContent = hits.length
+      ? `规则命中 ${hits.length} 项${kept.length ? `，其中 ${kept.length} 项勾了「保留」` : ""}。执行后搬进隔离区，可还原。`
+      : "本轮没有规则命中项，无需自动隔离。";
+  }
+
+  // 候选决策清单
+  const cl = document.getElementById("execCandList");
+  if (cl) {
+    clear(cl);
+    if (!moving.length) {
+      cl.appendChild(el("div", { cls: "empty-note", text: "还没有要执行的决策：每行默认「保留不动」，去「审阅」页改「决策」列或用批量选择。" }));
+    } else {
+      for (const m of moving.slice(0, 30)) {
+        const line = el("div", { cls: "execrow" });
+        line.appendChild(el("code", { text: m.path }));
+        line.appendChild(el("span", { cls: "exec-meta", text: DECISION_LABELS[m.action] || m.action }));
+        if (m.action === "archive" && m.target) line.appendChild(el("span", { cls: "exec-meta", text: `→ ${m.target}` }));
+        cl.appendChild(line);
+      }
+      if (moving.length > 30) {
+        cl.appendChild(el("div", { cls: "tiny", text: `……还有 ${moving.length - 30} 项未列出` }));
+      }
+    }
+  }
+
+  const ch = document.getElementById("execCandHint");
+  if (ch) {
+    ch.textContent = moving.length
+      ? `按「决策」列，将搬走 ${moving.length} 项（隔离 ${q}、归档 ${arch}）。`
+      : "按「决策」列，将搬走 0 项。";
+  }
+
+  // 按钮
+  const rb = document.getElementById("applyRulesBtn");
+  if (rb) {
+    rb.disabled = willMove === 0;
+    rb.textContent = willMove ? `执行自动隔离（${willMove} 项）` : "无可执行项";
+  }
+  const ab = document.getElementById("applyBtn");
+  if (ab) {
+    ab.disabled = moving.length === 0;
+    ab.textContent = moving.length ? `执行候选决策（${moving.length} 项）` : "没有待执行的决策";
   }
 }
 
@@ -1428,6 +1575,40 @@ async function save() {
   setStatus(res);
 }
 
+/* 候选表批量选择：更新「已选 N 项」与全选框。 */
+function refreshCandPicked(shown) {
+  const hint = document.getElementById("candPicked");
+  if (hint) hint.textContent = `已选 ${candPicked.size} 项`;
+  const box = document.getElementById("candAll");
+  if (box) {
+    const visible = (shown || []).filter((p) => candPicked.has(p)).length;
+    box.checked = shown && shown.length > 0 && visible === shown.length;
+    box.indeterminate = visible > 0 && visible < (shown || []).length;
+  }
+}
+
+/* 批量设决策：只写 decisions + 重绘，不调接口、不碰文件。
+   真正搬文件只在「执行」页点「执行候选决策」。 */
+function applyCandBulk() {
+  if (!candPicked.size) {
+    setStatus("还没勾选任何候选行：先勾左侧的「选择」。");
+    return;
+  }
+  const action = document.getElementById("candBulkAction").value;
+  let n = 0;
+  for (const path of candPicked) {
+    const cur = decisionFor(path);
+    cur.action = action;
+    if (action !== "archive") cur.target_relpath = "";
+    decisions.set(path, cur);
+    n += 1;
+  }
+  const label = DECISION_LABELS[action] || action;
+  setStatus(`已把 ${n} 项设为「${label}」（只改决策，未动任何文件）。`);
+  candPicked.clear();
+  renderReview(currentRunData);
+}
+
 async function apply() {
   if (!currentRun) throw new Error("还没有选中 run");
   // 每行默认「保留不动」，所以「一条都没设就点执行」是很容易发生的事。
@@ -1456,8 +1637,10 @@ async function apply() {
 async function applyRules() {
   if (!currentPendingCount) return setStatus("没有待隔离项。");
   const keep_paths = [...keptPaths];
-  const kept = keep_paths.length ? `；已勾「保留」的 ${keep_paths.length} 项本轮不动` : "";
-  if (!confirm(`将把 ${currentPendingCount} 项规则命中搬入隔离区（可还原）${kept}。继续？`)) {
+  const will = currentPendingCount - keep_paths.length;
+  if (!will) return setStatus(`全部 ${currentPendingCount} 项都勾了「保留」，本轮不需要搬任何东西。`);
+  const kept = keep_paths.length ? `，其中 ${keep_paths.length} 项勾了「保留」` : "";
+  if (!confirm(`将搬走 ${will} 项规则命中（共 ${currentPendingCount} 项命中${kept}）。继续？`)) {
     return undefined;
   }
   const res = await api(`/api/runs/${currentRun}/apply-rules`, {
@@ -1487,6 +1670,28 @@ document.getElementById("applyBtn").onclick = () =>
   apply().catch((e) => setStatus(e, { error: true }));
 document.getElementById("applyRulesBtn").onclick = () =>
   applyRules().catch((e) => setStatus(e, { error: true }));
+
+document.getElementById("gotoExecuteBtn").onclick = () => showTab("execute");
+document.getElementById("gotoExecuteBtn2").onclick = () => showTab("execute");
+
+document.getElementById("pendingAll").onchange = (e) => {
+  const all = (currentRunData && currentRunData.pending_auto_hits) || [];
+  for (const h of all) {
+    if (e.target.checked) keptPaths.add(h.path);
+    else keptPaths.delete(h.path);
+  }
+  renderPending(currentRunData);
+};
+
+document.getElementById("candAll").onchange = (e) => {
+  for (const p of currentCandShown || []) {
+    if (e.target.checked) candPicked.add(p);
+    else candPicked.delete(p);
+  }
+  renderReview(currentRunData);
+};
+
+document.getElementById("candBulkBtn").onclick = () => applyCandBulk();
 
 /* 审阅页筛选：只改显示，不改判定。执行范围永远是全部命中（勾了保留的除外），
    否则「筛了 3 项却搬走 30 项」会像丢了东西。 */
@@ -1825,7 +2030,7 @@ async function boot() {
   rulePurge = new Set(savedPurge);
   await loadRuns();
   const hash = location.hash.replace("#", "");
-  showTab(["overview", "scan", "review", "quarantine", "rules", "settings", "watch"].includes(hash) ? hash : "overview");
+  showTab(["overview", "scan", "review", "execute", "quarantine", "rules", "settings", "watch"].includes(hash) ? hash : "overview");
   // 深链：?explain=<相对路径> 直接打开该路径的解释弹窗，方便把「为什么判它」发给别人
   const target = new URLSearchParams(location.search).get("explain");
   if (target) explain(target);

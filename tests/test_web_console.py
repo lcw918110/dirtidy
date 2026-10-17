@@ -617,19 +617,24 @@ def test_adopt_only_takes_explicit_quarantine_or_archive() -> None:
     assert '"review"' not in body, "review 是「拿不准」，不能替用户做决定"
 
 
-def test_review_action_buttons_sit_next_to_their_table() -> None:
-    """执行按钮必须紧挨它作用的那张表，否则用户会点错另一个执行按钮。
+def test_execute_page_separates_two_apply_buttons() -> None:
+    """执行按钮必须集中在「执行」页，各自紧挨自己的清单；审阅页不许再有。
 
-    回归背景：「保存决策 / 执行决策」原先摆在审阅页**顶部**，而它们真正作用的
-    「候选 / 建议」表在整个「待自动隔离」区块之后。用户在候选表设完下拉，
-    视线内最近的按钮是「执行自动隔离」——那是另一条路径（`apply-rules`），
-    **完全不读这些下拉**。点了会搬走文件（可还原），但白干一轮。
+    回归背景：原先两个执行按钮分散在审阅页两张表下面，用户在候选表设完下拉，
+    视线内最近的按钮是「执行自动隔离」（另一条路径），点了会白干一轮。
+    拆到独立执行页后，两个按钮各自带着清单，用户执行前能看到「将要搬什么」。
     """
     html = _html()
-    cand = html.index("候选 / 建议")
-    assert html.index('id="applyRulesBtn"') < cand, "「执行自动隔离」属于它上面的「待自动隔离」表"
-    for el_id in ("adoptBtn", "saveBtn", "applyBtn"):
-        assert html.index(f'id="{el_id}"') > cand, f"{el_id} 必须排在「候选 / 建议」标题之后"
+    execute = html.split('id="tab-execute"')[1]
+    assert 'id="applyRulesBtn"' in execute, "「执行自动隔离」必须在执行页"
+    assert 'id="applyBtn"' in execute, "「执行候选决策」必须在执行页"
+    # 审阅页不许再出现——否则用户会在审阅页点错
+    review = html.split('id="tab-review"')[1].split('id="tab-execute"')[0]
+    assert 'id="applyRulesBtn"' not in review, "审阅页不该有执行按钮（已移到执行页）"
+    assert 'id="applyBtn"' not in review, "审阅页不该有执行按钮（已移到执行页）"
+    # 各自紧挨自己的清单
+    assert execute.index('id="applyRulesBtn"') > execute.index('id="execRulesList"')
+    assert execute.index('id="applyBtn"') > execute.index('id="execCandList"')
 
 
 # ------------------------------ 扫描超时 ------------------------------
