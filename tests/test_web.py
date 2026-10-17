@@ -37,7 +37,7 @@ def test_web_save_and_apply(workspace: Path) -> None:
 
     listed = client.get("/api/runs")
     assert listed.status_code == 200
-    assert meta["run_id"] in listed.json()["runs"]
+    assert meta["run_id"] in [r["id"] for r in listed.json()["runs"]]
 
     detail = client.get(f"/api/runs/{meta['run_id']}")
     assert detail.status_code == 200

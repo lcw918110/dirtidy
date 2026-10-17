@@ -374,9 +374,11 @@ function renderOverview(data) {
   box.appendChild(card("隔离区占用", humanSize(summary.size), "确认后可彻底删除"));
   box.appendChild(card("已直接删除", summary.purged_directly || 0, "命中直删规则"));
   box.appendChild(card("受保护拦下", (data.protection || []).length, "本轮未动"));
-  document.getElementById("runHint").textContent = meta.applied
-    ? "本轮已执行过自动隔离。"
-    : "本轮尚未执行自动隔离。";
+  // run id 一并摆出来：命令行 `dirtidy apply-rules <root> <run_id>` 要的就是它。
+  // 只在下拉里显示人话的话，用户想用命令行时又得去翻状态目录。
+  document.getElementById("runHint").textContent = `run ${meta.run_id || "-"} · ${
+    meta.applied ? "本轮已执行过自动隔离。" : "本轮尚未执行自动隔离。"
+  }`;
 }
 
 /* --------------------------- 扫描页：本次结果 --------------------------- */
@@ -497,10 +499,29 @@ function scanGroup(g) {
    路径 → 这是什么（中文说明）→ 建议怎么办 → 动了会怎样。
    规则 ID 不是给人看的，缩成小字放说明下面；原先它占着「命中规则」一整列，
    用户看到 `dep_node_modules` 只能猜。 */
-/* 审阅页的筛选状态。放模块级而不是每次渲染重建：勾了「保留」会触发重渲染，
-   筛选条件必须跟着留住，否则用户筛完点一下就跳回全部，等于白筛。 */
+/* 审阅页的筛选 / 排序 / 分组状态。放模块级而不是每次渲染重建：勾了「保留」
+   会触发重渲染，这些选择必须跟着留住，否则用户筛完、排好、分完组，
+   点一下又全回到默认，等于白做。 */
 const pendingFilter = { advice: "", q: "" };
 const candFilter = { q: "" };
+/* 默认按占用降序：用户第一眼要看的是「谁最占地方」，不是「谁字母序靠前」。
+   Windows 磁盘清理、CleanMyMac、dupeGuru 都是这个排法。 */
+const pendingSort = { key: "size", dir: -1 };
+let pendingGrouped = false;
+
+/* 每个排序键的默认方向：大小看「最大的在前」，路径看「A 在前」，
+   建议看「越该清越前」。 */
+const SORT_DEFAULT_DIR = { size: -1, path: 1, advice: 1 };
+
+/* 未知档位一律当「需要你判断」——与 `adviceTag` 的兜底保持一致。
+   不一致的话，分组视图会把这类行**直接漏掉**（分组键对不上任何一节）。 */
+function adviceKind(h) {
+  return ADVICE_KINDS.includes(h.advice) ? h.advice : "review";
+}
+
+function adviceRank(h) {
+  return ADVICE_KINDS.indexOf(adviceKind(h));
+}
 
 function matchesPendingFilter(h) {
   if (pendingFilter.advice && h.advice !== pendingFilter.advice) return false;
@@ -510,14 +531,38 @@ function matchesPendingFilter(h) {
   return true;
 }
 
+function sortHits(list) {
+  const { key, dir } = pendingSort;
+  const val = (h) => {
+    if (key === "path") return String(h.path || "");
+    if (key === "advice") return adviceRank(h);
+    return Number(h.size_bytes) || 0;
+  };
+  return [...list].sort((a, b) => {
+    const va = val(a);
+    const vb = val(b);
+    // 同值时按路径兜底：排序结果要稳定，否则每次重渲染顺序都在跳。
+    if (va === vb) return String(a.path || "").localeCompare(String(b.path || ""));
+    return (va < vb ? -1 : 1) * dir;
+  });
+}
+
+/* 表头箭头：让用户知道「现在按什么排、朝哪个方向」，而不是靠猜。 */
+function markSortHeaders() {
+  for (const th of document.querySelectorAll("#tab-review th.sortable")) {
+    const on = th.dataset.sort === pendingSort.key;
+    th.dataset.dir = on ? (pendingSort.dir === 1 ? "asc" : "desc") : "";
+    const name = th.textContent.trim();
+    th.title = on
+      ? `当前按「${name}」${pendingSort.dir === 1 ? "升序" : "降序"}，点一下切换`
+      : `点一下按「${name}」排序`;
+  }
+}
+
 function renderPending(data) {
   const tbody = document.getElementById("pendingRows");
   clear(tbody);
-  // 按占用降序：用户第一眼要看的是「谁最占地方」，不是「谁字母序靠前」。
-  // Windows 磁盘清理、CleanMyMac、dupeGuru 都是这个排法。
-  const all = [...(data.pending_auto_hits || [])].sort(
-    (a, b) => (Number(b.size_bytes) || 0) - (Number(a.size_bytes) || 0),
-  );
+  const all = sortHits(data.pending_auto_hits || []);
   const hits = all.filter(matchesPendingFilter);
   if (!all.length) {
     emptyRow(tbody, 6, "本轮没有规则命中项。切到「扫描」页跑一次，或换一个 run。");
@@ -532,65 +577,22 @@ function renderPending(data) {
   const dirPrefixes = all.filter((h) => h.is_dir).map((h) => `${h.path}/`);
   const coveredByParent = (p) => dirPrefixes.some((d) => p.startsWith(d));
 
-  for (const h of hits) {
-    const tr = document.createElement("tr");
-
-    const tdKeep = document.createElement("td");
-    const cb = el("input", { attrs: { type: "checkbox", "data-path": h.path } });
-    cb.checked = keptPaths.has(h.path);
-    cb.addEventListener("change", () => {
-      if (cb.checked) keptPaths.add(h.path);
-      else keptPaths.delete(h.path);
-    });
-    tdKeep.appendChild(cb);
-    tr.appendChild(tdKeep);
-
-    const tdPath = document.createElement("td");
-    tdPath.appendChild(el("code", { text: h.path }));
-    tdPath.appendChild(whyButton(h.path));
-    if (h.is_dir) tdPath.appendChild(el("span", { cls: "badge", text: "目录" }));
-    if (coveredByParent(h.path)) {
-      tdPath.appendChild(
-        el("span", {
-          cls: "badge",
-          text: "已含在上层目录里",
-          attrs: { title: "执行时只搬父目录，这一条不会单独搬走" },
-        }),
-      );
+  if (pendingGrouped && hits.length) {
+    // 分节显示：三档各一段。并排三栏会把每栏压到 500px 左右、路径都显示不全，
+    // 分节横条既不牺牲列宽，又能一次看清「哪档有几项、共占多少」。
+    for (const kind of ADVICE_KINDS) {
+      const group = hits.filter((h) => adviceKind(h) === kind);
+      if (!group.length) continue;
+      tbody.appendChild(pendingGroupRow(group));
+      for (const h of group) tbody.appendChild(pendingRow(h, coveredByParent));
     }
-    tr.appendChild(tdPath);
-
-    // 这是什么：中文说明为主，规则 ID 退成小字（要排查时还在，不占视线）
-    const tdWhat = document.createElement("td");
-    tdWhat.appendChild(el("div", { text: h.rule_reason || h.reason || "（规则未给出说明）" }));
-    if (h.rule_id) {
-      tdWhat.appendChild(
-        el("div", {
-          cls: "tiny",
-          text: `规则：${ruleLabel(h)}`,
-          attrs: { title: h.rule_id },
-        }),
-      );
-    }
-    tr.appendChild(tdWhat);
-
-    const tdAdvice = document.createElement("td");
-    tdAdvice.appendChild(adviceTag(h));
-    // 「删了怎么恢复」比形容词更能让人下决心：说清代价，而不是给个「安全」标签
-    if (h.recover) {
-      tdAdvice.appendChild(el("div", { cls: "tiny", text: `删了怎么办：${h.recover}` }));
-    }
-    tr.appendChild(tdAdvice);
-
-    tr.appendChild(el("td", { cls: "num", text: sizeText(h.size_bytes) }));
-
-    // 动了会怎样：可还原 / 不可还原，比「是 / 否」有用得多
-    tr.appendChild(el("td", { text: h.effect_label || "搬进隔离区（可还原）" }));
-
-    tbody.appendChild(tr);
+  } else {
+    for (const h of hits) tbody.appendChild(pendingRow(h, coveredByParent));
   }
 
-  // 执行范围始终是**全部命中**（勾「保留」的除外），与筛选无关。
+  markSortHeaders();
+
+  // 执行范围始终是**全部命中**（勾「保留」的除外），与筛选、排序、分组都无关。
   // 按钮与确认框都按全量报数，否则「筛了 3 项、搬走 30 项」会像丢了东西。
   currentPendingCount = all.length;
   const btn = document.getElementById("applyRulesBtn");
@@ -602,6 +604,80 @@ function renderPending(data) {
       ? `显示 ${hits.length} / 共 ${all.length} 项（筛选只影响显示，执行仍按全部命中处理）`
       : "";
   }
+}
+
+/* 分组标题行：一条占满整行的横条，回答「这一档是什么、多少项、共占多少」。 */
+function pendingGroupRow(group) {
+  const tr = document.createElement("tr");
+  tr.className = "group-row";
+  const td = document.createElement("td");
+  td.setAttribute("colspan", "6");
+  td.appendChild(adviceTag(group[0]));
+  const size = group.reduce((s, h) => s + Math.max(0, Number(h.size_bytes) || 0), 0);
+  const bits = [`${group.length} 项`];
+  if (size > 0) bits.push(`合计 ${humanSize(size)}`);
+  td.appendChild(el("span", { cls: "group-meta", text: bits.join(" · ") }));
+  tr.appendChild(td);
+  return tr;
+}
+
+/* 一行命中项。抽成函数是为了排序 / 筛选 / 分组三种视图共用同一份构造逻辑——
+   三份各写一遍的话，改一列就得改三处，迟早漏一处。 */
+function pendingRow(h, coveredByParent) {
+  const tr = document.createElement("tr");
+
+  const tdKeep = document.createElement("td");
+  const cb = el("input", { attrs: { type: "checkbox", "data-path": h.path } });
+  cb.checked = keptPaths.has(h.path);
+  cb.addEventListener("change", () => {
+    if (cb.checked) keptPaths.add(h.path);
+    else keptPaths.delete(h.path);
+  });
+  tdKeep.appendChild(cb);
+  tr.appendChild(tdKeep);
+
+  const tdPath = document.createElement("td");
+  tdPath.appendChild(el("code", { text: h.path }));
+  tdPath.appendChild(whyButton(h.path));
+  if (h.is_dir) tdPath.appendChild(el("span", { cls: "badge", text: "目录" }));
+  if (coveredByParent(h.path)) {
+    tdPath.appendChild(
+      el("span", {
+        cls: "badge",
+        text: "已含在上层目录里",
+        attrs: { title: "执行时只搬父目录，这一条不会单独搬走" },
+      }),
+    );
+  }
+  tr.appendChild(tdPath);
+
+  // 这是什么：中文说明为主，规则 ID 退成小字（要排查时还在，不占视线）
+  const tdWhat = document.createElement("td");
+  tdWhat.appendChild(el("div", { text: h.rule_reason || h.reason || "（规则未给出说明）" }));
+  if (h.rule_id) {
+    tdWhat.appendChild(
+      el("div", {
+        cls: "tiny",
+        text: `规则：${ruleLabel(h)}`,
+        attrs: { title: h.rule_id },
+      }),
+    );
+  }
+  tr.appendChild(tdWhat);
+
+  const tdAdvice = document.createElement("td");
+  tdAdvice.appendChild(adviceTag(h));
+  // 「删了怎么恢复」比形容词更能让人下决心：说清代价，而不是给个「安全」标签
+  if (h.recover) {
+    tdAdvice.appendChild(el("div", { cls: "tiny", text: `删了怎么办：${h.recover}` }));
+  }
+  tr.appendChild(tdAdvice);
+
+  tr.appendChild(el("td", { cls: "num", text: sizeText(h.size_bytes) }));
+
+  // 动了会怎样：可还原 / 不可还原，比「是 / 否」有用得多
+  tr.appendChild(el("td", { text: h.effect_label || "搬进隔离区（可还原）" }));
+  return tr;
 }
 
 function renderProtection(data) {
@@ -1235,6 +1311,27 @@ async function refreshWatch() {
 
 /* --------------------------------- 载入 --------------------------------- */
 
+/* run id 是机器时间 + 6 位随机后缀（`2026-10-17T042716+0000-c9874f`）。
+   下拉里直接铺这个，用户选不出「哪个是刚才那次」——翻成
+   「10-17 12:27 · 命中 4 · 候选 2」才是人看的。 */
+function shortTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function runLabel(r) {
+  const bits = [];
+  const when = shortTime(r.started_at);
+  if (when) bits.push(when);
+  bits.push(`命中 ${Number(r.auto_hits) || 0}`);
+  // 老 run 没有 candidates 字段（后端给 -1）：不显示，而不是显示一个假的 0。
+  if (Number(r.candidates) >= 0) bits.push(`候选 ${r.candidates}`);
+  if (r.applied) bits.push("已执行");
+  return bits.join(" · ");
+}
+
 async function loadRuns() {
   const meta = await api("/api/meta");
   document.getElementById("meta").textContent = `目标根：${meta.root}`;
@@ -1242,8 +1339,11 @@ async function loadRuns() {
   const { runs } = await api("/api/runs");
   const sel = document.getElementById("runSelect");
   clear(sel);
-  for (const r of runs) sel.appendChild(el("option", { text: r, attrs: { value: r } }));
-  if (meta.run_id && runs.includes(meta.run_id)) sel.value = meta.run_id;
+  for (const r of runs) {
+    sel.appendChild(el("option", { text: runLabel(r), attrs: { value: r.id, title: r.id } }));
+  }
+  const ids = runs.map((r) => r.id);
+  if (meta.run_id && ids.includes(meta.run_id)) sel.value = meta.run_id;
   if (sel.value) await loadRun(sel.value);
   else setStatus("还没有任何 run：切到「扫描」页跑一次。");
 }
@@ -1347,6 +1447,25 @@ document.getElementById("candSearch").oninput = (e) => {
   candFilter.q = e.target.value.trim().toLowerCase();
   if (currentRunData) renderReview(currentRunData);
 };
+document.getElementById("pendingGroup").onchange = (e) => {
+  pendingGrouped = e.target.checked;
+  if (currentRunData) renderPending(currentRunData);
+};
+
+/* 表头排序：同一列再点一次切方向；换列则用该列的默认方向
+   （大小「大的在前」、路径「A 在前」、建议「越该清越前」）。 */
+for (const th of document.querySelectorAll("#tab-review th.sortable")) {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    if (pendingSort.key === key) {
+      pendingSort.dir *= -1;
+    } else {
+      pendingSort.key = key;
+      pendingSort.dir = SORT_DEFAULT_DIR[key] || 1;
+    }
+    if (currentRunData) renderPending(currentRunData);
+  });
+}
 
 /* 批量勾选「保留」。三个按钮只改 keptPaths，**不碰任何文件**——
    真正的移动仍然只在「执行自动隔离」里发生。 */

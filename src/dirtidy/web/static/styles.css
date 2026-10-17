@@ -189,6 +189,18 @@ select:disabled, input:disabled, textarea:disabled {
 td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* 短字段（动作 / 类型这类 2-4 个字）不许折行：匹配列一长，它们会被挤成竖排单字。 */
 td.nowrap { white-space: nowrap; }
+/* 可排序表头：箭头用伪元素，不占列宽、也不污染 textContent（markSortHeaders 要读它）。 */
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--ink); }
+th.sortable[data-dir="asc"]::after { content: " ▲"; font-size: 0.72em; }
+th.sortable[data-dir="desc"]::after { content: " ▼"; font-size: 0.72em; }
+/* 分组横条：一眼看清「这一档有几项、共占多少」，同时不牺牲列宽。 */
+tr.group-row td {
+  background: rgba(28, 27, 25, 0.045);
+  font-weight: 600;
+  padding-top: 0.7rem;
+}
+.group-meta { color: var(--muted); font-weight: 400; font-size: 0.85rem; margin-left: 0.5rem; }
 
 /* 四色图例：颜色必须配解释，否则用户只能猜绿的好还是橙的好 */
 .legend {

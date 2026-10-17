@@ -216,6 +216,9 @@ def create_run(
         "apply_skipped_by_timeout": bool(apply) and timed_out is not None,
         "protect": list(protect or ()),
         "auto_hits": len(hits),
+        # 候选条数进 meta：界面要在 run 下拉里显示「这次扫出多少」，
+        # 否则只能去读 candidates.json（可能几十 MB）才知道。
+        "candidates": len(candidates),
         # 命中路径**自身**受保护（扫描阶段即可判定）
         "protected_blocked": len(match.protected),
         # 命中目录因子树内含受保护路径被整条拦下。只有真正执行隔离时才知道

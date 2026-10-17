@@ -119,16 +119,20 @@
         </select>
       </label>
       <input id="pendingSearch" type="search" placeholder="按路径筛选…" />
+      <label class="inline">
+        <input id="pendingGroup" type="checkbox" />
+        按建议分组
+      </label>
       <span class="hint" id="pendingCount"></span>
     </div>
     <table>
       <thead>
         <tr>
           <th>保留</th>
-          <th>路径</th>
+          <th class="sortable" data-sort="path">路径</th>
           <th>这是什么</th>
-          <th>建议 / 删了怎么办</th>
-          <th>占用</th>
+          <th class="sortable" data-sort="advice">建议 / 删了怎么办</th>
+          <th class="sortable" data-sort="size">占用</th>
           <th>动了会怎样</th>
         </tr>
       </thead>

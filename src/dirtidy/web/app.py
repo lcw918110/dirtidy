@@ -373,11 +373,34 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
 
     @app.get("/api/runs")
     def list_runs() -> dict:
+        """run 列表，每条带上「什么时候扫的、扫出多少」。
+
+        只给 id 的话，下拉框里全是 `2026-10-17T042716+0000-c9874f`——
+        用户根本选不出哪个是刚才那次。这些信息都在各自的 meta.json 里，
+        读一个小文件就够，不必去碰 candidates.json。
+        """
         runs_root = state_root(default_root) / "runs"
         if not runs_root.exists():
             return {"runs": []}
-        runs = sorted([p.name for p in runs_root.iterdir() if p.is_dir()], reverse=True)
-        return {"runs": runs}
+        out: list[dict[str, Any]] = []
+        for p in sorted((d for d in runs_root.iterdir() if d.is_dir()), reverse=True):
+            meta_path = p / "meta.json"
+            meta = read_json(meta_path) if meta_path.exists() else {}
+            info: dict[str, Any] = meta if isinstance(meta, dict) else {}
+            out.append(
+                {
+                    "id": p.name,
+                    "started_at": str(info.get("started_at") or ""),
+                    "auto_hits": int(info.get("auto_hits") or 0),
+                    # 老 run 没有这个字段（它比本字段更早生成）：给 -1 表示「不知道」，
+                    # 前端据此不显示，而不是显示一个假的 0。
+                    "candidates": int(info["candidates"])
+                    if info.get("candidates") is not None
+                    else -1,
+                    "applied": bool(info.get("applied")),
+                }
+            )
+        return {"runs": out}
 
     def _run_path(run_id: str) -> Path:
         p = run_dir(default_root, run_id)

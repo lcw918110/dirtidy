@@ -40,7 +40,7 @@ def test_web_scan_endpoint_creates_run(client: TestClient, workspace: Path) -> N
     assert resp.status_code == 200
     run_id = resp.json()["run_id"]
     assert (workspace / ".dirtidy" / "runs" / run_id).is_dir()
-    assert run_id in client.get("/api/runs").json()["runs"]
+    assert run_id in [r["id"] for r in client.get("/api/runs").json()["runs"]]
 
 
 def test_web_scan_rejects_unknown_pack(client: TestClient) -> None:

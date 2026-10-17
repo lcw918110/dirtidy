@@ -214,5 +214,8 @@ def test_frontend_shows_size_and_recover() -> None:
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "function sizeText" in js
     assert "删了怎么办" in js
-    body = _js_function(js, "renderPending")
-    assert "size_bytes" in body and ".sort(" in body, "命中项应按占用降序排列"
+    # 行构造抽进了 pendingRow()（排序 / 筛选 / 分组共用一份），占用列在那儿。
+    assert "size_bytes" in _js_function(js, "pendingRow")
+    # 默认排序键仍是占用降序：用户第一眼要看的是「谁最占地方」。
+    assert 'const pendingSort = { key: "size", dir: -1 }' in js
+    assert "sortHits(" in _js_function(js, "renderPending")

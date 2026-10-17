@@ -114,7 +114,9 @@ def test_quarantine_rows_show_rule_label(tmp_path: Path) -> None:
 def test_frontend_shows_rule_label_not_internal_id() -> None:
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "function ruleLabel(" in js, "前端应统一走 ruleLabel()，而不是各处拼 rule_id"
-    for fn in ("renderPending", "scanGroup"):
+    # 行构造已抽进 pendingRow()（排序 / 筛选 / 分组三种视图共用一份），
+    # 所以守卫盯的是真正拼路径与规则名的那两个函数。
+    for fn in ("pendingRow", "scanGroup"):
         body = _js_function(js, fn)
         assert "ruleLabel(" in body, f"{fn} 没有用中文短名"
         assert "规则 ${h.rule_id}" not in body, f"{fn} 还在直接铺内部编号"
@@ -160,6 +162,81 @@ def test_filter_survives_rerender() -> None:
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "const pendingFilter" in js, "筛选状态不能放在渲染函数里重建"
     assert "const candFilter" in js
+
+
+# ---------------------------- run 下拉说人话 ----------------------------
+
+
+def test_run_list_carries_readable_fields(client: TestClient) -> None:
+    """run 列表要能回答「这是什么时候扫的、扫出多少」。
+
+    只给 id 的话，下拉框里全是 `2026-10-17T042716+0000-c9874f`，
+    用户选不出哪个是刚才那次。
+    """
+    run_id = client.post("/api/scan", json={"quick": False, "workers": 2}).json()["run_id"]
+    runs = client.get("/api/runs").json()["runs"]
+    assert runs
+    row = next(r for r in runs if r["id"] == run_id)
+    assert row["started_at"], "没有开始时间，前端没法显示「10-17 12:27」"
+    assert row["auto_hits"] >= 1
+    # 候选数必须进 meta.json：否则要显示它就得去读可能几十 MB 的 candidates.json
+    assert row["candidates"] >= 0, "候选数没进 meta"
+    assert row["applied"] is False
+
+
+def test_run_dropdown_uses_human_labels() -> None:
+    """下拉用人话，不铺裸 run id；完整 id 另外摆在提示行，供命令行复制。"""
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "function runLabel(" in js
+    assert "function shortTime(" in js
+    body = _js_function(js, "loadRuns")
+    assert "runLabel(r)" in body, "下拉必须用人话"
+    assert "text: r," not in body, "还在把裸 id 当选项文字"
+    assert "run ${meta.run_id" in js, "完整 run id 要在页面上露出来，命令行要用"
+
+
+# ------------------------------ 表头排序 ------------------------------
+
+
+def test_table_headers_are_sortable() -> None:
+    """三列表头可点，当前列有箭头指示方向。"""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    review = html.split('id="tab-review"')[1].split('id="tab-quarantine"')[0]
+    for key in ("path", "advice", "size"):
+        assert f'class="sortable" data-sort="{key}"' in review, f"{key} 列不可排序"
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "const pendingSort" in js
+    assert "const SORT_DEFAULT_DIR" in js
+    assert "function markSortHeaders(" in js
+    body = _js_function(js, "sortHits")
+    assert "localeCompare" in body, "同值要按路径兜底，否则每次重渲染顺序都在跳"
+
+
+# ------------------------------ 按建议分组 ------------------------------
+
+
+def test_grouping_never_drops_unknown_advice() -> None:
+    """分组视图不能把「未知档位」的行漏掉。
+
+    分组键如果直接拿 `h.advice` 去比，未知值对不上任何一节 → 行凭空消失，
+    而「显示 N / 共 M」的数字还停留在筛选阶段，看起来一切正常。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "function adviceKind(" in js
+    assert '"review"' in _js_function(js, "adviceKind"), "未知档位必须兜底成「需要你判断」"
+    body = _js_function(js, "renderPending")
+    assert "adviceKind(h) === kind" in body, "分组必须按兜底后的档位分"
+
+
+def test_sort_and_group_are_display_only() -> None:
+    """排序与分组都只改显示：执行范围仍按全量报，且不调接口。"""
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    for fn in ("sortHits", "pendingGroupRow"):
+        body = _js_function(js, fn)
+        for token in ("api(", "fetch(", "confirm("):
+            assert token not in body, f"{fn} 里出现了 {token}，排序/分组不该动手"
+    body = _js_function(js, "renderPending")
+    assert "currentPendingCount = all.length" in body, "执行条数必须按全量报"
 
 
 # ---------------------------- 批量勾选「保留」 ----------------------------
