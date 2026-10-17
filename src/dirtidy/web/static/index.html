@@ -95,6 +95,13 @@
   <section class="tab" id="tab-review">
     <h2>审阅</h2>
 
+    <p class="legend">
+      <span class="advice advice-safe_clean">建议清理</span> 重建免费，删了不影响
+      <span class="advice advice-clean">可以清理</span> 能重建，要重装或重编译
+      <span class="advice advice-review">需要你判断</span> 说不准还有没有用
+      <span class="advice advice-protected">受保护</span> 永不自动动
+    </p>
+
     <h3>待自动隔离（规则命中）</h3>
     <p class="hint">
       这里是<strong>规则命中</strong>的项，执行时未必都会搬走：勾选「保留」的项本轮不动；
@@ -108,7 +115,8 @@
           <th>保留</th>
           <th>路径</th>
           <th>这是什么</th>
-          <th>建议</th>
+          <th>建议 / 删了怎么办</th>
+          <th>占用</th>
           <th>动了会怎样</th>
         </tr>
       </thead>
@@ -136,7 +144,8 @@
         <tr>
           <th>路径</th>
           <th>为什么在列表里</th>
-          <th>建议</th>
+          <th>建议 / 删了怎么办</th>
+          <th>占用</th>
           <th>决策</th>
           <th>归档相对路径</th>
         </tr>

@@ -139,6 +139,14 @@ function humanSize(n) {
   return `${i === 0 ? x : x.toFixed(x < 10 ? 1 : 0)} ${units[i]}`;
 }
 
+/* 占用大小的统一出口：后端算不出来时给 `-1`，显示「—」而不是「0 B」——
+   「0 B」会被读成「这是个空文件」，而实际只是没算（条目太多时整批不算）。 */
+function sizeText(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 0) return "—";
+  return humanSize(v);
+}
+
 function card(k, v, s) {
   const box = el("div", { cls: "card" });
   box.appendChild(el("div", { cls: "k", text: k }));
@@ -384,6 +392,8 @@ function renderScanSummary(data) {
   if (cands.length) bits.push(`${cands.length} 项需要你判断`);
   if (protectedCount) bits.push(`${protectedCount} 项被保护拦下`);
   if (!bits.length) bits.push("没有发现可清理的项");
+  const totalBytes = hits.reduce((s, h) => s + Math.max(0, Number(h.size_bytes) || 0), 0);
+  if (totalBytes > 0) bits.push(`合计约 ${humanSize(totalBytes)}`);
 
   box.appendChild(el("p", { cls: "lead", text: `本次扫描：${bits.join("；")}。` }));
   box.appendChild(
@@ -396,11 +406,15 @@ function renderScanSummary(data) {
   const groups = new Map();
   for (const h of hits) {
     const key = h.rule_id || "-";
-    if (!groups.has(key)) groups.set(key, { rule_id: key, sample: h, paths: [] });
-    groups.get(key).paths.push(h);
+    if (!groups.has(key)) groups.set(key, { rule_id: key, sample: h, paths: [], size: 0 });
+    const g = groups.get(key);
+    g.paths.push(h);
+    g.size += Math.max(0, Number(h.size_bytes) || 0);
   }
-  for (const g of groups.values()) box.appendChild(scanGroup(g));
-  if (!groups.size) {
+  // 按占用降序：先看占地方最多的那一类。
+  const groupList = [...groups.values()].sort((a, b) => b.size - a.size);
+  for (const g of groupList) box.appendChild(scanGroup(g));
+  if (!groupList.length) {
     box.appendChild(el("p", { cls: "empty-note", text: "本轮没有规则命中项。" }));
   }
 
@@ -426,9 +440,10 @@ function scanGroup(g) {
   title.appendChild(
     el("strong", { text: g.sample.rule_reason || g.sample.reason || "（规则未给出说明）" }),
   );
-  title.appendChild(
-    el("span", { cls: "tiny", text: `${g.paths.length} 项 · 规则 ${g.rule_id}` }),
-  );
+  const metaBits = [`${g.paths.length} 项`];
+  if (g.size > 0) metaBits.push(sizeText(g.size));
+  metaBits.push(`规则 ${g.rule_id}`);
+  title.appendChild(el("span", { cls: "tiny", text: metaBits.join(" · ") }));
   head.appendChild(title);
   wrap.appendChild(head);
 
@@ -438,6 +453,7 @@ function scanGroup(g) {
     const line = el("div", { cls: "rowline" });
     line.appendChild(el("code", { text: h.path }));
     if (h.is_dir) line.appendChild(el("span", { cls: "badge", text: "目录" }));
+    line.appendChild(el("span", { cls: "tiny", text: sizeText(h.size_bytes) }));
     if (h.effect_label) line.appendChild(el("span", { cls: "tiny", text: h.effect_label }));
     line.appendChild(whyButton(h.path));
     det.appendChild(line);
@@ -458,9 +474,13 @@ function scanGroup(g) {
 function renderPending(data) {
   const tbody = document.getElementById("pendingRows");
   clear(tbody);
-  const hits = data.pending_auto_hits || [];
+  // 按占用降序：用户第一眼要看的是「谁最占地方」，不是「谁字母序靠前」。
+  // Windows 磁盘清理、CleanMyMac、dupeGuru 都是这个排法。
+  const hits = [...(data.pending_auto_hits || [])].sort(
+    (a, b) => (Number(b.size_bytes) || 0) - (Number(a.size_bytes) || 0),
+  );
   if (!hits.length) {
-    emptyRow(tbody, 5, "本轮没有规则命中项。切到「扫描」页跑一次，或换一个 run。");
+    emptyRow(tbody, 6, "本轮没有规则命中项。切到「扫描」页跑一次，或换一个 run。");
   }
   // 命中目录会覆盖其内的文件命中（执行时只搬父目录）。这里把它标出来——
   // 否则页面写着「N 项」而实际只搬走更少，用户按数字核对会以为漏了。
@@ -503,7 +523,13 @@ function renderPending(data) {
 
     const tdAdvice = document.createElement("td");
     tdAdvice.appendChild(adviceTag(h));
+    // 「删了怎么恢复」比形容词更能让人下决心：说清代价，而不是给个「安全」标签
+    if (h.recover) {
+      tdAdvice.appendChild(el("div", { cls: "tiny", text: `删了怎么办：${h.recover}` }));
+    }
     tr.appendChild(tdAdvice);
+
+    tr.appendChild(el("td", { cls: "num", text: sizeText(h.size_bytes) }));
 
     // 动了会怎样：可还原 / 不可还原，比「是 / 否」有用得多
     tr.appendChild(el("td", { text: h.effect_label || "搬进隔离区（可还原）" }));
@@ -695,9 +721,15 @@ function renderReview(data) {
   for (const p of Object.keys(suggestions)) paths.add(p);
 
   if (!paths.size) {
-    emptyRow(rows, 5, "本轮没有候选文件。用完整扫描（不勾「跳过内容 hash」）才会产出候选与重复组。");
+    emptyRow(rows, 6, "本轮没有候选文件。用完整扫描（不勾「跳过内容 hash」）才会产出候选与重复组。");
   }
-  for (const path of [...paths].sort()) {
+  // 按占用降序，与「待自动隔离」表一致：先看大的。
+  const sortedPaths = [...paths].sort((a, b) => {
+    const sa = Number((candByPath.get(a) || {}).size_bytes) || 0;
+    const sb = Number((candByPath.get(b) || {}).size_bytes) || 0;
+    return sb - sa;
+  });
+  for (const path of sortedPaths) {
     const sug = suggestions[path];
     const cand = candByPath.get(path) || {};
     // 唯一真相是 decisions（默认 keep）。这里**刻意不按建议预填**：
@@ -726,6 +758,9 @@ function renderReview(data) {
     // 建议：规则给的是「需要你判断」，模型给了就一并摆出来（仍然只是参考）
     const tdAdvice = document.createElement("td");
     tdAdvice.appendChild(adviceTag(cand.advice ? cand : { advice: "review" }));
+    if (cand.recover) {
+      tdAdvice.appendChild(el("div", { cls: "tiny", text: `删了怎么办：${cand.recover}` }));
+    }
     if (sug) {
       const conf = Number(sug.confidence);
       const pct = Number.isFinite(conf) ? `（置信度 ${Math.round(conf > 1 ? conf : conf * 100)}%）` : "";
@@ -737,6 +772,8 @@ function renderReview(data) {
       );
     }
     tr.appendChild(tdAdvice);
+
+    tr.appendChild(el("td", { cls: "num", text: sizeText(cand.size_bytes) }));
 
     const tdAct = document.createElement("td");
     const sel = el("select", { cls: "act", attrs: { "data-path": path } });

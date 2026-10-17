@@ -126,6 +126,7 @@ rules:
       type: dir_name
       names: ["node_modules", "bower_components", "jspm_packages"]
     reason: "Node / 前端依赖目录，可用包管理器重建"
+    recover: "npm install（或 yarn / pnpm install）"
 
   - id: dep_python_cache
     action: auto_quarantine
@@ -146,6 +147,7 @@ rules:
         - "*.egg-info"
         - ".ipynb_checkpoints"
     reason: "Python 缓存与打包中间目录，可重建"
+    recover: "无需恢复，下次运行自动重建"
 
   - id: dep_python_venv
     action: auto_quarantine
@@ -153,6 +155,7 @@ rules:
       type: dir_name
       names: [".venv", "venv", ".virtualenv"]
     reason: "Python 虚拟环境，可用依赖清单重建"
+    recover: "python -m venv .venv && pip install -r requirements.txt"
 
   - id: dep_jvm_cache
     action: auto_quarantine
@@ -160,6 +163,7 @@ rules:
       type: dir_name
       names: [".m2", ".gradle", ".ivy2"]
     reason: "JVM 构建工具本地缓存"
+    recover: "无需恢复，下次构建自动重建"
 
   - id: dep_web_cache
     action: auto_quarantine
@@ -177,6 +181,7 @@ rules:
         - ".webpack"
         - ".cache"
     reason: "前端框架构建缓存"
+    recover: "无需恢复，下次构建自动重建"
 
   - id: dep_tool_cache
     action: auto_quarantine
@@ -192,6 +197,7 @@ rules:
         - ".serverless"
         - "__MACOSX"
     reason: "其它工具链缓存 / 打包残留目录"
+    recover: "无需恢复，下次运行自动重建"
 
   - id: dep_os_metadata
     action: auto_quarantine
@@ -200,6 +206,7 @@ rules:
       type: file_name
       names: [".DS_Store", "Thumbs.db", "desktop.ini"]
     reason: "操作系统生成的元数据文件"
+    recover: "无需恢复，系统自动重建"
 
   - id: dep_editor_swap
     action: auto_quarantine
@@ -208,6 +215,7 @@ rules:
       type: name_glob
       globs: ["*~", "#*#", "*.swp", "*.swo", "*.orig", "*.rej"]
     reason: "编辑器交换文件与补丁残留"
+    recover: "无需恢复，编辑器残留"
 
   - id: dep_python_bytecode
     action: auto_quarantine
@@ -216,6 +224,7 @@ rules:
       type: suffix
       suffixes: [".pyc", ".pyo", ".pyd"]
     reason: "Python 字节码文件"
+    recover: "无需恢复，下次导入自动重建"
 
   - id: dep_temp_partial
     action: auto_quarantine
@@ -223,6 +232,7 @@ rules:
       type: suffix
       suffixes: [".tmp", ".temp", ".part", ".partial", ".crdownload", ".download", ".!ut"]
     reason: "临时文件与未完成下载"
+    recover: "需要时重新下载"
 
   - id: log_suffix
     action: auto_quarantine
@@ -232,12 +242,14 @@ rules:
     when:
       min_age_days: 1
     reason: "超过 1 天未更新的日志文件（正在写的日志不动）"
+    recover: "无需恢复，日志仅作历史记录"
 
   - id: empty_dir
     action: auto_quarantine
     match:
       type: empty_dir
     reason: "空目录"
+    recover: "无需恢复，本来就是空的"
 
   # ============================== 候选：需人工确认 ==============================
   - id: empty_file
@@ -245,6 +257,7 @@ rules:
     match:
       type: empty_file
     reason: "0 字节文件，可能是占位也可能是损坏，需确认"
+    recover: "无法恢复，删前确认不是占位文件"
 
   - id: build_dir_candidate
     action: candidate_only
@@ -253,6 +266,7 @@ rules:
       is_dir: true
       globs: ["build", "dist", "out", "bin", "obj", "Pods", "DerivedData", "Carthage", "deps", "_build", ".build"]
     reason: "可能是构建产物，也可能含手写源码，需确认"
+    recover: "重新构建（构建命令因项目而异）"
 
   - id: installer_suffix
     action: candidate_only
@@ -260,6 +274,7 @@ rules:
       type: suffix
       suffixes: [".dmg", ".msi", ".deb", ".rpm", ".pkg", ".AppImage", ".exe", ".apk", ".snap"]
     reason: "安装包类文件，需确认是否还需保留"
+    recover: "需要时重新下载"
 
   - id: archive_suffix
     action: candidate_only
@@ -267,6 +282,7 @@ rules:
       type: suffix
       suffixes: [".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".zst"]
     reason: "压缩包可能保存着唯一副本，需确认"
+    recover: "无法恢复，可能存着唯一副本"
 
   - id: backup_suffix
     action: candidate_only
@@ -274,6 +290,7 @@ rules:
       type: suffix
       suffixes: [".bak", ".backup", ".old"]
     reason: "备份类文件，需确认"
+    recover: "无法恢复，备份可能就是唯一副本"
 
   - id: database_suffix
     action: candidate_only
@@ -281,3 +298,4 @@ rules:
       type: suffix
       suffixes: [".sqlite", ".sqlite3", ".db"]
     reason: "本地数据库文件，需确认"
+    recover: "无法恢复，本地数据没有第二份"

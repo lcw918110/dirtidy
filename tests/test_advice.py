@@ -25,6 +25,7 @@ from dirtidy.advice import (
     describe,
     effect_for,
 )
+from dirtidy.rules.engine import load_rule_pack
 from dirtidy.web.app import create_app
 
 FIXTURE_SRC = Path(__file__).parent / "fixtures" / "sample_workspace"
@@ -169,8 +170,49 @@ def test_review_tables_speak_user_language() -> None:
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     review = html.split('id="tab-review"')[1].split('id="tab-quarantine"')[0]
     assert "<th>这是什么</th>" in review
-    assert "<th>建议</th>" in review
+    assert "<th>建议 / 删了怎么办</th>" in review
+    assert "<th>占用</th>" in review
     assert "<th>动了会怎样</th>" in review
     assert "<th>为什么在列表里</th>" in review
     assert "<th>命中规则</th>" not in review, "内部规则编号不该再占一整列"
     assert "<th>本规则已开启直删</th>" not in review, "那是规则配置状态，不是「该不该删」"
+    # 颜色必须配图例，否则用户只能猜绿的好还是橙的好（WinDirStat 的做法）
+    assert 'class="legend"' in review
+
+
+def test_every_actionable_rule_explains_how_to_recover() -> None:
+    """每条会动的规则都要说清「删了怎么恢复」。
+
+    这是市面清理工具里最能让用户敢下手的一条信息：Windows 磁盘清理每类都带一句
+    「这些是程序使用的临时信息」，BleachBit 每个 cleaner 都有 description。
+    只说「可以清理」等于让用户凭信任点按钮。
+    """
+    pack = load_rule_pack("default")
+    missing = [
+        str(r.get("id"))
+        for r in pack["rules"]
+        if r.get("action") != "protect" and not r.get("recover")
+    ]
+    assert not missing, f"这些规则没写 recover（删了怎么恢复）：{missing}"
+
+
+def test_run_api_carries_size_and_recover(client: TestClient) -> None:
+    """列表要能排序与权衡：每项带占用大小，以及「删了怎么恢复」。"""
+    run_id = client.post("/api/scan", json={"quick": False, "workers": 2}).json()["run_id"]
+    data = client.get(f"/api/runs/{run_id}").json()
+
+    hits = data["pending_auto_hits"]
+    assert hits
+    for h in hits:
+        assert h["recover"], f"{h['path']} 没说删了怎么恢复"
+        assert h["size_bytes"] >= 0, "占用必须算出来，否则用户没法按大小权衡"
+    # 夹具里 node_modules 有内容，全 0 就说明 size 根本没算
+    assert any(h["size_bytes"] > 0 for h in hits), "所有命中项大小都是 0，size 没算"
+
+
+def test_frontend_shows_size_and_recover() -> None:
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "function sizeText" in js
+    assert "删了怎么办" in js
+    body = _js_function(js, "renderPending")
+    assert "size_bytes" in body and ".sort(" in body, "命中项应按占用降序排列"

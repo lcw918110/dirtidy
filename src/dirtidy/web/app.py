@@ -167,13 +167,25 @@ def _pack_detail(pack_id: str) -> dict[str, Any]:
     }
 
 
+# 一次最多给多少条算占用空间。超过就整批不算（-1），而不是算一半——
+# 「有的有大小、有的没有」比「都没有」更让人怀疑数据坏了。
+MAX_SIZE_ENTRIES = 300
+
+# 这几类候选由 hashing 模块生成，规则包里查不到，但用户同样需要知道「删了会怎样」。
+BUILTIN_RECOVER: dict[str, str] = {
+    "duplicate_content": "保留任意一份即可，其余删掉不影响",
+    "archive_hash_match": "磁盘文件与压缩包里的成员逐字节相同，压缩包留着就行",
+}
+
+
 def _attach_advice(
     entries: list[Any],
     *,
+    root: Path,
     rules: dict[str, dict[str, Any]],
     purge_ids: set[str],
 ) -> None:
-    """给命中项 / 候选补上「这是什么、建议怎么办、动了会怎样」。
+    """给命中项 / 候选补上「这是什么、建议怎么办、动了会怎样、删了怎么恢复」。
 
     为什么在服务端算而不是前端算：建议必须与真正执行的动作同源。前端一旦自己
     按 `rule_id` 拼措辞，规则包改了名或加了 `purge_safe`，界面就会说「可以清理」
@@ -182,7 +194,12 @@ def _attach_advice(
     `action` 的取值顺序有讲究：**产物里记的优先**。扫描当时的判定才是这个 run 的
     事实，事后改规则包不该让历史 run 的说辞跟着变（否则用户对着旧 run 做决策，
     依据的却是新规则）。
+
+    `size_bytes` 是用户排序与判断的第一依据——市面上的清理工具（Windows 磁盘清理、
+    CleanMyMac、dupeGuru）每一项都带大小，没有大小的列表只能靠猜。
+    条目太多时不算（`-1`），避免一个几千项的 run 把页面拖死。
     """
+    too_many = len(entries) > MAX_SIZE_ENTRIES
     for e in entries:
         if not isinstance(e, dict):
             continue
@@ -200,6 +217,28 @@ def _attach_advice(
         # 中文说明：产物里有就用产物的，没有才回落到当前规则包。
         if not e.get("rule_reason"):
             e["rule_reason"] = str(e.get("reason") or rule.get("reason") or "")
+        # 「删了怎么恢复」比「可以清理」更能让人敢下手：说清代价，而不是给个形容词。
+        e["recover"] = str(rule.get("recover") or BUILTIN_RECOVER.get(rid) or "")
+        e["size_bytes"] = -1 if too_many else _entry_size(root, e)
+
+
+def _entry_size(root: Path, entry: dict[str, Any]) -> int:
+    """一条命中项占多少字节。路径可能是单个 `path`，也可能是候选的 `paths` 列表。"""
+    rels: list[str] = []
+    if entry.get("path"):
+        rels.append(str(entry["path"]))
+    for p in entry.get("paths") or []:
+        rels.append(str(p))
+    total = 0
+    for rel in rels:
+        try:
+            target = root / rel
+            if target.exists():
+                total += tree_size(target)
+        except OSError:
+            # 没权限 / 读一半消失：算 0，不让一条坏路径拖垮整个列表。
+            continue
+    return total
 
 
 def _rule_context(
@@ -356,7 +395,9 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
         rules, purge_ids = _rule_context(str(meta.get("rules") or "default"), default_root)
         for key in ("pending_auto_hits", "candidates"):
             if isinstance(out.get(key), list):
-                _attach_advice(out[key], rules=rules, purge_ids=purge_ids)
+                _attach_advice(
+                    out[key], root=default_root, rules=rules, purge_ids=purge_ids
+                )
         out["auto_purge_rules"] = sorted(purge_ids)
         return out
 

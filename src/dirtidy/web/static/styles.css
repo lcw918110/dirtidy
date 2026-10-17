@@ -181,6 +181,21 @@ select:disabled, input:disabled, textarea:disabled {
 .badge-ai { color: var(--accent); border-color: #b6d5c6; background: #dcece4; }
 .tiny { font-size: 0.76rem; color: var(--muted); line-height: 1.45; margin-top: 0.15rem; }
 
+/* 占用列右对齐 + 等宽数字：竖着比大小时，个位不对齐就看不出谁更大 */
+td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* 四色图例：颜色必须配解释，否则用户只能猜绿的好还是橙的好 */
+.legend {
+  display: flex;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 0 0 1rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.legend .advice { margin-right: 0.15rem; }
+
 /* 扫描页的结论句：整页第一眼看到的就是它，比正文略大一点 */
 .lead { font-size: 1rem; margin: 0 0 0.2rem; line-height: 1.5; }
 
