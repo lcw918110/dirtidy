@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from dirtidy.advice import describe
 from dirtidy.ai.providers import analyze_run
 from dirtidy.decision.store import apply_decisions, save_decisions
 from dirtidy.explain import explain_path
@@ -166,6 +167,62 @@ def _pack_detail(pack_id: str) -> dict[str, Any]:
     }
 
 
+def _attach_advice(
+    entries: list[Any],
+    *,
+    rules: dict[str, dict[str, Any]],
+    purge_ids: set[str],
+) -> None:
+    """给命中项 / 候选补上「这是什么、建议怎么办、动了会怎样」。
+
+    为什么在服务端算而不是前端算：建议必须与真正执行的动作同源。前端一旦自己
+    按 `rule_id` 拼措辞，规则包改了名或加了 `purge_safe`，界面就会说「可以清理」
+    而实际是「直接删除」——正是本项目反复出现的「界面看起来做了、实际没做」。
+
+    `action` 的取值顺序有讲究：**产物里记的优先**。扫描当时的判定才是这个 run 的
+    事实，事后改规则包不该让历史 run 的说辞跟着变（否则用户对着旧 run 做决策，
+    依据的却是新规则）。
+    """
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        rid = str(e.get("rule_id") or "")
+        rule = rules.get(rid) or {}
+        raw_meta = e.get("meta")
+        meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+        action = str(
+            e.get("action") or meta.get("action") or rule.get("action") or "candidate_only"
+        )
+        purge_safe = bool(rule.get("purge_safe"))
+        e.update(
+            describe(action=action, purge_safe=purge_safe, purge_enabled=rid in purge_ids)
+        )
+        # 中文说明：产物里有就用产物的，没有才回落到当前规则包。
+        if not e.get("rule_reason"):
+            e["rule_reason"] = str(e.get("reason") or rule.get("reason") or "")
+
+
+def _rule_context(
+    pack_id: str, root: Path
+) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    """当前生效规则包的 `rule_id → 规则定义`，以及用户开了直删的规则 id。
+
+    规则包读不到就退化成空映射：列表照样能看，只是建议一律落到「需要你判断」。
+    **宁可少说，不要瞎说**——把读不到规则包硬当成「建议清理」，比不显示建议糟得多。
+    """
+    purge_ids = set(load_auto_purge_rules(root))
+    try:
+        pack = load_rule_pack(pack_id)
+    except (FileNotFoundError, RulePackError):
+        return {}, purge_ids
+    rules = {
+        str(r.get("id")): r
+        for r in pack.get("rules") or []
+        if isinstance(r, dict) and r.get("id")
+    }
+    return rules, purge_ids
+
+
 def create_app(*, default_root: Path, default_run_id: str | None = None) -> FastAPI:
     app = FastAPI(title="dirtidy", version="0.1.0")
     static_dir = Path(__file__).resolve().parent / "static"
@@ -294,7 +351,13 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
         entries, summary = _quarantine_view(rdir)
         out["quarantine_manifest"] = entries
         out["quarantine_summary"] = summary
-        out["auto_purge_rules"] = load_auto_purge_rules(default_root)
+        raw_meta = out.get("meta")
+        meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+        rules, purge_ids = _rule_context(str(meta.get("rules") or "default"), default_root)
+        for key in ("pending_auto_hits", "candidates"):
+            if isinstance(out.get(key), list):
+                _attach_advice(out[key], rules=rules, purge_ids=purge_ids)
+        out["auto_purge_rules"] = sorted(purge_ids)
         return out
 
     @app.put("/api/runs/{run_id}/decisions")

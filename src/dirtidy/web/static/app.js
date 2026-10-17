@@ -156,6 +156,22 @@ const DECISION_LABELS = {
   archive: "归档",
 };
 
+/* 建议标签。判定在 `dirtidy/advice.py`，这里只负责好看。
+   刻意**不在前端按 rule_id 拼措辞**：那会变成第二份判定，规则包一改名或加
+   `purge_safe`，界面就会说「可以清理」而实际执行是「直接删除」——本项目
+   已经四次栽在「同一个判定写两份」上（详见 docs/06）。 */
+const ADVICE_KINDS = ["safe_clean", "clean", "review", "protected"];
+
+function adviceTag(entry) {
+  const advice = ADVICE_KINDS.includes(entry.advice) ? entry.advice : "review";
+  const hint = entry.advice_hint || "";
+  return el("span", {
+    cls: `advice advice-${advice}`,
+    text: entry.advice_label || "需要你判断",
+    attrs: hint ? { title: hint } : {},
+  });
+}
+
 function decisionFor(path) {
   return decisions.get(path) || { path, action: "keep", target_relpath: "", note: "" };
 }
@@ -329,17 +345,122 @@ function renderOverview(data) {
     : "本轮尚未执行自动隔离。";
 }
 
+/* --------------------------- 扫描页：本次结果 --------------------------- */
+
+/* 扫描页原先只写一行「已生成 run」，扫完立刻跳到审阅页——用户在扫描页
+   找不到任何结果，回头再看也只剩那行字。这里补上「这次扫出了什么」：
+   一句结论 + 按规则分组的清单。
+
+   分组键用规则的中文说明（同一条规则的命中归一组），不是 rule_id：
+   用户想知道的是「哪一类东西占了地方」，不是内部编号。 */
+function renderScanSummary(data) {
+  const box = document.getElementById("scanResult");
+  if (!box) return;
+  clear(box);
+  const meta = data.meta || {};
+  const hits = data.pending_auto_hits || [];
+  const cands = data.candidates || [];
+  const protectedCount =
+    Number(meta.protected_blocked || 0) + Number(meta.protected_blocked_by_descendant || 0);
+
+  if (!meta.run_id) {
+    box.appendChild(el("p", { cls: "hint", text: "还没有扫描结果。点上面的「开始扫描」。" }));
+    return;
+  }
+
+  const byAdvice = { safe_clean: 0, clean: 0, review: 0 };
+  for (const h of hits) {
+    const k = ADVICE_KINDS.includes(h.advice) ? h.advice : "review";
+    byAdvice[k] += 1;
+  }
+  const cleanable = byAdvice.safe_clean + byAdvice.clean;
+
+  const bits = [];
+  if (cleanable) {
+    // 措辞与标签对齐：safe_clean 才叫「建议清理」，clean 只是「可以清理」。
+    // 混着说会让用户以为 4 项都一样急。
+    bits.push(`规则判定可清理 ${cleanable} 项（其中 ${byAdvice.safe_clean} 项重建成本为零）`);
+  }
+  if (cands.length) bits.push(`${cands.length} 项需要你判断`);
+  if (protectedCount) bits.push(`${protectedCount} 项被保护拦下`);
+  if (!bits.length) bits.push("没有发现可清理的项");
+
+  box.appendChild(el("p", { cls: "lead", text: `本次扫描：${bits.join("；")}。` }));
+  box.appendChild(
+    el("p", {
+      cls: "hint",
+      text: "扫描只读，没有移动或删除任何文件。下面按规则分组，展开可看具体是哪些。",
+    }),
+  );
+
+  const groups = new Map();
+  for (const h of hits) {
+    const key = h.rule_id || "-";
+    if (!groups.has(key)) groups.set(key, { rule_id: key, sample: h, paths: [] });
+    groups.get(key).paths.push(h);
+  }
+  for (const g of groups.values()) box.appendChild(scanGroup(g));
+  if (!groups.size) {
+    box.appendChild(el("p", { cls: "empty-note", text: "本轮没有规则命中项。" }));
+  }
+
+  const bar = el("div", { cls: "toolbar" });
+  const total = hits.length + cands.length;
+  const go = el("button", {
+    cls: "primary",
+    text: total ? `去审阅页逐条确认（${total} 项）` : "去审阅页",
+    attrs: { type: "button" },
+  });
+  go.onclick = () => showTab("review");
+  bar.appendChild(go);
+  box.appendChild(bar);
+}
+
+/* 一条规则一组：建议标签 + 中文说明 + 条数，具体文件收进折叠区。
+   全摊开会把扫描页撑成几百行，而用户第一眼只需要知道「有几类、各多少」。 */
+function scanGroup(g) {
+  const wrap = el("div", { cls: "scan-group" });
+  const head = el("div", { cls: "scan-group-head" });
+  head.appendChild(adviceTag(g.sample));
+  const title = el("div", { cls: "scan-group-title" });
+  title.appendChild(
+    el("strong", { text: g.sample.rule_reason || g.sample.reason || "（规则未给出说明）" }),
+  );
+  title.appendChild(
+    el("span", { cls: "tiny", text: `${g.paths.length} 项 · 规则 ${g.rule_id}` }),
+  );
+  head.appendChild(title);
+  wrap.appendChild(head);
+
+  const det = document.createElement("details");
+  det.appendChild(el("summary", { text: `展开这 ${g.paths.length} 项` }));
+  for (const h of g.paths) {
+    const line = el("div", { cls: "rowline" });
+    line.appendChild(el("code", { text: h.path }));
+    if (h.is_dir) line.appendChild(el("span", { cls: "badge", text: "目录" }));
+    if (h.effect_label) line.appendChild(el("span", { cls: "tiny", text: h.effect_label }));
+    line.appendChild(whyButton(h.path));
+    det.appendChild(line);
+  }
+  wrap.appendChild(det);
+  return wrap;
+}
+
 /* ------------------------------- 待自动隔离 ------------------------------- */
 
 /* 待自动隔离：规则已经判定要搬走、但还没执行的项。
-   这是「不误删」的终审入口——没有它，用户在网页上根本看不到规则打算动什么。 */
+   这是「不误删」的终审入口——没有它，用户在网页上根本看不到规则打算动什么。
+
+   列的顺序按「用户做决定要问的问题」排，不按数据结构排：
+   路径 → 这是什么（中文说明）→ 建议怎么办 → 动了会怎样。
+   规则 ID 不是给人看的，缩成小字放说明下面；原先它占着「命中规则」一整列，
+   用户看到 `dep_node_modules` 只能猜。 */
 function renderPending(data) {
   const tbody = document.getElementById("pendingRows");
   clear(tbody);
   const hits = data.pending_auto_hits || [];
-  const purgeRules = new Set(data.auto_purge_rules || []);
   if (!hits.length) {
-    emptyRow(tbody, 6, "本轮没有规则命中项。切到「扫描」页跑一次，或换一个 run。");
+    emptyRow(tbody, 5, "本轮没有规则命中项。切到「扫描」页跑一次，或换一个 run。");
   }
   // 命中目录会覆盖其内的文件命中（执行时只搬父目录）。这里把它标出来——
   // 否则页面写着「N 项」而实际只搬走更少，用户按数字核对会以为漏了。
@@ -362,20 +483,31 @@ function renderPending(data) {
     const tdPath = document.createElement("td");
     tdPath.appendChild(el("code", { text: h.path }));
     tdPath.appendChild(whyButton(h.path));
+    if (h.is_dir) tdPath.appendChild(el("span", { cls: "badge", text: "目录" }));
+    if (coveredByParent(h.path)) {
+      tdPath.appendChild(
+        el("span", {
+          cls: "badge",
+          text: "已含在上层目录里",
+          attrs: { title: "执行时只搬父目录，这一条不会单独搬走" },
+        }),
+      );
+    }
     tr.appendChild(tdPath);
 
-    tr.appendChild(el("td", { text: h.rule_id }));
-    tr.appendChild(
-      el("td", {
-        text: `${h.is_dir ? "目录" : "文件"}${coveredByParent(h.path) ? "（已被上层目录覆盖）" : ""}`,
-      }),
-    );
-    tr.appendChild(el("td", { text: h.reason || "" }));
-    tr.appendChild(
-      el("td", {
-        text: purgeRules.has(h.rule_id) ? "是（搬入后即物理删除）" : "否（只进隔离区）",
-      }),
-    );
+    // 这是什么：中文说明为主，规则 ID 退成小字（要排查时还在，不占视线）
+    const tdWhat = document.createElement("td");
+    tdWhat.appendChild(el("div", { text: h.rule_reason || h.reason || "（规则未给出说明）" }));
+    if (h.rule_id) tdWhat.appendChild(el("div", { cls: "tiny", text: `规则 ${h.rule_id}` }));
+    tr.appendChild(tdWhat);
+
+    const tdAdvice = document.createElement("td");
+    tdAdvice.appendChild(adviceTag(h));
+    tr.appendChild(tdAdvice);
+
+    // 动了会怎样：可还原 / 不可还原，比「是 / 否」有用得多
+    tr.appendChild(el("td", { text: h.effect_label || "搬进隔离区（可还原）" }));
+
     tbody.appendChild(tr);
   }
 
@@ -460,7 +592,10 @@ function renderQuarantine(data) {
     tdPath.appendChild(whyButton(e.original_path));
     tr.appendChild(tdPath);
 
-    tr.appendChild(el("td", { text: e.rule_id || "-" }));
+    // 原因在前、规则 ID 在后：用户要判断「这条要不要还原」，先看的是「为什么被搬走」，
+    // 规则编号只在排查时才有用。
+    tr.appendChild(el("td", { text: e.reason || "-" }));
+    tr.appendChild(el("td", { cls: "tiny", text: e.rule_id || "-" }));
     tr.appendChild(el("td", { text: e.is_dir ? "目录" : "文件" }));
     // 用后端实算的 size_actual：清单里的 size 对目录恒为 0，
     // 逐行显示 0 B 而合计显示 293 KB 会自相矛盾。
@@ -468,7 +603,6 @@ function renderQuarantine(data) {
       el("td", { text: e.exists === false ? "已不在磁盘" : humanSize(e.size_actual) }),
     );
     tr.appendChild(el("td", { text: e.quarantined_at || "" }));
-    tr.appendChild(el("td", { text: e.reason || "" }));
     tbody.appendChild(tr);
   }
 
@@ -546,11 +680,17 @@ function renderReview(data) {
   for (const s of data.ai_suggestions || []) suggestions[s.path] = s;
   currentSuggestions = suggestions;
 
-  // 非重复组的候选 + AI 建议路径并集
+  // 非重复组的候选 + AI 建议路径并集。
+  // 同时建一份 path → 候选，因为「为什么它在列表里」这句中文在候选对象上，
+  // 摊平成路径列表后就丢了——原先那一列只能显示 `candidate` 这个内部词。
+  const candByPath = new Map();
   const paths = new Set();
   for (const c of data.candidates || []) {
     if (c.kind === "duplicate_group") continue;
-    for (const p of c.paths || []) paths.add(p);
+    for (const p of c.paths || []) {
+      paths.add(p);
+      candByPath.set(p, c);
+    }
   }
   for (const p of Object.keys(suggestions)) paths.add(p);
 
@@ -559,6 +699,7 @@ function renderReview(data) {
   }
   for (const path of [...paths].sort()) {
     const sug = suggestions[path];
+    const cand = candByPath.get(path) || {};
     // 唯一真相是 decisions（默认 keep）。这里**刻意不按建议预填**：
     // 预填只写 DOM、不进 decisions，用户看着预填内容点「执行」会以为已采纳，
     // 实际什么都不发生。要采纳就点「采纳全部建议」，那是显式的。
@@ -570,12 +711,32 @@ function renderReview(data) {
     tdPath.appendChild(whyButton(path));
     tr.appendChild(tdPath);
 
-    tr.appendChild(el("td", { text: sug ? "ai" : "candidate" }));
-    tr.appendChild(
-      el("td", {
-        text: sug ? `${sug.action} / ${sug.asset_type || ""} (${sug.confidence ?? ""})` : "-",
+    // 为什么在列表里：谁把它挑出来的 + 中文原因
+    const tdWhy = document.createElement("td");
+    tdWhy.appendChild(
+      el("span", {
+        cls: sug ? "badge badge-ai" : "badge",
+        text: sug ? "模型建议" : "规则候选",
       }),
     );
+    const why = cand.rule_reason || cand.reason || "";
+    if (why) tdWhy.appendChild(el("div", { cls: "tiny", text: why }));
+    tr.appendChild(tdWhy);
+
+    // 建议：规则给的是「需要你判断」，模型给了就一并摆出来（仍然只是参考）
+    const tdAdvice = document.createElement("td");
+    tdAdvice.appendChild(adviceTag(cand.advice ? cand : { advice: "review" }));
+    if (sug) {
+      const conf = Number(sug.confidence);
+      const pct = Number.isFinite(conf) ? `（置信度 ${Math.round(conf > 1 ? conf : conf * 100)}%）` : "";
+      tdAdvice.appendChild(
+        el("div", {
+          cls: "tiny",
+          text: `模型：${DECISION_LABELS[sug.action] || sug.action}${pct}`,
+        }),
+      );
+    }
+    tr.appendChild(tdAdvice);
 
     const tdAct = document.createElement("td");
     const sel = el("select", { cls: "act", attrs: { "data-path": path } });
@@ -956,6 +1117,7 @@ async function loadRun(runId) {
   for (const d of data.decisions || []) decisions.set(d.path, d);
   renderPartialWarning(data);
   renderOverview(data);
+  renderScanSummary(data);
   renderReview(data);
   renderQuarantine(data);
   // 这里刻意不写状态条：动作类操作会先 setStatus(结果) 再 loadRun，
@@ -1079,14 +1241,12 @@ document.getElementById("scanBtn").onclick = async () => {
       }),
     });
     setStatus(res);
-    const box = document.getElementById("scanResult");
-    clear(box);
-    box.appendChild(el("div", { text: `已生成 run：${res.run_id}` }));
-    if (res.applied) box.appendChild(el("div", { text: "已按设置执行自动隔离。" }));
     await loadRuns();
     document.getElementById("runSelect").value = res.run_id;
     await loadRun(res.run_id);
-    showTab("review");
+    // 不再自动跳到审阅页：扫描页自己就有结果摘要（renderScanSummary），
+    // 用户先看清「扫出了什么」再决定要不要进去逐条确认。自动跳走会让扫描页
+    // 永远只剩一行「已生成 run」——用户回头找结果时一无所获。
   } catch (e) {
     setStatus(e, { error: true });
   } finally {
