@@ -76,6 +76,21 @@ def advice_for(*, action: str, purge_safe: bool = False) -> str:
     return ADVICE_REVIEW
 
 
+def purge_allowed(*, purge_safe: bool, purge_enabled: bool) -> bool:
+    """**真正会不会物理删除**——本项目里这个判定只此一处。
+
+    规则必须同时满足两个条件：
+    ① 规则包上标了 `purge_safe`（「重建成本为零、确定无用」）；
+    ② 用户在设置里把这条规则列进了 `auto_purge_rules`。
+
+    只查 ② 是漏洞：界面上会出现「动了会怎样：搬进隔离区（可还原）」，
+    实际执行却把目录 `rmtree` 了。`effect_for` 与 `pipeline.apply_pending_rules`
+    都必须调用这里，不允许任何一方自己写一份 `and` 条件——
+    判定一旦写成两份，漂移的那一份就是用户数据消失的地方。
+    """
+    return bool(purge_safe and purge_enabled)
+
+
 def effect_for(*, action: str, purge_safe: bool = False, purge_enabled: bool = False) -> str:
     """规则动作 + 用户是否对该规则开了直删 → 真正会发生什么。
 
@@ -88,7 +103,7 @@ def effect_for(*, action: str, purge_safe: bool = False, purge_enabled: bool = F
     if action != "auto_quarantine":
         # 候选只是「列出来给人看」，不会自己动；选了什么才发生什么。
         return EFFECT_KEEP
-    if purge_safe and purge_enabled:
+    if purge_allowed(purge_safe=purge_safe, purge_enabled=purge_enabled):
         return EFFECT_PURGE
     return EFFECT_QUARANTINE
 

@@ -503,7 +503,7 @@ def sweep_empty_dirs(
     manifest_path: Path,
     *,
     max_rounds: int = 8,
-    is_protected: ProtectCheck | None = None,
+    is_protected: ProtectCheck,
 ) -> list[QuarantineEntry]:
     """隔离子项后，多轮把新变成空的父目录也隔离，直到稳定或达到轮数上限。
 
@@ -511,6 +511,11 @@ def sweep_empty_dirs(
 
     实现上只在**被隔离条目的祖先目录**上展开，不再整棵树 `os.walk`：
     原实现最多 8 轮全树遍历，几百万文件时开销是灾难性的；现在代价与隔离条目数成正比。
+
+    `is_protected` 是**必填**的（与 `quarantine_hits` 一致）。它原先默认 `None`，
+    调用方漏传时会被静默当成「没有受保护路径」——这正是 `scan --apply` 那条
+    历史漏洞的形态。没有保护的场景请显式传 `nothing_protected`，让「我确认这里
+    不需要保护」写在代码里，而不是藏在默认值里。
     """
     quarantine_dir.mkdir(parents=True, exist_ok=True)
     manifest = _read_manifest(manifest_path)
@@ -560,7 +565,7 @@ def sweep_empty_dirs(
             hits,
             quarantine_dir,
             manifest_path,
-            is_protected=is_protected or nothing_protected,
+            is_protected=is_protected,
         )
         after = len(_read_manifest(manifest_path))
         done.update(empties)

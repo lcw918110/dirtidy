@@ -415,7 +415,16 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
         return {"runs": out}
 
     def _run_path(run_id: str) -> Path:
-        p = run_dir(default_root, run_id)
+        """把 URL 里的 run_id 解析成目录；非法 id 是 4xx，不是 500。
+
+        `run_dir` 会对非法 run_id 抛 `ValueError`（防路径逃逸）。不接住的话
+        FastAPI 会把它翻成 500，前端只能显示「服务器错误」，而真实原因是
+        「这个 id 不合法」——用户无从判断是自己传错了还是服务坏了。
+        """
+        try:
+            p = run_dir(default_root, run_id)
+        except ValueError as exc:
+            raise HTTPException(400, f"run_id 非法: {run_id}") from exc
         if not p.exists():
             raise HTTPException(404, f"run 不存在: {run_id}")
         return p

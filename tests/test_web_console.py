@@ -127,6 +127,27 @@ def test_web_run_detail_exposes_auto_purge_rules(client: TestClient) -> None:
     assert detail["auto_purge_rules"] == ["dep_python_cache"]
 
 
+@pytest.mark.parametrize("bad_run_id", ["%2e%2e", "%2e", "C:evil"])
+def test_web_rejects_an_illegal_run_id_as_4xx(client: TestClient, bad_run_id: str) -> None:
+    """非法 run_id 是「你传错了」（4xx），不是「服务器坏了」（500）。
+
+    回归背景：`run_dir` 为防路径逃逸会对非法 id 抛 `ValueError`，而接口层没接住，
+    FastAPI 把它翻成 500 Internal Server Error 并吞掉原因——用户只看到「服务器错误」，
+    无从判断是自己写错了还是服务崩了；运维也拿不到「其实是输入非法」这个信息。
+
+    用 URL 编码形态（`%2e%2e`）而不是裸 `..`：裸 `..` 会被 HTTP 客户端在拼 URL 时就规范化掉，
+    请求压根到不了处理器，测出来的是「客户端拦的」而不是「服务端拦的」。
+    """
+    resp = client.get(f"/api/runs/{bad_run_id}")
+    assert resp.status_code == 400, resp.text
+    assert "run_id" in resp.json()["detail"]
+
+
+def test_web_missing_run_is_404_not_400(client: TestClient) -> None:
+    """合法但不存在 = 404。别把「没找到」也说成「非法」，否则前端分不清该不该重试。"""
+    assert client.get("/api/runs/20260101-000000").status_code == 404
+
+
 # --------------------------------- 模型 ---------------------------------
 
 

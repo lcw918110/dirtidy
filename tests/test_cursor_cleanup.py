@@ -23,6 +23,7 @@ from dirtidy.cursor_cleanup import (
     analyze,
     clean,
     collect_referenced_hashes,
+    default_backup_dir,
     delete_orphan_blobs,
     human_bytes,
     list_all_key_prefixes,
@@ -232,7 +233,7 @@ def test_item_table_is_never_deleted(mini_db: Path) -> None:
     before = _item_table_count(mini_db)
     assert before == 1
 
-    report = clean(mini_db, days=90, vacuum=False, blob_pause=0)
+    report = clean(mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=mini_db.parent / "bk1")
 
     assert _item_table_count(mini_db) == before
     assert report.mode == "clean"
@@ -240,7 +241,7 @@ def test_item_table_is_never_deleted(mini_db: Path) -> None:
 
 def test_clean_removes_orphan_blobs_and_keeps_referenced(mini_db: Path) -> None:
     """端到端：真正清理后，被引用的 blob 还在，孤儿没了，ItemTable 还在。"""
-    clean(mini_db, days=90, vacuum=False, blob_pause=0)
+    clean(mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=mini_db.parent / "bk2")
 
     remaining = _blob_keys(mini_db)
     assert f"{BLOB_PREFIX}{HASH_REFERENCED}" in remaining, "被引用的 blob 不该被删"
@@ -248,6 +249,148 @@ def test_clean_removes_orphan_blobs_and_keeps_referenced(mini_db: Path) -> None:
     assert f"{BLOB_PREFIX}{HASH_ORPHAN_1}" not in remaining
     assert f"{BLOB_PREFIX}{HASH_ORPHAN_2}" not in remaining
     assert _item_table_count(mini_db) == 1
+
+
+def test_default_backup_dir_follows_the_database_not_home(mini_db: Path) -> None:
+    """备份目录默认跟着**被清理的库**走，绝不写死用户 HOME。
+
+    回归背景：`default_backup_dir()` 原先硬编码 `~/Library/Application Support/
+    Cursor/User/globalStorage/...`，而 13 个用例都调 `clean(临时库)` 且不传
+    `backup_dir` —— 于是每跑一次测试就往**真实的 Cursor 应用目录**里塞一个备份目录，
+    实测在开发机上留下 17 个。CI 的 Linux/Windows 上没有这个路径，
+    `mkdir(parents=True)` 还会在那里造出多层不存在的目录。
+
+    这条用例守的是「跑测试不许碰真实 HOME」。
+    """
+    d = default_backup_dir(mini_db)
+    assert d.parent == mini_db.parent, f"备份没跟着库走：{d}"
+    assert "CursorStateBackup-" in d.name
+    home_cursor = Path.home() / "Library/Application Support/Cursor/User/globalStorage"
+    assert home_cursor not in d.parents, f"备份落进了真实 Cursor 目录：{d}"
+
+
+def test_clean_without_explicit_backup_dir_never_touches_home(mini_db: Path) -> None:
+    """不传 `backup_dir` 时，备份也必须落在临时库里，而不是真实 HOME。
+
+    与上一条配合：上一条测「算出来的路径」，这条测「`clean()` 真的用了它」。
+    只测前者的话，`clean()` 里另写一个默认值仍然会漏。
+    """
+    home_cursor = Path.home() / "Library/Application Support/Cursor/User/globalStorage"
+    before = set(home_cursor.glob("CursorStateBackup-*")) if home_cursor.exists() else set()
+
+    clean(mini_db, days=90, vacuum=False, blob_pause=0)
+
+    after = set(home_cursor.glob("CursorStateBackup-*")) if home_cursor.exists() else set()
+    assert after == before, f"clean() 往真实 Cursor 目录写了备份：{sorted(after - before)}"
+    assert list(mini_db.parent.glob("CursorStateBackup-*")), "备份应该落在库旁边"
+
+
+def test_default_db_path_is_not_macos_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """三个平台各有各的默认库路径，不能写死 macOS。
+
+    写死 macOS 的后果：Linux/Windows 上 `dirtidy cursor-cleanup` 一上手就报
+    「找不到数据库」，功能在这两个平台等于不存在。
+
+    注：Windows 分支在 POSIX 上无法真正构造 `WindowsPath`（pathlib 会拒），
+    所以这里只校验**拼出来的字符串**，用 `PurePath` 的思路绕开实例化。
+    """
+    import dirtidy.cursor_cleanup as cc
+
+    monkeypatch.setattr(cc.sys, "platform", "darwin")
+    monkeypatch.setattr(cc.os, "name", "posix")
+    assert "Library/Application Support/Cursor/User/globalStorage/state.vscdb" in (
+        cc.default_db_path().as_posix()
+    )
+
+    monkeypatch.setattr(cc.sys, "platform", "linux")
+    assert cc.default_db_path().as_posix().endswith(
+        ".config/Cursor/User/globalStorage/state.vscdb"
+    ), f"Linux 默认路径不对：{cc.default_db_path()}"
+
+    # Windows 分支：把 Path 换成 PureWindowsPath 才能在本机构造并比较
+    from pathlib import PureWindowsPath
+
+    monkeypatch.setattr(cc.os, "name", "nt")
+    monkeypatch.setenv("APPDATA", r"C:\Users\x\AppData\Roaming")
+    monkeypatch.setattr(cc, "Path", PureWindowsPath)
+    win = cc.default_db_path()
+    assert str(win).replace("\\", "/").endswith(
+        "Cursor/User/globalStorage/state.vscdb"
+    ), f"Windows 默认路径不对：{win}"
+    assert "Users/x/AppData/Roaming" in str(win).replace("\\", "/")
+
+
+def test_clean_writes_an_audit_trail_that_survives_a_crash(mini_db: Path, tmp_path: Path) -> None:
+    """清理过程要**边做边记**，不能只在跑完时写一份报告。
+
+    真实库删 blob 是分批做的（每批 500 行、批间暂停），全程几十分钟。中途被
+    Ctrl-C / 被杀掉时，内存里的结果直接蒸发——而这是**不可恢复**的删除，
+    用户既不知道删了多少，也无从查证。每阶段追加一行 JSONL，断了也留着记录。
+    """
+    bk = tmp_path / "bk"
+    clean(mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=bk)
+
+    log = bk / "dirtidy-cursor-cleanup.jsonl"
+    assert log.exists(), "没有审计日志"
+    events = [json.loads(line)["event"] for line in log.read_text().splitlines()]
+    # 顺序即执行顺序，最后一笔必须是 done——中途断了就不会有它
+    assert events[0] == "start"
+    assert events[-1] == "done"
+    for must in ("backup", "old_sessions", "orphan_sessions", "blob_plan", "blob_deleted"):
+        assert must in events, f"审计缺阶段 {must}：{events}"
+
+
+def test_clean_audit_records_an_abort_when_a_stage_blows_up(
+    mini_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """某个阶段炸了也要留一条 `aborted`——用户需要知道「删到第几阶段时断的」。"""
+    import dirtidy.cursor_cleanup as cc
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("模拟磁盘满")
+
+    monkeypatch.setattr(cc, "collect_referenced_hashes", boom)
+    bk = tmp_path / "bk"
+    with pytest.raises(RuntimeError, match="模拟磁盘满"):
+        clean(mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=bk)
+
+    log = bk / "dirtidy-cursor-cleanup.jsonl"
+    assert log.exists(), "失败时也必须留下审计"
+    recs = [json.loads(line) for line in log.read_text().splitlines()]
+    aborted = [r for r in recs if r["event"] == "aborted"]
+    assert aborted, f"缺 aborted 记录：{[r['event'] for r in recs]}"
+    assert "模拟磁盘满" in aborted[0]["error"]
+    # 断点之前已完成的阶段仍然有据可查
+    assert any(r["event"] == "orphan_sessions" for r in recs), "断点前的阶段记录丢了"
+
+
+def test_audit_records_the_replace_window_so_a_broken_vacuum_is_diagnosable(
+    mini_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """VACUUM / 替换阶段的失败也要留痕——那里的窗口最危险。
+
+    `os.replace(db, old_path)` 与 `os.replace(vacuumed_path, db)` 之间，
+    `state.vscdb` 这一刻**不存在**。若在此被打断而日志里什么都没写，
+    用户打开目录看到库不见了、旁边多了个 `state.vscdb.pre-cleanup`，
+    完全无从判断发生了什么。故先记 `replacing`，失败再记 `aborted`。
+    """
+    import dirtidy.cursor_cleanup as cc
+
+    def bad_verify(path):
+        raise RuntimeError("模拟校验不过")
+
+    monkeypatch.setattr(cc, "verify_database", bad_verify)
+    bk = tmp_path / "bk"
+    with pytest.raises(RuntimeError, match="模拟校验不过"):
+        clean(mini_db, days=90, vacuum=True, blob_pause=0, backup_dir=bk)
+
+    recs = [json.loads(line) for line in (bk / "dirtidy-cursor-cleanup.jsonl").read_text().splitlines()]
+    names = [r["event"] for r in recs]
+    assert "aborted" in names, f"VACUUM 阶段失败没留痕：{names}"
+    aborted = next(r for r in recs if r["event"] == "aborted")
+    assert aborted["stage"] == "vacuum", f"阶段记错了：{aborted['stage']}"
+    # 库必须还在原地：校验不过就绝不能替换
+    assert mini_db.exists(), "校验不过却把原库换掉了"
 
 
 def test_analyze_does_not_touch_the_database(mini_db: Path) -> None:
@@ -298,9 +441,21 @@ def test_cursor_cleanup_cli_is_dry_run_by_default(mini_db: Path) -> None:
     assert mini_db.read_bytes() == before, "没加 --apply 却改了库"
 
 
-def test_cursor_cleanup_cli_requires_apply_to_mutate(mini_db: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """干跑输出必须是 JSON 且标明是干跑；`--apply` 才会真正删。"""
+def test_cursor_cleanup_cli_requires_apply_to_mutate(
+    mini_db: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """干跑输出必须是 JSON 且标明是干跑；`--apply` 才会真正删。
+
+    这里显式把 `cursor_running` 打桩成 False：`cursor_running` 现在是 fail-closed 的
+    （取不到进程列表就报「在跑」），而测试环境里 `ps` 可能被沙箱拦掉。
+    这条用例要测的是「干跑 vs --apply」，不是「Cursor 在跑时会不会拒绝」——
+    后者由 `test_cursor_cleanup_cli_refuses_while_cursor_runs` 负责。
+    """
     from dirtidy.cli import main
+
+    monkeypatch.setattr("dirtidy.cursor_cleanup.cursor_running", lambda: False)
 
     rc = main(["cursor-cleanup", "--db", str(mini_db)])
     assert rc == 0
@@ -334,12 +489,20 @@ def test_cursor_cleanup_cli_refuses_while_cursor_runs(
     assert _blob_keys(mini_db), "库不该被动过"
 
 
-def test_cursor_running_does_not_crash_when_ps_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`ps` 不可用时宁可误报为「在跑」也不能崩——崩了就等于没保护。"""
+def test_cursor_running_is_fail_closed_when_ps_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """取不到进程列表时必须报「在跑」（拒绝清理），而不是放行。
+
+    这里的**方向不能反**。返回 False 的语义是「可以放心改库」；判断不了却给 False，
+    就等于在 Cursor 正在写库时拆它的库。
+
+    回归背景：原实现在 `ps` 不存在时直接 `return False`，而这条用例当时断言的正是
+    `is False`——把 fail-open 这个 bug 固化成「正确行为」了。Windows 上没有 `ps`，
+    于是 `--apply` 在最需要保护的平台上畅通无阻。
+    """
     import dirtidy.cursor_cleanup as cc
 
     def boom(*args, **kwargs):
         raise FileNotFoundError("ps not found")
 
     monkeypatch.setattr(cc.subprocess, "check_output", boom)
-    assert cc.cursor_running() is False
+    assert cc.cursor_running() is True, "判断不了就要按「在跑」处理，不能放行"

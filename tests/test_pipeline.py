@@ -174,3 +174,37 @@ def test_purge_requires_yes_then_deletes(workspace: Path) -> None:
     assert qdir.exists()
     assert main(["purge-quarantine", str(workspace), meta["run_id"], "--yes"]) == 0
     assert not qdir.exists()
+    # 清单也要一起收敛，否则「已隔离」列表全是幽灵条目（按它还原则报「文件不存在」）
+    assert read_json(run_dir(workspace, meta["run_id"]) / "quarantine_manifest.json") == []
+
+
+@pytest.mark.parametrize("bad", ["..", "../..", "../../../victim", "a/b", "a\\b", "/etc", "C:evil", ""])
+def test_run_id_cannot_escape_the_state_directory(workspace: Path, bad: str) -> None:
+    """`run_id` 是纯外部输入，绝不能靠它把路径拼出状态目录之外。
+
+    回归背景：`run_dir` / `quarantine_root` 原先直接把 `run_id` 拼进路径，
+    `purge-quarantine <root> ../../../victim --yes` 的 `shutil.rmtree` 会把目标根
+    **之外**的任意目录整棵删掉（已复现：`victim/` 真的没了）；`..` 甚至能删掉整个
+    `.dirtidy/`，连全部审计历史一起。校验放在这两个函数自身——调用点有十几处，
+    每处各查一遍就是「同一个判定写多份」，漏掉的那处就是缝。
+    """
+    from dirtidy.cli import main
+
+    assert main(["purge-quarantine", str(workspace), bad, "--yes"]) == 2, (
+        f"非法 run_id {bad!r} 应该被拒绝（返回 2），而不是照做"
+    )
+
+
+def test_run_id_escape_is_refused_before_anything_is_deleted(workspace: Path) -> None:
+    """被拒绝时**一个字节都不许删**——不能先删了再报错。"""
+    from dirtidy.cli import main
+
+    victim = workspace.parent / "victim"
+    victim.mkdir()
+    (victim / "precious.txt").write_text("keep me", encoding="utf-8")
+    # 先让中间目录存在，否则 rmtree 会因路径不存在而「碰巧没删成」
+    (workspace / ".dirtidy" / "quarantine").mkdir(parents=True, exist_ok=True)
+
+    assert main(["purge-quarantine", str(workspace), "../../../victim", "--yes"]) == 2
+    assert victim.exists(), "目标根之外的目录被删了"
+    assert (victim / "precious.txt").exists(), "目标根之外的文件被删了"

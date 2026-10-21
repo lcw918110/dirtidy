@@ -7,6 +7,7 @@ from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any
 
+from dirtidy.advice import purge_allowed
 from dirtidy.audit.writer import write_audit_md, write_run_bundle
 from dirtidy.deadline import Deadline, RunTimeout
 from dirtidy.hashing.content import (
@@ -329,6 +330,7 @@ def apply_pending_rules(
         }
 
     purge_set = {str(r) for r in (purge_rule_ids or ()) if str(r).strip()}
+    requested_purge = purge_set  # 用户「想要」直删的规则，下面与「允许」的取交集
     user_kept: list[dict] = []
     if keep_set:
         survivors: list[RuleHit] = []
@@ -364,6 +366,22 @@ def apply_pending_rules(
                     break
     meta_early = read_json(rdir / "meta.json")
     pack = load_rule_pack(meta_early.get("rules") or "default")
+
+    # 「哪些规则真的允许物理删除」判定**只此一处**——委托给 `advice.purge_allowed`。
+    # 规则必须同时满足：① 被用户列进 settings.json 的 auto_purge_rules；
+    # ② 规则包上标了 purge_safe。
+    #
+    # 只查①是漏洞：`effect_for` 承诺「未标 purge_safe 的规则即使误开直删也不物理删除」，
+    # 而执行侧原先不查②——界面显示「搬进隔离区（可还原）」，实际却把目录 rmtree 了
+    # （已复现：`dep_python_venv` 未标 purge_safe，列进直删后 venv/ 被物理删除）。
+    purge_safe_ids = {
+        str(rule.get("id"))
+        for rule in (pack.get("rules") or [])
+        if purge_allowed(purge_safe=bool(rule.get("purge_safe")), purge_enabled=True)
+    }
+    purge_set = purge_set & purge_safe_ids
+    # 用户开了直删、但规则没标 purge_safe：不能静默当没看见，要留痕说明「为什么没删」。
+    refused_purge = sorted(requested_purge - purge_safe_ids)
 
     extra = protect_rules_from_paths(meta_early.get("protect") or [])
     guard = protect_guard(pack, extra)
@@ -403,6 +421,7 @@ def apply_pending_rules(
             "blocked_paths": [b["path"] for b in all_blocked],
             "kept_by_user": len(user_kept),
             "kept_paths": [u["path"] for u in user_kept],
+            "purge_refused": refused_purge,
         }
 
     if blocked or user_kept:
@@ -444,8 +463,7 @@ def apply_pending_rules(
     # 只处理**本轮新搬进去的**条目——清单里可能还躺着历史条目，规则 id 恰好
     # 相同的话不该被这一轮顺手删掉，那是另一件事（界面上的「彻底删除」负责）。
     purged: list[str] = []
-    if purge_rule_ids:
-        purge_set = {str(r) for r in purge_rule_ids}
+    if purge_set:
         fresh = [e for e in entries if e.id not in before_ids and e.rule_id in purge_set]
         if fresh:
             purge_entries(root, manifest, entry_ids={e.id for e in fresh})
@@ -458,6 +476,10 @@ def apply_pending_rules(
     meta["applied"] = True
     meta["protected_blocked_at_apply"] = len(blocked)
     meta["purged_directly"] = len(purged)
+    if refused_purge:
+        # 用户开了直删、但规则没标 purge_safe，所以只隔离没删。不写这一笔的话，
+        # 用户在设置页看着开关是开的、磁盘上文件还在隔离区，查不到原因。
+        meta["purge_refused_rules"] = refused_purge
     write_json(rdir / "meta.json", meta)
     write_audit_md(
         rdir / "audit.md",
@@ -476,5 +498,6 @@ def apply_pending_rules(
         "purged_paths": purged,
         "blocked_by_protect": len(blocked),
         "kept_by_user": len(user_kept),
+        "purge_refused": refused_purge,
         "run_id": run_id,
     }

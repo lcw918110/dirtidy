@@ -53,14 +53,13 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-
-#: Cursor 全局状态库的本机路径（macOS）。
-DEFAULT_DB = Path.home() / "Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+from typing import Any
 
 #: blob 的 key 前缀（长度 13）。blob 哈希即 key 去掉此前缀后的 64 位 hex。
 BLOB_PREFIX = "agentKv:blob:"
@@ -103,26 +102,89 @@ def human_bytes(n: int) -> str:
     return f"{n / 1024**3:.2f} GB"
 
 
-def default_backup_dir() -> Path:
-    """冷备份目录：dirtidy 状态目录旁的 `CursorStateBackup-<时间戳>`。"""
+def default_backup_dir(db: Path | None = None) -> Path:
+    """冷备份目录：**与被清理的数据库同级**的 `CursorStateBackup-<时间戳>`。
+
+    关键在「跟着 db 走」而不是写死 `~/.dirtidy/`：`clean()` 也会被测试和小工具
+    用**临时库**调用，写死 HOME 就是往真实应用目录里塞东西（此前 13 个用例每个
+    都在真实 `~/Library/Application Support/Cursor/User/globalStorage/` 下留了一个
+    备份目录，共 17 个）。跟着 db 走，临时库的备份就落在临时目录里，自然隔离。
+
+    同理必须同卷同目录：APFS `clonefile`（`cp -c`）只在同一卷内生效，跨卷就退化
+    成真拷贝，75 GB 的库要写满另一块盘才动得了。
+
+    不指定 `db` 时回落到 macOS 默认位置，仅为向后兼容（CLI 一定会传 db）。
+    """
+    base = db.parent if db is not None else DEFAULT_DB.parent
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return Path.home() / "Library/Application Support/Cursor/User/globalStorage" / f"CursorStateBackup-{stamp}"
+    return base / f"CursorStateBackup-{stamp}"
+
+
+def default_db_path() -> Path:
+    """Cursor 全局状态库在各平台的标准位置。
+
+    写死 macOS 路径会让 Linux/Windows 上 `dirtidy cursor-cleanup` 一上手就报
+    「找不到数据库」——功能在这两个平台等于不存在。
+    """
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        return Path(base) / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    if sys.platform == "darwin":
+        return Path.home() / "Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+    # Linux：官方包是 ~/.config/Cursor
+    return Path.home() / ".config" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+
+
+#: 向后兼容：模块级常量按当前平台算。
+DEFAULT_DB = default_db_path()
+
+#: 各平台「Cursor 正在运行」的进程特征。
+_PROCESS_MARKERS: dict[str, tuple[str, ...]] = {
+    "darwin": (
+        "/Applications/Cursor.app/Contents/MacOS/Cursor",
+        "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper",
+    ),
+    "linux": ("/usr/share/cursor/cursor", "/opt/cursor/", "cursor --no-sandbox"),
+    "nt": ("Cursor.exe",),
+}
+
+
+def _process_args() -> list[str] | None:
+    """列出所有进程的命令行；这个平台取不到时返回 None（**不要**当成「没在跑」）。"""
+    try:
+        if os.name == "nt":
+            # Windows 没有 `ps`；`tasklist` 是系统自带的。
+            out = subprocess.check_output(
+                ["tasklist", "/FO", "CSV", "/NH"], text=True, errors="replace"
+            )
+            return [line.split('","')[0].strip('"') for line in out.splitlines() if line.strip()]
+        flag = ["-Ax", "-o", "args="] if sys.platform == "darwin" else ["-eo", "args="]
+        out = subprocess.check_output(["ps", *flag], text=True, errors="replace")
+        return out.splitlines()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
 
 
 def cursor_running() -> bool:
-    """检测 Cursor 是否在跑。宁可误报（拒绝清理），不可漏报（边跑边改库）。
+    """检测 Cursor 是否在跑。**无法判断时返回 True（fail-closed）**。
 
-    macOS 的 `pgrep -f` 按正则匹配，路径里的 `.` / `()` 会误伤，故改用 `ps` 子串判断。
+    这里的方向不能反。返回 False 的含义是「可以放心改库」，一旦判断不了却给出
+    False，就等于在 Cursor 正在写库时拆它的库——轻则 Cursor 报
+    `storage file corrupted` 起不来，重则丢会话。所以取不到进程列表时宁可误报。
+
+    回归背景：原实现在 `ps` 不存在时直接 `return False`（典型是 Windows），
+    让 `--apply` 在最需要保护的那个平台上畅通无阻。
+
+    macOS 的 `pgrep -f` 按正则匹配，路径里的 `.` / `()` 会误伤，故用子串判断。
     """
-    markers = (
-        "/Applications/Cursor.app/Contents/MacOS/Cursor",
-        "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper",
-    )
-    try:
-        out = subprocess.check_output(["ps", "-Ax", "-o", "args="], text=True)
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return False
-    for line in out.splitlines():
+    lines = _process_args()
+    if lines is None:
+        return True
+    markers = _PROCESS_MARKERS.get("nt" if os.name == "nt" else sys.platform, ())
+    if not markers:
+        # 没适配过的平台：同样按「在跑」处理，让人自己确认。
+        return True
+    for line in lines:
         if "cursor_cleanup" in line or "state.vscdb" in line:
             # 排除本清理器自身（命令行里会带这些字样）
             continue
@@ -516,6 +578,30 @@ def delete_orphan_blobs(
 # ---------------------------------------------------------------------------
 
 
+def _audit_log_path(db: Path, backup_dir: Path) -> Path:
+    """清理过程的**实时**审计日志（JSONL，追加写）。
+
+    为什么不用「跑完写一份报告」：真实库上删 blob 要分批做（每批 500 行、
+    批间暂停），全程几十分钟。中途被 Ctrl-C / 被系统杀掉时，内存里的 report
+    直接蒸发，用户既不知道删了多少、也无从查证——而这是**不可恢复**的删除。
+    每阶段结束就追加一行，切断了也留着已发生的记录。
+    """
+    return backup_dir / "dirtidy-cursor-cleanup.jsonl"
+
+
+def _audit_append(path: Path, event: str, **fields: Any) -> None:
+    """追加一条审计记录。**写不进去不能中断清理**——审计是旁路，不该成为新的失败点。"""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rec = {"at": datetime.now().isoformat(timespec="seconds"), "event": event, **fields}
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        pass
+
+
 def fast_copy(src: Path, dst: Path) -> None:
     """优先 APFS clonefile（`cp -c`，秒级且不占额外空间），失败再 shutil.copy2。"""
     try:
@@ -679,7 +765,10 @@ def clean(
     gs = db.parent
     vacuumed_path = gs / "state.vscdb.vacuumed"
     old_path = gs / "state.vscdb.pre-cleanup"
-    backup = backup_dir or default_backup_dir()
+    # 备份目录默认跟着**被清理的那个库**走，而不是写死用户 HOME 下的 Cursor 路径：
+    # 一来 `clean()` 会被测试和小工具用临时库调用，写死 HOME 就是往真实应用目录里塞东西；
+    # 二来同卷才能走 clonefile。
+    backup = backup_dir or default_backup_dir(db)
 
     report = CleanupReport(
         mode="clean",
@@ -689,9 +778,23 @@ def clean(
         backup_dir=str(backup),
     )
 
+    audit = _audit_log_path(db, backup)
+    _audit_append(
+        audit,
+        "start",
+        db=str(db),
+        db_bytes=report.db_bytes,
+        days=days,
+        include_orphan=include_orphan,
+        include_blob=include_blob,
+        vacuum=vacuum,
+        backup=str(backup),
+    )
+
     checkpoint_wal(db)
     backup_database(db, backup)
     report.notes.append(f"冷备份完成：{backup}")
+    _audit_append(audit, "backup", backup=str(backup))
 
     cutoff_ms = int((time.time() - days * 86400) * 1000)
     con = sqlite3.connect(str(db))
@@ -706,6 +809,10 @@ def clean(
         old_ids = list_old_composer_ids(cur, cutoff_ms)
         report.old_sessions = len(old_ids)
         report.old_stats = delete_by_composer_ids(con, cur, old_ids, delete_headers=True)
+        # 每阶段落一条：中途被杀时，这里就是「已经删了什么」的唯一凭据。
+        _audit_append(
+            audit, "old_sessions", count=len(old_ids), stats=report.old_stats
+        )
 
         if include_orphan:
             keep = {r[0] for r in cur.execute("SELECT composerId FROM composerHeaders")}
@@ -714,12 +821,31 @@ def clean(
             report.orphan_sessions = len(stale)
             report.orphan_skipped = skipped
             report.orphan_stats = delete_by_composer_ids(con, cur, stale, delete_headers=False)
+            _audit_append(
+                audit,
+                "orphan_sessions",
+                count=len(stale),
+                skipped=skipped,
+                stats=report.orphan_stats,
+            )
 
         if include_blob:
             referenced = collect_referenced_hashes(cur)
             plan = plan_blob_cleanup(cur, referenced, measure_bytes=True)
             report.blob = plan.summary()
+            _audit_append(
+                audit,
+                "blob_plan",
+                referenced=plan.referenced,
+                orphan=plan.orphan,
+                orphan_bytes=plan.orphan_bytes,
+            )
             report.blob = {**report.blob, **delete_orphan_blobs(con, cur, plan.orphan, pause=blob_pause)}
+            _audit_append(audit, "blob_deleted", **report.blob)
+    except BaseException as exc:
+        # 出错也要留一条：用户需要知道「在删到第几阶段时断的」。
+        _audit_append(audit, "aborted", stage="clean", error=repr(exc))
+        raise
     finally:
         cur.close()
         con.commit()
@@ -730,27 +856,39 @@ def clean(
     if vacuum:
         if vacuumed_path.exists():
             vacuumed_path.unlink()
-        con2 = sqlite3.connect(str(db))
         try:
-            con2.execute("PRAGMA temp_store=MEMORY")
-            con2.execute("VACUUM INTO ?", (str(vacuumed_path),))
-        finally:
-            con2.close()
-        verify_database(vacuumed_path)
-        if old_path.exists():
-            old_path.unlink()
-        os.replace(db, old_path)
-        os.replace(vacuumed_path, db)
+            con2 = sqlite3.connect(str(db))
+            try:
+                con2.execute("PRAGMA temp_store=MEMORY")
+                con2.execute("VACUUM INTO ?", (str(vacuumed_path),))
+            finally:
+                con2.close()
+            _audit_append(audit, "vacuum_done", vacuumed=str(vacuumed_path))
+            verify_database(vacuumed_path)
+            if old_path.exists():
+                old_path.unlink()
+            # 这两行之间有窗口：db 已改名走、新库还没就位，`state.vscdb` 此刻不存在。
+            # 所以先记一条 `replacing`，万一在窗口里被打断，日志能说明库去哪了。
+            _audit_append(audit, "replacing", old=str(old_path), new=str(db))
+            os.replace(db, old_path)
+            os.replace(vacuumed_path, db)
+        except BaseException as exc:
+            # 校验不过 / 替换失败也要留痕：否则「库还在不在、在哪个文件」无从判断。
+            _audit_append(audit, "aborted", stage="vacuum", error=repr(exc))
+            raise
         for side in ("state.vscdb-wal", "state.vscdb-shm"):
             p = gs / side
             if p.exists():
                 p.unlink()
         report.vacuumed = True
         report.notes.append(f"压缩后原库另存：{old_path}")
+        _audit_append(audit, "replaced", old=str(old_path), new=str(db))
     else:
         report.notes.append("已跳过 VACUUM（文件体积暂不缩小）")
 
     report.elapsed_s = time.perf_counter() - t0
+    report.notes.append(f"审计日志：{audit}")
+    _audit_append(audit, "done", elapsed_s=round(report.elapsed_s, 1))
     return report
 
 

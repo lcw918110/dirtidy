@@ -340,12 +340,35 @@ def state_root(target_root: Path) -> Path:
     return target_root / ".dirtidy"
 
 
+def checked_run_id(run_id: str) -> str:
+    """校验 run_id 只能是**单层目录名**，否则抛 ValueError。
+
+    为什么必须校验：`run_id` 来自命令行参数与 Web 路径参数（`/api/runs/{run_id}`），
+    是纯外部输入。下面 `run_dir` / `quarantine_root` 直接把它拼进路径，
+    `run_id="../../../somewhere"` 就能让 `purge-quarantine` 的 `shutil.rmtree`
+    删掉目标根**之外**的任意目录，`run_id=".."` 甚至能删掉整个 `.dirtidy/`
+    （含全部审计历史）。实测已复现：中间目录存在时，`victim/` 被整棵树删除。
+
+    校验放在这两个函数自身（而不是各调用点），是因为调用点有十几处
+    （cli 6 处、web 3 处、pipeline 4 处）——每处各查一遍就是「同一个判定写多份」，
+    漏掉的那一处就是缝。与 `resolve_under` 同样的思路：让拼路径的入口本身成为守卫。
+    """
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError(f"非法 run_id: {run_id!r}")
+    if run_id in {".", ".."} or "/" in run_id or "\\" in run_id or "\x00" in run_id:
+        raise ValueError(f"非法 run_id（不允许路径分隔符或 . / ..）: {run_id!r}")
+    if Path(run_id).is_absolute() or (len(run_id) > 1 and run_id[1] == ":"):
+        # 后者挡 Windows 盘符形态（`C:foo`），它在 POSIX 上不是绝对路径却同样危险。
+        raise ValueError(f"非法 run_id（不允许绝对路径或盘符）: {run_id!r}")
+    return run_id
+
+
 def run_dir(target_root: Path, run_id: str) -> Path:
-    return state_root(target_root) / "runs" / run_id
+    return state_root(target_root) / "runs" / checked_run_id(run_id)
 
 
 def quarantine_root(target_root: Path, run_id: str) -> Path:
-    return state_root(target_root) / "quarantine" / run_id
+    return state_root(target_root) / "quarantine" / checked_run_id(run_id)
 
 
 def resolve_under(root: Path, rel: str) -> Path:

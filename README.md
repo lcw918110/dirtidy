@@ -100,6 +100,9 @@ dirtidy watch /path/to/root --interval 30
 # ★ 请先完全退出 Cursor：边跑边改状态库会抢 WAL 锁，可能让 Cursor 起不来。
 dirtidy cursor-cleanup
 dirtidy cursor-cleanup --apply --days 90
+# 备份默认落在库旁边：<库所在目录>/CursorStateBackup-<时间戳>/
+# 清理过程同时写 <备份目录>/dirtidy-cursor-cleanup.jsonl（每阶段一行，中途被杀也留痕）。
+# 想放到别处用 --backup-dir；放在同一卷上才能走 clonefile，跨卷会退化成全量拷贝。
 ```
 
 产物目录：`<root>/.dirtidy/runs/<run_id>/`；隔离区：`<root>/.dirtidy/quarantine/<run_id>/`。未改动文件的内容 hash 缓存在 `<root>/.dirtidy/hash_cache.sqlite`。扫描可加 `--workers 8` 并行算 hash。

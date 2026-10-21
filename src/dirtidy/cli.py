@@ -13,7 +13,7 @@ from dirtidy.ai.providers import analyze_run
 from dirtidy.decision.store import apply_decisions, save_decisions
 from dirtidy.models import Decision, iter_json_array, quarantine_root, read_json, run_dir, state_root
 from dirtidy.pipeline import apply_pending_rules, create_run
-from dirtidy.quarantine.store import purge_quarantine_dir, restore_entries
+from dirtidy.quarantine.store import purge_entries, purge_quarantine_dir, restore_entries
 
 #: 单次运行超时时的退出码。与 1（explain 找不到路径）、2（用法错误）区分开，
 #: 脚本能凭它判断「这次是超时，重跑或调大时限即可」，而不是「跑失败了」。
@@ -225,8 +225,21 @@ def cmd_purge(args: argparse.Namespace) -> int:
         return 2
     root = _resolve_root(args.root)
     qdir = quarantine_root(root, args.run_id)
+    rdir = run_dir(root, args.run_id)
+    manifest = rdir / "quarantine_manifest.json"
+    # 与 Web 端 `POST /api/runs/{run_id}/purge` **同一套语义**：先按条收敛清单，
+    # 再清掉空壳目录。原先这里只调 `purge_quarantine_dir`，清单原封不动——
+    # 实测「清前 3 条 → 清后仍是 3 条」，界面上「已隔离」列表全是幽灵条目，
+    # 用户按它还原则得到「文件不存在」。同一个「彻底删除」写两份，必有偏差。
+    purged = purge_entries(root, manifest, purge_all=True)
     purge_quarantine_dir(qdir)
-    print(json.dumps({"purged": str(qdir)}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {"purged": str(qdir), "entries": len(purged), "paths": purged},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -533,7 +546,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except ValueError as exc:
+        # 非法输入（典型：run_id 带 `..` 或路径分隔符）属于「用错了」，不是程序崩溃。
+        # 直接抛 traceback 会让人以为是 bug；给一句可操作的话并返回非零。
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":  # pragma: no cover

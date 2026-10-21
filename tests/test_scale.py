@@ -235,7 +235,9 @@ def test_sweep_only_touches_ancestors_of_quarantined(tmp_path: Path) -> None:
         # 本用例只关心扫尾边界，场景里没有受保护路径——显式声明而不是漏传。
         is_protected=nothing_protected,
     )
-    entries = sweep_empty_dirs(root, meta["run_id"], qdir, manifest)
+    entries = sweep_empty_dirs(
+        root, meta["run_id"], qdir, manifest, is_protected=nothing_protected
+    )
 
     swept = {e.original_path for e in entries}
     assert "tree/inner" in swept and "tree" in swept

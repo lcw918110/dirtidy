@@ -184,6 +184,68 @@ def test_purge_rule_deletes_after_quarantine_and_leaves_audit(workspace: Path) -
     assert not (workspace / "__pycache__").exists()
 
 
+def test_purge_rule_refuses_rules_without_purge_safe(workspace: Path) -> None:
+    """未标 `purge_safe` 的规则，即使被列进直删清单也只隔离、不物理删除。
+
+    这条守的是「界面说可还原、实际却删了」的那类欺骗。回归背景：
+    `advice.effect_for` 早就承诺「未标 purge_safe 的不物理删除」，但执行侧
+    `apply_pending_rules` 只查用户开关、不查规则标记，于是界面显示
+    「搬进隔离区（可还原）」，`venv/` 却被 `rmtree` 掉了（已复现）。
+
+    修复后执行侧与界面共用 `advice.purge_allowed`，两处判定合一。
+    """
+    (workspace / "venv").mkdir()
+    (workspace / "venv" / "pyvenv.cfg").write_text("home=/x\n", encoding="utf-8")
+    meta = create_run(workspace, rules="default", quick=True, apply=False)
+
+    # 前提：这条规则确实没标 purge_safe，否则用例测的不是这件事
+    from dirtidy.rules.engine import load_rule_pack
+
+    rules = {r["id"]: r for r in load_rule_pack("default")["rules"]}
+    assert not rules["dep_python_venv"].get("purge_safe"), "夹具前提变了：这条规则现在标了 purge_safe"
+
+    result = apply_pending_rules(
+        workspace, meta["run_id"], purge_rule_ids=["dep_python_venv"]
+    )
+    assert result["purged_directly"] == 0, "未标 purge_safe 的规则不该被物理删除"
+    assert result["purge_refused"] == ["dep_python_venv"], "拒删要如实报出来，不能静默"
+    # 只隔离：文件进隔离区，但没被抹掉，用户还能还原
+    assert result["quarantined"] >= 1
+    rdir = run_dir(workspace, meta["run_id"])
+    remaining = {e["original_path"] for e in read_json(rdir / "quarantine_manifest.json")}
+    assert "venv" in remaining, "拒删的项应留在隔离清单里（可还原）"
+    assert read_json(rdir / "meta.json")["purge_refused_rules"] == ["dep_python_venv"]
+
+
+def test_effect_and_execution_agree_on_whether_its_undone(workspace: Path) -> None:
+    """界面说「可还原」就一定能还原，说「不可还原」就真的删了——两侧必须一致。
+
+    这是把「判定只做一处」变成可执行断言：同样的 (purge_safe, purge_enabled)
+    输入，`advice.effect_for` 的结论与 `apply_pending_rules` 的真实行为必须对得上。
+    历史上这两处各自算过一遍，结果界面说可还原、磁盘上已经没了。
+    """
+    from dirtidy.advice import EFFECT_PURGE, EFFECT_QUARANTINE, effect_for
+
+    # ① 未标 purge_safe + 用户开了直删 → 界面说「可还原」，执行就必须只隔离
+    (workspace / "venv").mkdir()
+    (workspace / "venv" / "pyvenv.cfg").write_text("home=/x\n", encoding="utf-8")
+    meta = create_run(workspace, rules="default", quick=True, apply=False)
+    said = effect_for(action="auto_quarantine", purge_safe=False, purge_enabled=True)
+    assert said == EFFECT_QUARANTINE
+    r1 = apply_pending_rules(workspace, meta["run_id"], purge_rule_ids=["dep_python_venv"])
+    assert r1["purged_directly"] == 0, f"界面说「{said}」，实际却删了"
+
+    # ② 标了 purge_safe + 用户开了直删 → 界面说「不可还原」，执行就必须真删
+    said2 = effect_for(action="auto_quarantine", purge_safe=True, purge_enabled=True)
+    assert said2 == EFFECT_PURGE
+    # ① 已把 __pycache__ 搬进隔离区，这里重建一份，否则「没删」是因为没东西可删
+    (workspace / "__pycache__").mkdir()
+    (workspace / "__pycache__" / "mod.pyc").write_bytes(b"y\n")
+    meta2 = create_run(workspace, rules="default", quick=True, apply=False)
+    r2 = apply_pending_rules(workspace, meta2["run_id"], purge_rule_ids=["dep_python_cache"])
+    assert r2["purged_directly"] >= 1, f"界面说「{said2}」，实际却没删"
+
+
 def test_purge_rule_only_touches_listed_rules(workspace: Path) -> None:
     """没被列进直删清单的规则，行为一点不变——仍然只隔离。"""
     meta = create_run(workspace, rules="default", quick=True, apply=False)
@@ -197,17 +259,23 @@ def test_purge_rule_only_touches_listed_rules(workspace: Path) -> None:
 
 
 def test_purge_rule_does_not_bypass_keep(workspace: Path) -> None:
-    """人工保留优先于直删：勾了「保留」的项本轮不动，也不该被删掉。"""
+    """人工保留优先于直删：勾了「保留」的项本轮不动，也不该被删掉。
+
+    这里**必须用标了 `purge_safe` 的规则**（`dep_python_cache`）。用未标的规则
+    （如 `dep_node_modules`）会得到一个恒真断言：修复「未标 purge_safe 就不许直删」
+    之后，这类规则本来就不会物理删除，`purged_directly == 0` 与 keep 毫无关系，
+    用例照样绿却什么也没守。这个坑已经踩过一次。
+    """
     meta = create_run(workspace, rules="default", quick=True, apply=False)
     result = apply_pending_rules(
         workspace,
         meta["run_id"],
-        keep=["node_modules"],
-        purge_rule_ids=["dep_node_modules"],
+        keep=["__pycache__"],
+        purge_rule_ids=["dep_python_cache"],
     )
-    assert result["kept_by_user"] == 1
+    assert result["kept_by_user"] == 2  # 目录本身 + 其内的 mod.pyc 命中
     assert result["purged_directly"] == 0
-    assert (workspace / "node_modules" / "pkg" / "index.js").exists()
+    assert (workspace / "__pycache__" / "mod.pyc").exists()
 
 
 def test_keep_directory_also_keeps_its_hit_descendants(workspace: Path) -> None:
@@ -234,15 +302,20 @@ def test_keep_child_blocks_its_hit_ancestor(workspace: Path) -> None:
 
 
 def test_purge_rule_does_not_bypass_protect(workspace: Path) -> None:
-    """子树里躺着受保护路径时整条拦下，直删也不能把它带走。"""
-    (workspace / "node_modules" / ".env").write_text("SECRET=1", encoding="utf-8")
+    """子树里躺着受保护路径时整条拦下，直删也不能把它带走。
+
+    同 `test_purge_rule_does_not_bypass_keep`：必须用 `purge_safe` 规则，否则
+    `purged_directly == 0` 是因为「规则压根不许直删」，而不是因为保护生效。
+    这里换成 `dep_python_cache`（`__pycache__` 里放一个 `.env`）。
+    """
+    (workspace / "__pycache__" / ".env").write_text("SECRET=1", encoding="utf-8")
     meta = create_run(workspace, rules="default", quick=True, apply=False)
     result = apply_pending_rules(
-        workspace, meta["run_id"], purge_rule_ids=["dep_node_modules"]
+        workspace, meta["run_id"], purge_rule_ids=["dep_python_cache"]
     )
     assert result["purged_directly"] == 0
     assert result["blocked_by_protect"] >= 1
-    assert (workspace / "node_modules" / ".env").exists()
+    assert (workspace / "__pycache__" / ".env").exists()
 
 
 def test_dry_run_reports_would_purge_without_touching(workspace: Path) -> None:

@@ -1,5 +1,13 @@
 # Cursor 状态库清理 —— 集成到 dirtidy 的交接资料
 
+> **状态：已落地（2026-10-21）。** 能力已实现为 `dirtidy cursor-cleanup`
+> （`src/dirtidy/cursor_cleanup.py` + 18 条用例），本目录转为**历史交接材料**留档，
+> 不再更新。当前行为的权威描述见 `docs/09` §2.12 与 `docs/02` FR-12。
+> 与下方建议不一致的地方以代码与那两份文档为准——集成时改过三处关键判定：
+> ① 引用来源扫**全部**非 blob 前缀（只扫会话那三个会误删活数据）；
+> ② `cursor_running()` fail-closed（判断不了也按「在跑」处理）；
+> ③ 备份目录跟着被清理的库走，不写死用户 HOME。
+
 > 本目录是「把 Cursor `state.vscdb` 清理能力集成进 dirtidy」的**交接材料**。
 > 由 dirtidy 的开发会话接手，把参考脚本重构为 dirtidy 的一个子命令/模块。
 > 参考脚本全文见同目录 `cursor_state_vscdb_cleanup_reference.py`。
