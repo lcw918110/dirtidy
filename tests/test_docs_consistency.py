@@ -24,6 +24,7 @@ DOCS_05 = DOCS / "05-测试与验收.md"
 DOCS_06 = DOCS / "06-已知缺口与后续.md"
 DOCS_07 = DOCS / "07-规模与性能.md"
 DOCS_09 = DOCS / "09-功能与使用汇总.md"
+SRC = REPO_ROOT / "src"
 TESTS_DIR = REPO_ROOT / "tests"
 FIXTURE_SRC = TESTS_DIR / "fixtures" / "sample_workspace"
 PACKS_DIR = REPO_ROOT / "src" / "dirtidy" / "rules" / "packs"
@@ -608,3 +609,45 @@ def test_docs_task_ids_resolve_to_backlog() -> None:
 
     assert seen >= 20, f"只扫到 {seen} 处待办编号引用，正则或文档结构可能已变"
     assert not problems, "文档引用了台账里不存在的待办编号：\n  " + "\n  ".join(problems)
+
+
+def test_text_io_always_states_encoding() -> None:
+    """所有文本读写都必须显式写 `encoding=`。
+
+    Windows 的 `open()` / `Path.read_text()` 默认用系统代码页（cp1252 一类），
+    不是 UTF-8。项目里到处都是中文（审计日志的事件、`notes`、文档），
+    漏写 `encoding=` 在 macOS/Linux 上永远绿，到 Windows 上才炸：
+
+        UnicodeDecodeError: 'charmap' codec can't decode byte 0x81 ...
+
+    更麻烦的是它只在**那条路径被读到**时才炸——`cursor-cleanup` 的审计日志
+    平时没人读，`--apply` 跑完一切正常，只有用例去核对内容时才红。
+
+    用 AST 而不是正则：正则会把 `def open(self)` 当成调用（误报），
+    也会漏掉参数换行写的情况（漏报）。这一步必须精确，否则守卫自己就成了噪音。
+    """
+    import ast
+
+    offenders: list[str] = []
+    for path in sorted([*SRC.rglob("*.py"), *TESTS_DIR.rglob("*.py")]):
+        rel = path.relative_to(REPO_ROOT)
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(rel))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            # 形态一：xxx.read_text(...) / xxx.write_text(...)
+            if isinstance(func, ast.Attribute):
+                if func.attr not in {"read_text", "write_text"}:
+                    continue
+            # 形态二：裸 open(...)（内置函数）
+            elif not (isinstance(func, ast.Name) and func.id == "open"):
+                continue
+            if any(kw.arg == "encoding" for kw in node.keywords):
+                continue
+            offenders.append(f"{rel}:{node.lineno}  缺 encoding=")
+
+    assert not offenders, (
+        "以下文本读写没写 encoding=，Windows 上会按系统代码页解码而炸：\n  "
+        + "\n  ".join(offenders)
+    )

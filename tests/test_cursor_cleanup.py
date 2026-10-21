@@ -334,7 +334,7 @@ def test_clean_writes_an_audit_trail_that_survives_a_crash(mini_db: Path, tmp_pa
 
     log = bk / "dirtidy-cursor-cleanup.jsonl"
     assert log.exists(), "没有审计日志"
-    events = [json.loads(line)["event"] for line in log.read_text().splitlines()]
+    events = [json.loads(line)["event"] for line in log.read_text(encoding="utf-8").splitlines()]
     # 顺序即执行顺序，最后一笔必须是 done——中途断了就不会有它
     assert events[0] == "start"
     assert events[-1] == "done"
@@ -358,7 +358,7 @@ def test_clean_audit_records_an_abort_when_a_stage_blows_up(
 
     log = bk / "dirtidy-cursor-cleanup.jsonl"
     assert log.exists(), "失败时也必须留下审计"
-    recs = [json.loads(line) for line in log.read_text().splitlines()]
+    recs = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     aborted = [r for r in recs if r["event"] == "aborted"]
     assert aborted, f"缺 aborted 记录：{[r['event'] for r in recs]}"
     assert "模拟磁盘满" in aborted[0]["error"]
@@ -386,7 +386,10 @@ def test_audit_records_the_replace_window_so_a_broken_vacuum_is_diagnosable(
     with pytest.raises(RuntimeError, match="模拟校验不过"):
         clean(mini_db, days=90, vacuum=True, blob_pause=0, backup_dir=bk)
 
-    recs = [json.loads(line) for line in (bk / "dirtidy-cursor-cleanup.jsonl").read_text().splitlines()]
+    recs = [
+        json.loads(line)
+        for line in (bk / "dirtidy-cursor-cleanup.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
     names = [r["event"] for r in recs]
     assert "aborted" in names, f"VACUUM 阶段失败没留痕：{names}"
     aborted = next(r for r in recs if r["event"] == "aborted")
