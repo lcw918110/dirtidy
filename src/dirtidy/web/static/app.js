@@ -9,8 +9,14 @@ const decisions = new Map();
 /* 本轮模型建议（path → suggestion）。只用来「显示建议」和「按建议采纳」，
    绝不自动写进 decisions——默认决策恒为 keep。 */
 let currentSuggestions = {};
-/* 本轮「待自动隔离」的条数，供执行前确认框报出准确数量 */
-let currentPendingCount = 0;
+/* 本轮「执行前预览」的结果（后端 dry-run 原样返回）。
+ * **这是执行页所有数字的唯一来源**——不要再用 `pending_auto_hits.length`
+ * 去当「将搬走几项」：那是「规则命中几条」，不是「实际会搬几条」。
+ * 两者不等的情形至少两类，且都是常态：
+ *   - 目录命中覆盖其内的文件命中（只搬父目录）；
+ *   - 命中目录的子树里含受保护路径（整条被拦下）。
+ * 实测夹具：命中 4 条，实际只搬 2 条。拿前者报数就是在报假账。 */
+let currentPlan = null;
 /* 审阅时勾选「保留」的自动隔离项：执行自动隔离时随请求发出，本轮不动它们 */
 const keptPaths = new Set();
 /* 隔离区里勾选要还原/彻底删除的条目 id */
@@ -50,6 +56,16 @@ const STATUS_LABELS = {
   kept: "保留",
   archived: "归档",
   quarantined: "隔离",
+  purge_refused: "未获准直删（只隔离）",
+  purged_paths: "已直删路径",
+  dry_run: "仅预览（未动文件）",
+  would_quarantine: "预计隔离",
+  would_purge: "预计直删（不可还原）",
+  would_archive: "预计归档",
+  blocked_paths: "保护拦下路径",
+  kept_paths: "人工保留路径",
+  paths: "预计搬走路径",
+  would_purge_paths: "预计直删路径",
   purged_directly: "直删",
   purged: "彻底删除",
   restored: "还原",
@@ -104,6 +120,55 @@ function setStatus(obj, opts = {}) {
   }
 }
 
+/* ------------------------- 按钮的「正在做」状态 -------------------------
+   动作慢的时候（扫描、搬几百个文件），按钮若只是静默等着，用户会以为没点上，
+   于是再点一次——而这些都是会真动文件的按钮。所以进入忙态时按钮自己会说话：
+   禁用 + aria-busy + 文案后缀，转圈交给 CSS（`button[aria-busy="true"]::after`）。
+
+   两个细节必须留神，否则忙态会比没忙态更糟：
+   1. **渲染可能中途接管这个按钮**。执行完 loadRun 会重画执行页，
+      `renderExecute` 会按最新计划改写「执行自动隔离（3 项）」并为它设 disabled。
+      这时忙态收尾若强行还原文案与可用性，就会出现「文案说无可执行项、按钮却亮着可点」。
+      故收尾时若文案已被改过，就直接让给渲染。
+   2. **抛错也要收尾**（放在 finally 里），否则一次失败的请求会把按钮永久按死。 */
+
+function busyOn(btn, label) {
+  if (!btn || btn.dataset.busy === "1") return false; // 已在忙 → 忽略重复点击
+  btn.dataset.busyLabel = btn.textContent;
+  btn.dataset.busy = "1";
+  btn.setAttribute("aria-busy", "true");
+  btn.disabled = true;
+  if (label) {
+    btn.dataset.busyText = label;
+    btn.textContent = label;
+  }
+  return true;
+}
+
+function busyOff(btn) {
+  if (!btn || btn.dataset.busy !== "1") return;
+  const original = btn.dataset.busyLabel || "";
+  const shown = btn.dataset.busyText || "";
+  const takenOver = Boolean(shown) && btn.textContent !== shown;
+  delete btn.dataset.busyLabel;
+  delete btn.dataset.busyText;
+  delete btn.dataset.busy;
+  btn.removeAttribute("aria-busy");
+  if (takenOver) return; // 渲染已接管文案与可用性，别再抢回去
+  if (original) btn.textContent = original;
+  btn.disabled = false;
+}
+
+/* 包一层：进忙态 → 执行 → 无论如何收尾。 */
+async function withBusy(btn, label, fn) {
+  if (!busyOn(btn, label)) return undefined;
+  try {
+    return await fn();
+  } finally {
+    busyOff(btn);
+  }
+}
+
 function humanStatus(obj) {
   if (obj == null) return "";
   if (typeof obj === "string") return obj;
@@ -140,13 +205,15 @@ const TRANSFER_WORDS = {
   blocked_by_protect: "受保护拦下",
   skipped: "跳过",
   adopted: "填入决策",
+  purge_refused: "未获准直删（只隔离）",
 };
 
 function transferSummary(obj) {
   if (!obj || typeof obj !== "object") return "";
   const done = [];
   for (const k of Object.keys(TRANSFER_WORDS)) {
-    const v = obj[k];
+    const raw = obj[k];
+    const v = Array.isArray(raw) ? raw.length : raw;
     if (typeof v === "number" && v > 0) done.push(`${TRANSFER_WORDS[k]} ${v} 项`);
   }
   return done;
@@ -272,7 +339,7 @@ const ACTION_HINTS = {
    刻意**不在前端按 rule_id 拼措辞**：那会变成第二份判定，规则包一改名或加
    `purge_safe`，界面就会说「可以清理」而实际执行是「直接删除」——本项目
    已经四次栽在「同一个判定写两份」上（详见 docs/06）。 */
-const ADVICE_KINDS = ["safe_clean", "clean", "review", "protected"];
+let ADVICE_KINDS = [];
 
 function adviceTag(entry) {
   const advice = ADVICE_KINDS.includes(entry.advice) ? entry.advice : "review";
@@ -707,16 +774,10 @@ function renderPending(data) {
   markSortHeaders();
 
   // 执行范围始终是**全部命中**（勾「保留」的除外），与筛选、排序、分组都无关。
-  // 按钮与确认框都按全量报数，否则「筛了 3 项、搬走 30 项」会像丢了东西。
-  currentPendingCount = all.length;
+  // 但「几项命中」不等于「几项会被搬走」——目录覆盖后代、子树含保护路径都会让
+  // 实际条数更少。那个数字只能由后端 dry-run 给（`refreshPlan`），这里只负责
+  // 按「保留」勾选的变化去重新核对，不自己算。
   const keptCount = all.filter((h) => keptPaths.has(h.path)).length;
-  const next = document.getElementById("pendingNext");
-  if (next) {
-    next.textContent = all.length
-      ? `本轮将搬走 ${all.length - keptCount} 项（命中 ${all.length} 项，其中 ${keptCount} 项勾了「保留」）。`
-      : "本轮没有规则命中项。";
-  }
-  // 表头全选框：全勾 = 全选保留，半勾 = 部分保留（indeterminate 才不会骗人）
   const allBox = document.getElementById("pendingAll");
   if (allBox) {
     allBox.checked = all.length > 0 && keptCount === all.length;
@@ -730,6 +791,8 @@ function renderPending(data) {
   }
   // 「保留」勾选会影响执行页的清单与数字，改完就地重画那一页，别等用户切过去才发现是旧的。
   renderExecute(currentRunData);
+  // 勾选变了 → 执行范围也变了 → 重新向后端要一份预览。防抖，避免连点几次发一串请求。
+  schedulePlanRefresh();
 }
 
 /* 分组标题行：一条占满整行的横条，回答「这一档是什么、多少项、共占多少」。 */
@@ -758,6 +821,7 @@ function pendingRow(h, coveredByParent) {
   cb.addEventListener("change", () => {
     if (cb.checked) keptPaths.add(h.path);
     else keptPaths.delete(h.path);
+    renderPending(currentRunData);
   });
   tdKeep.appendChild(cb);
   tr.appendChild(tdKeep);
@@ -819,10 +883,16 @@ function renderProtection(data) {
     const line = el("div", { cls: "rowline" });
     line.appendChild(el("code", { text: r.path }));
     line.appendChild(
-      document.createTextNode(` ← ${r.protect_rule_id}（${r.protect_reason || ""}）`),
+      el("span", {
+        text: ` ← ${r.protect_reason || "受保护，不会自动清理"}`,
+        attrs: { title: r.protect_rule_id || "" },
+      }),
     );
     if (r.intended_rule_id) {
-      line.appendChild(document.createTextNode(`；原本想动它的是 ${r.intended_rule_id}`));
+      line.appendChild(el("span", {
+        text: "；已拦下原定清理动作",
+        attrs: { title: r.intended_rule_id },
+      }));
     }
     line.appendChild(whyButton(r.path));
     box.appendChild(line);
@@ -834,7 +904,13 @@ function renderProtection(data) {
     det.appendChild(
       el("summary", { text: `生效保护策略 ${policy.length} 条（点开看清单）` }),
     );
-    det.appendChild(el("div", { cls: "hint", text: policy.map((p) => p.id).join("、") }));
+    for (const p of policy) {
+      det.appendChild(el("div", {
+        cls: "hint",
+        text: p.reason || "受保护，不会自动清理",
+        attrs: { title: p.id || "" },
+      }));
+    }
     box.appendChild(det);
   }
 }
@@ -1161,11 +1237,45 @@ function renderReview(data) {
    它只做一件事：把「将要发生什么」摆清楚，然后让用户按下去。
    两个按钮各自紧挨自己那份清单——原先两个执行按钮分散在两张表下面，
    用户在候选表设完下拉，视线内最近的却是「执行自动隔离」（另一条路径）。 */
+let planTimer = 0;
+let planVersion = 0;
+
+function planSummary(plan) {
+  if (!plan) return "尚未预览";
+  const refused = (plan.purge_refused || []).length;
+  return `本轮将搬走 ${plan.would_quarantine || 0} 项，其中 ${plan.would_purge || 0} 项将直接删除（不可还原）；人工保留 ${plan.kept_by_user || 0} 项，保护拦下 ${plan.blocked_by_protect || 0} 项。${refused ? ` ${refused} 条规则未获准直删，只隔离不删除。` : ""}`;
+}
+
+function schedulePlanRefresh() {
+  currentPlan = null;
+  window.clearTimeout(planTimer);
+  window.setTimeout(() => renderExecute(currentRunData), 0);
+  planTimer = window.setTimeout(() => refreshPlan().catch((e) => setStatus(e, { error: true })), 120);
+}
+
+async function refreshPlan() {
+  if (!currentRun) return null;
+  const runId = currentRun;
+  const version = ++planVersion;
+  const keep_paths = [...keptPaths];
+  currentPlan = null;
+  renderExecute(currentRunData);
+  const plan = await api(`/api/runs/${runId}/apply-rules`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ keep_paths, dry_run: true }),
+  });
+  if (runId !== currentRun || version !== planVersion || JSON.stringify(keep_paths) !== JSON.stringify([...keptPaths])) return null;
+  currentPlan = plan;
+  renderExecute(currentRunData);
+  return plan;
+}
+
 function renderExecute(data) {
   if (!data) return;
   const hits = data.pending_auto_hits || [];
   const kept = hits.filter((h) => keptPaths.has(h.path));
-  const willMove = hits.length - kept.length;
+  const plan = currentPlan;
+  const willMove = plan ? Number(plan.would_quarantine || 0) : null;
 
   const cands = (data.candidates || []).filter((c) => c.kind !== "duplicate_group");
   const candPaths = new Set();
@@ -1182,9 +1292,9 @@ function renderExecute(data) {
   const box = document.getElementById("execCards");
   if (box) {
     clear(box);
-    box.appendChild(card("将搬走（规则命中）", willMove, kept.length ? `已勾保留 ${kept.length} 项` : "无保留"));
-    box.appendChild(card("将隔离（候选）", q, "来自决策列"));
-    box.appendChild(card("将归档（候选）", arch, "来自决策列"));
+    box.appendChild(card("将搬走（规则命中）", willMove ?? "待核对", plan ? `保护拦下 ${plan.blocked_by_protect || 0} 项；直删 ${plan.would_purge || 0} 项` : "正在向后端核对"));
+    box.appendChild(card("拟隔离（候选）", q, "人工选择，实际范围以执行前预览为准"));
+    box.appendChild(card("拟归档（候选）", arch, "人工选择，实际范围以执行前预览为准"));
   }
 
   // 规则命中清单
@@ -1193,15 +1303,22 @@ function renderExecute(data) {
     clear(rl);
     if (!hits.length) {
       rl.appendChild(el("div", { cls: "empty-note", text: "本轮没有规则命中项。" }));
-    } else if (!willMove) {
-      rl.appendChild(el("div", { cls: "empty-note", text: `全部 ${hits.length} 项都勾了「保留」，这一轮不会搬任何东西。` }));
+    } else if (willMove === 0) {
+      rl.appendChild(el("div", { cls: "empty-note", text: "后端预览确认没有可搬走项（人工保留或保护拦下）。" }));
     } else {
       for (const h of hits.slice(0, 30)) {
         const line = el("div", { cls: keptPaths.has(h.path) ? "execrow kept" : "execrow" });
         line.appendChild(el("code", { text: h.path }));
         line.appendChild(el("span", { cls: "exec-meta", text: ruleLabel(h) }));
         line.appendChild(el("span", { cls: "exec-size", text: sizeText(h.size_bytes) }));
-        if (keptPaths.has(h.path)) line.appendChild(el("span", { cls: "exec-tag", text: "保留" }));
+        const disposition = keptPaths.has(h.path) ? "人工保留"
+          : !plan ? "待核对"
+          : (plan.blocked_paths || []).includes(h.path) ? "保护拦下"
+          : (plan.would_purge_paths || []).includes(h.path) ? "直删（不可还原）"
+          : (plan.paths || []).includes(h.path) ? "将隔离"
+          : (plan.kept_paths || []).includes(h.path) ? "人工保留"
+          : "不单独执行";
+        line.appendChild(el("span", { cls: "exec-tag", text: disposition }));
         rl.appendChild(line);
       }
       if (hits.length > 30) {
@@ -1212,9 +1329,11 @@ function renderExecute(data) {
 
   const rh = document.getElementById("execRulesHint");
   if (rh) {
-    rh.textContent = hits.length
-      ? `规则命中 ${hits.length} 项${kept.length ? `，其中 ${kept.length} 项勾了「保留」` : ""}。执行后搬进隔离区，可还原。`
-      : "本轮没有规则命中项，无需自动隔离。";
+    rh.textContent = plan ? planSummary(plan) : "预览尚未完成；执行按钮暂不可用。";
+  }
+  const next = document.getElementById("pendingNext");
+  if (next) {
+    next.textContent = plan ? planSummary(plan) : "正在核对实际可执行范围……";
   }
 
   // 候选决策清单
@@ -1240,15 +1359,15 @@ function renderExecute(data) {
   const ch = document.getElementById("execCandHint");
   if (ch) {
     ch.textContent = moving.length
-      ? `按「决策」列，将搬走 ${moving.length} 项（隔离 ${q}、归档 ${arch}）。`
+      ? `按「决策」列，拟处理 ${moving.length} 项（隔离 ${q}、归档 ${arch}）；实际可执行项需由后端预览核对。`
       : "按「决策」列，将搬走 0 项。";
   }
 
   // 按钮
   const rb = document.getElementById("applyRulesBtn");
   if (rb) {
-    rb.disabled = willMove === 0;
-    rb.textContent = willMove ? `执行自动隔离（${willMove} 项）` : "无可执行项";
+    rb.disabled = willMove === null || willMove === 0;
+    rb.textContent = willMove === null ? "等待预览核对" : willMove ? `执行自动隔离（${willMove} 项）` : "无可执行项";
   }
   const ab = document.getElementById("applyBtn");
   if (ab) {
@@ -1646,6 +1765,26 @@ function runLabel(r) {
 
 async function loadRuns() {
   const meta = await api("/api/meta");
+  ADVICE_KINDS = meta.advice_order;
+  const legend = document.getElementById("adviceLegend");
+  const adviceSelect = document.getElementById("pendingAdvice");
+  clear(legend);
+  clear(adviceSelect);
+  adviceSelect.appendChild(el("option", { text: "全部", attrs: { value: "" } }));
+  for (const kind of ADVICE_KINDS) {
+    legend.appendChild(el("span", {
+      cls: `advice advice-${kind}`,
+      text: meta.advice_labels[kind],
+      attrs: { title: meta.advice_hints[kind] },
+    }));
+    legend.appendChild(document.createTextNode(` ${meta.advice_hints[kind]} `));
+    adviceSelect.appendChild(el("option", {
+      text: meta.advice_labels[kind],
+      attrs: { value: kind, title: meta.advice_hints[kind] },
+    }));
+  }
+  adviceSelect.value = pendingFilter.advice;
+  document.getElementById("watchTimeout").value = meta.watch_default_timeout;
   document.getElementById("meta").textContent = `目标根：${meta.root}`;
   document.getElementById("stateDir").textContent = `状态目录：${meta.state_dir}`;
   const { runs } = await api("/api/runs");
@@ -1661,9 +1800,18 @@ async function loadRuns() {
 }
 
 async function loadRun(runId) {
+  const switched = currentRun !== runId;
   currentRun = runId;
+  currentPlan = null;
   const data = await api(`/api/runs/${runId}`);
+  if (currentRun !== runId) return; // 较慢的旧请求不得盖过新 run。
   currentRunData = data;
+  decisions.clear();
+  if (switched) {
+    keptPaths.clear();
+    candPicked.clear();
+    quarantined.clear();
+  }
   for (const d of data.decisions || []) decisions.set(d.path, d);
   renderPartialWarning(data);
   renderOverview(data);
@@ -1721,6 +1869,18 @@ function applyCandBulk() {
   renderReview(currentRunData);
 }
 
+async function previewDecisions() {
+  if (!currentRun) return null;
+  const runId = currentRun;
+  const res = await api(`/api/runs/${runId}/apply-decisions`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dry_run: true, decisions: [...decisions.values()] }),
+  });
+  if (currentRun !== runId) return null;
+  setStatus(res);
+  return res;
+}
+
 async function apply() {
   if (!currentRun) throw new Error("还没有选中 run");
   // 每行默认「保留不动」，所以「一条都没设就点执行」是很容易发生的事。
@@ -1733,9 +1893,9 @@ async function apply() {
       "还没有可执行的决策：每行默认「保留不动」，请先改「决策」列或点「采纳全部建议」。",
     );
   }
-  const quarantine = moving.filter((d) => d.action === "quarantine").length;
-  const archive = moving.length - quarantine;
-  if (!confirm(`将搬走 ${moving.length} 项（隔离 ${quarantine}、归档 ${archive}）到隔离区，可随时还原。继续？`)) {
+  const preview = await previewDecisions();
+  if (!preview) return;
+  if (!confirm(`后端预览：隔离 ${preview.quarantined} 项、归档 ${preview.archived} 项；保护拦下 ${preview.blocked_by_protect} 项、跳过 ${(preview.skipped || []).length} 项。归档移动到指定位置，不进入隔离区。继续？`)) {
     return undefined;
   }
   await save();
@@ -1747,12 +1907,12 @@ async function apply() {
 
 /* 执行规则自动隔离；勾选「保留」的项随请求发出，后端本轮不动它们并记入 protection.json */
 async function applyRules() {
-  if (!currentPendingCount) return setStatus("没有待隔离项。");
+  const runId = currentRun;
   const keep_paths = [...keptPaths];
-  const will = currentPendingCount - keep_paths.length;
-  if (!will) return setStatus(`全部 ${currentPendingCount} 项都勾了「保留」，本轮不需要搬任何东西。`);
-  const kept = keep_paths.length ? `，其中 ${keep_paths.length} 项勾了「保留」` : "";
-  if (!confirm(`将搬走 ${will} 项规则命中（共 ${currentPendingCount} 项命中${kept}）。继续？`)) {
+  const plan = await refreshPlan(); // 确认前重新核对，不沿用过期的数字。
+  if (!plan || currentRun !== runId) return;
+  if (!plan.would_quarantine) return setStatus(planSummary(plan));
+  if (!confirm(`${planSummary(plan)}\n预览之后文件仍可能变化，执行时会再次保护复核。继续？`)) {
     return undefined;
   }
   const res = await api(`/api/runs/${currentRun}/apply-rules`, {
@@ -1776,12 +1936,30 @@ document.getElementById("reloadBtn").onclick = () =>
   loadRun(document.getElementById("runSelect").value);
 document.getElementById("runSelect").onchange = (e) => loadRun(e.target.value);
 document.getElementById("adoptBtn").onclick = () => adoptSuggestions();
+/* 下列按钮都会真动文件或真发请求，一律套忙态：
+   点下去立刻有反馈，且期间点不动（重复点「执行自动隔离」是很贵的误操作）。 */
 document.getElementById("saveBtn").onclick = () =>
-  save().catch((e) => setStatus(e, { error: true }));
+  withBusy(document.getElementById("saveBtn"), "保存中…", () =>
+    save().catch((e) => setStatus(e, { error: true })),
+  );
 document.getElementById("applyBtn").onclick = () =>
-  apply().catch((e) => setStatus(e, { error: true }));
+  withBusy(document.getElementById("applyBtn"), "执行中…", () =>
+    apply().catch((e) => setStatus(e, { error: true })),
+  );
+document.getElementById("previewRulesBtn").onclick = () =>
+  withBusy(document.getElementById("previewRulesBtn"), "核对中…", () =>
+    refreshPlan()
+      .then((p) => p && setStatus(planSummary(p)))
+      .catch((e) => setStatus(e, { error: true })),
+  );
+document.getElementById("previewDecisionsBtn").onclick = () =>
+  withBusy(document.getElementById("previewDecisionsBtn"), "核对中…", () =>
+    previewDecisions().catch((e) => setStatus(e, { error: true })),
+  );
 document.getElementById("applyRulesBtn").onclick = () =>
-  applyRules().catch((e) => setStatus(e, { error: true }));
+  withBusy(document.getElementById("applyRulesBtn"), "执行中…", () =>
+    applyRules().catch((e) => setStatus(e, { error: true })),
+  );
 
 document.getElementById("gotoExecuteBtn").onclick = () => showTab("execute");
 document.getElementById("gotoExecuteBtn2").onclick = () => showTab("execute");
@@ -1987,7 +2165,7 @@ function startScanPolling() {
 
 document.getElementById("scanBtn").onclick = async () => {
   const btn = document.getElementById("scanBtn");
-  btn.disabled = true;
+  if (!busyOn(btn, "扫描中…")) return; // 已在扫 → 重复点击直接忽略
   setStatus("扫描中…");
   startScanPolling();
   try {
@@ -2018,7 +2196,7 @@ document.getElementById("scanBtn").onclick = async () => {
     setStatus(e, { error: true });
   } finally {
     stopScanPolling();
-    btn.disabled = false;
+    busyOff(btn);
   }
 };
 
@@ -2034,117 +2212,138 @@ async function quarantineAction(kind, payload) {
   await loadRun(currentRun);
 }
 
-document.getElementById("restoreSelBtn").onclick = () =>
-  quarantineAction("restore", { ids: [...quarantined] }).catch((e) => setStatus(e, { error: true }));
-document.getElementById("purgeSelBtn").onclick = () => {
-  if (!confirm(`彻底删除选中的 ${quarantined.size} 项？此操作不可恢复。`)) return;
-  quarantineAction("purge", { ids: [...quarantined] }).catch((e) => setStatus(e, { error: true }));
+/* 隔离区：四个按钮都会真搬/真删，一律套忙态。
+   搬几百项时按钮没反馈，用户会以为没点上——而重复点「清空隔离区」是会删空的。 */
+const quarantineBtn = (id, label, fn) => {
+  const btn = document.getElementById(id);
+  btn.onclick = () => withBusy(btn, label, fn);
 };
-document.getElementById("restoreAllBtn").onclick = () =>
-  quarantineAction("restore", { all: true }).catch((e) => setStatus(e, { error: true }));
-document.getElementById("purgeAllBtn").onclick = () => {
-  if (!confirm("清空隔离区并彻底删除全部条目？此操作不可恢复。")) return;
-  quarantineAction("purge", { all: true }).catch((e) => setStatus(e, { error: true }));
-};
+
+quarantineBtn("restoreSelBtn", "还原中…", () =>
+  quarantineAction("restore", { ids: [...quarantined] }).catch((e) =>
+    setStatus(e, { error: true }),
+  ),
+);
+quarantineBtn("purgeSelBtn", "删除中…", () => {
+  if (!confirm(`彻底删除选中的 ${quarantined.size} 项？此操作不可恢复。`)) return undefined;
+  return quarantineAction("purge", { ids: [...quarantined] }).catch((e) =>
+    setStatus(e, { error: true }),
+  );
+});
+quarantineBtn("restoreAllBtn", "还原中…", () =>
+  quarantineAction("restore", { all: true }).catch((e) => setStatus(e, { error: true })),
+);
+quarantineBtn("purgeAllBtn", "清空中…", () => {
+  if (!confirm("清空隔离区并彻底删除全部条目？此操作不可恢复。")) return undefined;
+  return quarantineAction("purge", { all: true }).catch((e) => setStatus(e, { error: true }));
+});
 
 /* 规则 */
 document.getElementById("ruleLoadBtn").onclick = () =>
-  loadRules().catch((e) => setStatus(e, { error: true }));
-document.getElementById("ruleSaveBtn").onclick = async () => {
-  try {
-    const res = await api("/api/settings", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ auto_purge_rules: [...rulePurge] }),
-    });
-    savedPurge = new Set(res.auto_purge_rules || []);
-    rulePurge = new Set(savedPurge);
-    setStatus(res);
-    await loadRules();
-    if (currentRun) await loadRun(currentRun);
-  } catch (e) {
-    setStatus(e, { error: true });
-  }
-};
+  withBusy(document.getElementById("ruleLoadBtn"), "读取中…", () =>
+    loadRules().catch((e) => setStatus(e, { error: true })),
+  );
+document.getElementById("ruleSaveBtn").onclick = () =>
+  withBusy(document.getElementById("ruleSaveBtn"), "保存中…", async () => {
+    try {
+      const res = await api("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ auto_purge_rules: [...rulePurge] }),
+      });
+      savedPurge = new Set(res.auto_purge_rules || []);
+      rulePurge = new Set(savedPurge);
+      setStatus(res);
+      await loadRules();
+      if (currentRun) await loadRun(currentRun);
+    } catch (e) {
+      setStatus(e, { error: true });
+    }
+  });
 
 /* 设置 */
 document.getElementById("provider").onchange = toggleProviderFields;
-document.getElementById("saveUseModelBtn").onclick = async () => {
-  try {
-    const res = await api("/api/settings", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ use_model: document.getElementById("useModel").checked }),
-    });
-    setStatus(res);
-    await loadSettings();
-  } catch (e) {
-    setStatus(e, { error: true });
-  }
-};
-document.getElementById("saveModelBtn").onclick = async () => {
-  try {
-    const res = await api("/api/model", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        provider: document.getElementById("provider").value,
-        openai_compatible: {
-          base_url: document.getElementById("baseUrl").value,
-          model: document.getElementById("modelName").value,
-          api_key_env: document.getElementById("apiKeyEnv").value,
-          api_key: document.getElementById("apiKey").value,
-        },
-        ollama: {
-          host: document.getElementById("ollamaHost").value,
-          model: document.getElementById("ollamaModel").value,
-        },
-        summary: {
-          max_targets: Number(document.getElementById("maxTargets").value) || 500,
-          max_depth: Number(document.getElementById("maxDepth").value) || 3,
-        },
-      }),
-    });
-    setStatus(res);
-    await loadSettings();
-  } catch (e) {
-    setStatus(e, { error: true });
-  }
-};
+document.getElementById("saveUseModelBtn").onclick = () =>
+  withBusy(document.getElementById("saveUseModelBtn"), "保存中…", async () => {
+    try {
+      const res = await api("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ use_model: document.getElementById("useModel").checked }),
+      });
+      setStatus(res);
+      await loadSettings();
+    } catch (e) {
+      setStatus(e, { error: true });
+    }
+  });
+document.getElementById("saveModelBtn").onclick = () =>
+  withBusy(document.getElementById("saveModelBtn"), "保存中…", async () => {
+    try {
+      const res = await api("/api/model", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: document.getElementById("provider").value,
+          openai_compatible: {
+            base_url: document.getElementById("baseUrl").value,
+            model: document.getElementById("modelName").value,
+            api_key_env: document.getElementById("apiKeyEnv").value,
+            api_key: document.getElementById("apiKey").value,
+          },
+          ollama: {
+            host: document.getElementById("ollamaHost").value,
+            model: document.getElementById("ollamaModel").value,
+          },
+          summary: {
+            max_targets: Number(document.getElementById("maxTargets").value) || 500,
+            max_depth: Number(document.getElementById("maxDepth").value) || 3,
+          },
+        }),
+      });
+      setStatus(res);
+      await loadSettings();
+    } catch (e) {
+      setStatus(e, { error: true });
+    }
+  });
 
 /* 监视 */
-document.getElementById("watchStartBtn").onclick = async () => {
-  try {
-    const protect = document
-      .getElementById("watchProtect")
-      .value.split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const res = await api("/api/watch/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        interval_minutes: Number(document.getElementById("watchInterval").value) || 30,
-        rules: document.getElementById("watchRules").value,
-        quick: document.getElementById("watchQuick").checked,
-        protect,
-        notify: document.getElementById("watchNotify").checked,
-      }),
-    });
-    setStatus(res);
-    await refreshWatch();
-  } catch (e) {
-    setStatus(e, { error: true });
-  }
-};
-document.getElementById("watchStopBtn").onclick = async () => {
-  try {
-    setStatus(await api("/api/watch/stop", { method: "POST" }));
-    await refreshWatch();
-  } catch (e) {
-    setStatus(e, { error: true });
-  }
-};
+document.getElementById("watchStartBtn").onclick = () =>
+  withBusy(document.getElementById("watchStartBtn"), "启动中…", async () => {
+    try {
+      const protect = document
+        .getElementById("watchProtect")
+        .value.split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const res = await api("/api/watch/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          interval_minutes: Number(document.getElementById("watchInterval").value) || 30,
+          timeout: Number(document.getElementById("watchTimeout").value),
+          rules: document.getElementById("watchRules").value,
+          quick: document.getElementById("watchQuick").checked,
+          protect,
+          notify: document.getElementById("watchNotify").checked,
+        }),
+      });
+      setStatus(res);
+      await refreshWatch();
+    } catch (e) {
+      setStatus(e, { error: true });
+    }
+  });
+document.getElementById("watchStopBtn").onclick = () =>
+  withBusy(document.getElementById("watchStopBtn"), "停止中…", async () => {
+    try {
+      setStatus(await api("/api/watch/stop", { method: "POST" }));
+      await refreshWatch();
+    } catch (e) {
+      setStatus(e, { error: true });
+    }
+  });
 
 /* --------------------------------- 启动 --------------------------------- */
 

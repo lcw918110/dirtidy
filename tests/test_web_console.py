@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import inspect
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -507,6 +509,117 @@ def test_frontend_console_avoids_innerhtml() -> None:
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "innerHTML" not in js, "app.js 不应再用 innerHTML 拼接外部数据"
     assert "textContent" in js
+
+
+def _workspace_bytes(root: Path) -> dict[str, bytes]:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def test_web_rules_preview_matches_pipeline_without_writes(
+    client: TestClient, workspace: Path
+) -> None:
+    from dirtidy.pipeline import apply_pending_rules
+
+    run_id = client.post("/api/scan", json={"quick": True}).json()["run_id"]
+    client.put("/api/settings", json={"auto_purge_rules": ["dep_python_cache"]})
+    before = _workspace_bytes(workspace)
+    expected = apply_pending_rules(
+        workspace, run_id, dry_run=True, keep=["node_modules"],
+        purge_rule_ids=["dep_python_cache"],
+    )
+    resp = client.post(
+        f"/api/runs/{run_id}/apply-rules",
+        json={"dry_run": True, "keep_paths": ["node_modules"]},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == expected
+    assert resp.json()["dry_run"] is True
+    assert resp.json()["kept_paths"] == ["node_modules"]
+    assert "node_modules" not in resp.json()["paths"]
+    assert _workspace_bytes(workspace) == before
+    assert (workspace / "node_modules/pkg/index.js").is_file()
+
+
+@pytest.mark.parametrize("saved", [False, True])
+@pytest.mark.parametrize("empty", [False, True])
+def test_web_decisions_preview_uses_body_without_saving(
+    client: TestClient, workspace: Path, saved: bool, empty: bool
+) -> None:
+    from dirtidy.decision.store import apply_decisions
+    from dirtidy.models import Decision, quarantine_root
+
+    run_id = client.post("/api/scan", json={"quick": True}).json()["run_id"]
+    rdir = run_dir(workspace, run_id)
+    decision_file = rdir / "decisions.json"
+    if saved:
+        # 保留非标准空白，防止「内容相同但被重写」逃过比较。
+        decision_file.write_bytes(b'[ {"path":"payload.txt", "action":"quarantine"} ]\n')
+    else:
+        assert not decision_file.exists()
+    decisions = [] if empty else [
+        {"path": "dup_a.txt", "action": "quarantine"},
+        {"path": "payload.txt", "action": "archive", "target_relpath": "archive/payload.txt"},
+    ]
+    before = _workspace_bytes(workspace)
+    expected = apply_decisions(
+        workspace, run_id, rdir, quarantine_root(workspace, run_id), dry_run=True,
+        decisions=[Decision(**d) for d in decisions],
+    )
+    resp = client.post(
+        f"/api/runs/{run_id}/apply-decisions", json={"dry_run": True, "decisions": decisions}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == expected
+    assert resp.json()["would_quarantine"] == ([] if empty else ["dup_a.txt"])
+    assert resp.json()["would_archive"] == ([] if empty else ["payload.txt"])
+    assert _workspace_bytes(workspace) == before
+    assert decision_file.exists() is saved
+    assert not (workspace / "archive").exists()
+
+
+def test_quarantine_planning_requires_explicit_protection_guard(workspace: Path) -> None:
+    from dirtidy.quarantine.store import plan_quarantine
+
+    parameter = inspect.signature(plan_quarantine).parameters["is_protected"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
+    with pytest.raises(TypeError, match="is_protected"):
+        plan_quarantine(workspace, [])
+
+
+def test_load_run_clears_previous_decisions_before_injecting_saved_ones() -> None:
+    body = _js_function("loadRun")
+    assert body.index("decisions.clear();") < body.index("decisions.set(")
+    assert body.index("decisions.set(") < body.index("renderReview(")
+
+
+@pytest.mark.parametrize("timeout", [None, 0, 17.5])
+def test_web_watch_timeout_matches_cli_and_reaches_worker(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, timeout: float | None
+) -> None:
+    from dirtidy.cli import build_parser
+    from dirtidy.watch import WATCH_DEFAULT_TIMEOUT
+    from dirtidy.web.app import WatchStartBody
+
+    assert WatchStartBody().timeout == WATCH_DEFAULT_TIMEOUT
+    assert build_parser().parse_args(["watch"]).timeout == WATCH_DEFAULT_TIMEOUT
+    called = threading.Event()
+    received = {}
+
+    def fake_watch(root: Path, **kwargs: object) -> int:
+        received.update(kwargs)
+        called.set()
+        return 0
+
+    monkeypatch.setattr("dirtidy.web.app.run_watch", fake_watch)
+    payload = {} if timeout is None else {"timeout": timeout}
+    try:
+        resp = client.post("/api/watch/start", json=payload)
+        assert resp.status_code == 200, resp.text
+        assert called.wait(2), "监视线程未调用 run_watch"
+        assert received["timeout"] == (WATCH_DEFAULT_TIMEOUT if timeout is None else timeout)
+    finally:
+        client.post("/api/watch/stop")
 
 
 def test_web_status_bar_renders_human_text() -> None:

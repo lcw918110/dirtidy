@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from dirtidy.advice import describe
+from dirtidy.advice import ADVICE_HINTS, ADVICE_LABELS, ADVICE_ORDER, describe
 from dirtidy.ai.providers import analyze_run
 from dirtidy.decision.store import apply_decisions, save_decisions
 from dirtidy.explain import explain_path
@@ -55,7 +55,7 @@ from dirtidy.settings import (
     save_model_settings,
     save_use_model,
 )
-from dirtidy.watch import run_watch
+from dirtidy.watch import WATCH_DEFAULT_TIMEOUT, run_watch
 
 
 class DecisionsBody(BaseModel):
@@ -63,9 +63,30 @@ class DecisionsBody(BaseModel):
 
 
 class ApplyRulesBody(BaseModel):
-    """执行自动隔离时可带一组「人工保留」路径，这些路径本轮不动。"""
+    """执行自动隔离时可带一组「人工保留」路径，这些路径本轮不动。
+
+    `dry_run=True` 时只回「会搬走哪些、拦下哪些」，不动任何文件——与 CLI
+    `dirtidy apply-rules --dry-run` **同一个开关、同一份实现**。界面上的
+    「本轮将搬走 N 项」必须来自这里，不能自己数 `pending_auto_hits`：
+    「规则命中几条」和「实际会搬走几条」是两个数（目录覆盖后代、子树含保护
+    路径都会让后者更小），界面拿前者当后者就是在报假账。
+    """
 
     keep_paths: list[str] = Field(default_factory=list)
+    dry_run: bool = False
+
+
+class ApplyDecisionsBody(BaseModel):
+    """按人工决策执行/预览。
+
+    界面里的决策在点「保存」之前只活在浏览器内存里，所以预览必须能把决策
+    随请求带上来——否则「预览的是上次保存的那份」又是一次前后不一。
+    不传 decisions 时退回读 decisions.json（与 CLI 行为一致）。
+    `dry_run=True` 只校验并报告，不移动任何文件。
+    """
+
+    decisions: list[dict] | None = None
+    dry_run: bool = False
 
 
 class ScanBody(BaseModel):
@@ -102,11 +123,21 @@ class ModelBody(BaseModel):
 
 
 class WatchStartBody(BaseModel):
+    """启动定时监视。
+
+    `timeout` 必须显式给出，且默认值与 CLI `dirtidy watch --timeout` 一级对齐
+    （1800 秒）。原先这里没有这个字段，`run_watch` 于是用函数默认 `0.0`（不限时），
+    而 CLI 默认 1800——**监视是无人值守的，一轮卡住就等于整个监视静默停摆**，
+    用户在网页上开的监视比命令行开的更容易变成僵尸体。
+    默认值写在 `WATCH_DEFAULT_TIMEOUT`，与 CLI 共用同一个常量来源。
+    """
+
     interval_minutes: float = 30.0
     rules: str = "default"
     quick: bool = True
     protect: list[str] = Field(default_factory=list)
     notify: bool = False
+    timeout: float = WATCH_DEFAULT_TIMEOUT
 
 
 def _model_form(root: Path) -> dict[str, Any]:
@@ -376,6 +407,10 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
             "root": str(default_root),
             "run_id": default_run_id,
             "state_dir": str(state_root(default_root)),
+            "advice_order": ADVICE_ORDER,
+            "advice_labels": ADVICE_LABELS,
+            "advice_hints": ADVICE_HINTS,
+            "watch_default_timeout": WATCH_DEFAULT_TIMEOUT,
         }
 
     @app.get("/api/health")
@@ -511,10 +546,21 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
         return {"saved": len(decisions)}
 
     @app.post("/api/runs/{run_id}/apply-decisions")
-    def post_apply(run_id: str) -> dict:
+    def post_apply(run_id: str, body: ApplyDecisionsBody | None = None) -> dict:
+        """按 decisions.json 执行：隔离 / 归档。
+
+        `dry_run=True` 时与 CLI `dirtidy apply-decisions --dry-run` 走**同一个**
+        `apply_decisions(dry_run=True)`：完整校验、冲突检测、保护复核都跑一遍，
+        只是不动文件。界面的「执行前预览」只能用它，不能自己推算——
+        归档目标冲突、路径越界、子树含保护路径这三类只有实跑路径才知道。
+        """
         rdir = _run_path(run_id)
         qdir = quarantine_root(default_root, run_id)
-        return apply_decisions(default_root, run_id, rdir, qdir)
+        opts = body or ApplyDecisionsBody()
+        return apply_decisions(
+            default_root, run_id, rdir, qdir, dry_run=opts.dry_run,
+            decisions=None if opts.decisions is None else [Decision(**d) for d in opts.decisions],
+        )
 
     @app.post("/api/runs/{run_id}/apply-rules")
     def post_apply_rules(run_id: str, body: ApplyRulesBody | None = None) -> dict:
@@ -522,13 +568,19 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
 
         「隔离后立即物理删除」的规则清单来自状态目录的设置，与 CLI 同源——
         否则会出现「网页里开了直删、命令行跑却只隔离」。
+
+        `dry_run=True` 与 CLI 的 `--dry-run` 是同一个参数、同一个 `apply_pending_rules`，
+        返回的 `would_quarantine` / `blocked_by_protect` / `kept_by_user` 就是
+        界面上「本轮将搬走 N 项」的**唯一来源**。这是本项目「破坏性动作默认先预览」
+        约定的界面侧落点：先看账，再点确认。
         """
         _run_path(run_id)
-        keep = body.keep_paths if body else []
+        opts = body or ApplyRulesBody()
         return apply_pending_rules(
             default_root,
             run_id,
-            keep=keep,
+            dry_run=opts.dry_run,
+            keep=opts.keep_paths,
             purge_rule_ids=load_auto_purge_rules(default_root),
         )
 
@@ -754,6 +806,8 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
                 raise HTTPException(400, "监视已在运行")
             if body.interval_minutes <= 0:
                 raise HTTPException(400, "interval_minutes 必须 > 0")
+            if body.timeout < 0:
+                raise HTTPException(400, "timeout 不能为负（0 表示不限时）")
             stop = threading.Event()
 
             def on_round(info: dict[str, Any]) -> None:
@@ -775,6 +829,7 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
                         quick=body.quick,
                         protect=body.protect,
                         notify_enabled=body.notify,
+                        timeout=body.timeout,
                         stop_event=stop,
                         on_round=on_round,
                     )
@@ -798,6 +853,7 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
                 error="",
                 interval_minutes=body.interval_minutes,
                 rules=body.rules,
+                timeout=body.timeout,
             )
             thread.start()
         return {"running": True}

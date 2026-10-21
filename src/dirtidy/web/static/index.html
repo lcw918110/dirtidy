@@ -36,18 +36,26 @@
   <main class="app-main">
 
   <!-- ============================== 概览 ============================== -->
+  <!-- 首屏只回答一个问题：现在该做什么。数字与流程说明都排在它后面。 -->
   <section class="tab" id="tab-overview">
-    <h2>概览</h2>
+    <div class="page-head">
+      <div class="page-head-main">
+        <h2>概览</h2>
+        <p class="lead">先看这一句，再决定点哪里。</p>
+      </div>
+      <div class="page-head-side">
+        <label>当前 run
+          <select id="runSelect"></select>
+        </label>
+        <button id="reloadBtn" type="button">刷新</button>
+        <span class="hint" id="runHint"></span>
+      </div>
+    </div>
+
     <div class="guide" id="overviewGuide"></div>
     <div class="steps" id="overviewSteps"></div>
     <div class="cards" id="overviewCards"></div>
-    <div class="toolbar">
-      <label>当前 run
-        <select id="runSelect"></select>
-      </label>
-      <button id="reloadBtn" type="button">刷新</button>
-      <span class="hint" id="runHint"></span>
-    </div>
+
     <details class="panel">
       <summary>完整流程说明</summary>
       <p class="hint">
@@ -61,13 +69,20 @@
 
   <!-- ============================== 扫描 ============================== -->
   <section class="tab" id="tab-scan">
-    <h2>扫描 <span class="step-no">第 1 步 · 看看有什么</span></h2>
-    <p class="hint">
-      扫描只读取元数据与内容 hash，<strong>不移动、不删除任何文件</strong>。
-      结果会显示在下方，按规则分组，并标出「建议清理 / 可以清理 / 需要你判断」。
-      看完点「去审阅」逐条判断——<strong>「扫描后立即执行自动隔离」是跳过审阅的捷径</strong>，
-      想按流程走就别勾它。
-    </p>
+    <div class="page-head">
+      <div class="page-head-main">
+        <h2>扫描 <span class="step-no">第 1 步 · 看看有什么</span></h2>
+        <p class="lead">扫描只读元数据与内容 hash，<strong>不移动、不删除任何文件</strong>。</p>
+        <details class="page-note">
+          <summary>跑完之后会看到什么</summary>
+          <p>
+            结果按规则分组，并标出「建议清理 / 可以清理 / 需要你判断」。看完点「去审阅」逐条判断——
+            <strong>「扫描后立即执行自动隔离」是跳过审阅的捷径</strong>，想按流程走就别勾它。
+          </p>
+        </details>
+      </div>
+    </div>
+
     <div class="panel form">
       <button id="scanBtn" type="button" class="primary">开始扫描</button>
       <p class="hint">
@@ -98,34 +113,38 @@
   </section>
 
   <!-- ============================== 审阅 ============================== -->
+  <!-- 这一页信息最多，所以按「要你判断的」与「供你核对的信息」分两段：
+       前者（①②③）在上，后者（④⑤）在下。长说明一律收进 details，
+       首屏只留一句「只做判断，不动文件」。 -->
   <section class="tab" id="tab-review">
-    <h2>审阅 <span class="step-no">第 2 步 · 人工介入</span></h2>
-    <p class="hint lead">
-      这一步<strong>只做判断，不动任何文件</strong>：勾「保留」、改「决策」，判断完去「执行」页动手。
-      两张表都支持批量选择，不必逐行点。
-    </p>
+    <div class="page-head">
+      <div class="page-head-main">
+        <h2>审阅 <span class="step-no">第 2 步 · 人工介入</span></h2>
+        <p class="lead">
+          这一步<strong>只做判断，不动任何文件</strong>：勾「保留」、改「决策」，判断完去「执行」页动手。
+        </p>
+        <details class="page-note">
+          <summary>两张表的区别（点开看）</summary>
+          <p>
+            ① 是<strong>规则命中</strong>的项，默认会执行；勾「保留」的项本轮不动。
+            ② 是<strong>候选</strong>，每行默认「保留不动」，要你自己改「决策」才会执行。
+            两张表都支持批量操作，不必逐行点。
+          </p>
+        </details>
+      </div>
+    </div>
 
-    <p class="legend">
-      <span class="advice advice-safe_clean">建议清理</span> 重建免费，删了不影响
-      <span class="advice advice-clean">可以清理</span> 能重建，要重装或重编译
-      <span class="advice advice-review">需要你判断</span> 说不准还有没有用
-      <span class="advice advice-protected">受保护</span> 永不自动动
-    </p>
+    <p class="legend" id="adviceLegend"></p>
 
     <h3>① 待自动隔离（规则命中）</h3>
     <p class="hint">
-      这里是<strong>规则命中</strong>的项，执行时未必都会搬走：勾选「保留」的项本轮不动；
-      某项的子树里若躺着受保护路径（如 <code>node_modules/.npmrc</code>），会被整条拦下；
-      被上层目录命中的条目会被标成「已含在上层目录里」（执行时只搬父目录）。
-      前两者都登记进 protection.json 便于审计追溯。点路径旁的「为什么？」看逐条判定。
+      执行时未必都会搬走：勾「保留」的不动；子树里有受保护路径（如 <code>node_modules/.npmrc</code>）的会被整条拦下；
+      被上层目录命中的会标成「已含在上层目录里」。点路径旁的「为什么？」看逐条判定。
     </p>
     <div class="toolbar filterbar">
       <label>只看
         <select id="pendingAdvice">
           <option value="">全部</option>
-          <option value="safe_clean">建议清理</option>
-          <option value="clean">可以清理</option>
-          <option value="review">需要你判断</option>
         </select>
       </label>
       <input id="pendingSearch" type="search" placeholder="按路径筛选…" />
@@ -164,10 +183,8 @@
 
     <h3>② 候选 / 建议</h3>
     <p class="hint">
-      「建议」列分两部分：上面是<strong>规则给出的判断</strong>（这类东西能不能清），
-      下面是<strong>模型的参考</strong>（跑过模型分析才有）。两者都<strong>不会自动生效</strong>——
-      每行默认是「保留不动」。想一次采纳模型建议就点「采纳全部建议」；
-      也可以用下面的批量选择一次改多行，最后去「执行」页动手。
+      「建议」列上面是<strong>规则判断</strong>、下面是<strong>模型参考</strong>，两者都<strong>不会自动生效</strong>——
+      每行默认「保留不动」。想一次采纳模型建议就点「采纳全部建议」；也可以批量改多行。
       只有决策选「归档」时才需要填右侧的目标路径。
     </p>
     <div class="toolbar">
@@ -213,14 +230,14 @@
       <button id="gotoExecuteBtn2" type="button">下一步：去执行 →</button>
     </div>
 
-    <h3>重复组（人选保留）</h3>
+    <h3>③ 重复组（人选保留）</h3>
     <div id="dups"></div>
 
-    <h3>受保护（不会被自动隔离）</h3>
+    <h3>④ 受保护（不会被自动隔离）</h3>
     <p class="hint">内置保护清单写在代码里，规则包关不掉；下面是本轮实际拦下的项。</p>
     <div id="protection"></div>
 
-    <h3>模型建议</h3>
+    <h3>⑤ 模型建议</h3>
     <div class="toolbar">
       <button id="analyzeBtn" type="button">运行模型分析</button>
       <span class="hint">模型是可选增强；需先在「设置」页启用并保存配置。</span>
@@ -234,11 +251,21 @@
        界面说有这一步、实际没有，是最典型的「前后不搭」。
        两个按钮各带自己那份清单，仍然「紧挨它作用的对象」。 -->
   <section class="tab" id="tab-execute">
-    <h2>执行 <span class="step-no">第 3 步 · 动手</span></h2>
-    <p class="hint lead">
-      到这一步才会真正搬文件。搬进<strong>隔离区</strong>（不是删除），随时可还原；
-      确认无误后再去「隔离区」页彻底删除释放空间。
-    </p>
+    <div class="page-head">
+      <div class="page-head-main">
+        <h2>执行 <span class="step-no">第 3 步 · 动手</span></h2>
+        <p class="lead">
+          到这一步才会真正搬文件。先预览再确认；默认搬进<strong>隔离区</strong>，可还原。
+        </p>
+        <details class="page-note">
+          <summary>三种去向的区别</summary>
+          <p>
+            隔离 = 搬进隔离区，可还原；归档 = 移动到指定位置，不进隔离区；
+            已开启且获准的直删规则会<strong>物理删除，不可还原</strong>。
+          </p>
+        </details>
+      </div>
+    </div>
     <div class="cards" id="execCards"></div>
 
     <div class="panel">
@@ -246,6 +273,7 @@
       <p class="hint" id="execRulesHint"></p>
       <div class="execlist" id="execRulesList"></div>
       <div class="toolbar">
+        <button id="previewRulesBtn" type="button">执行前预览（不动文件）</button>
         <button id="applyRulesBtn" type="button">执行自动隔离</button>
         <span class="hint">勾了「保留」的本轮不动；搬入后可在「隔离区」还原。</span>
       </div>
@@ -256,6 +284,7 @@
       <p class="hint" id="execCandHint"></p>
       <div class="execlist" id="execCandList"></div>
       <div class="toolbar">
+        <button id="previewDecisionsBtn" type="button">执行前预览（不保存、不搬文件）</button>
         <button id="saveBtn" type="button">保存决策</button>
         <button id="applyBtn" type="button">执行候选决策</button>
         <span class="hint">执行按「决策」列搬走隔离 / 归档项；「保留不动」的不碰。</span>
@@ -265,18 +294,27 @@
 
   <!-- ============================== 隔离区 ============================== -->
   <section class="tab" id="tab-quarantine">
-    <h2>隔离区 <span class="step-no">第 4 步 · 确认后释放空间</span></h2>
-    <p class="hint">
-      隔离区是<strong>中间状态</strong>：文件已离开原位但还在磁盘上，占着空间。
-      确认不需要了就在这一页<strong>彻底删除</strong>释放空间；发现删错了就<strong>还原</strong>回原位
-      （原路径已有文件时会跳过，不覆盖）。彻底删除<strong>不可恢复</strong>。
-    </p>
+    <div class="page-head">
+      <div class="page-head-main">
+        <h2>隔离区 <span class="step-no">第 4 步 · 确认后释放空间</span></h2>
+        <p class="lead">
+          隔离区是<strong>中间状态</strong>：文件已离开原位但还在磁盘上，占着空间。
+        </p>
+        <details class="page-note">
+          <summary>这一页的两个动作分别做什么</summary>
+          <p>
+            确认不需要了就<strong>彻底删除</strong>释放空间（<strong>不可恢复</strong>）；
+            发现删错了就<strong>还原</strong>回原位——原路径已有文件时会跳过，不覆盖。
+          </p>
+        </details>
+      </div>
+    </div>
     <div class="cards" id="quarantineCards"></div>
     <div class="toolbar">
       <button id="restoreSelBtn" type="button">还原选中</button>
       <button id="purgeSelBtn" type="button" class="danger">彻底删除选中</button>
       <button id="restoreAllBtn" type="button">全部还原</button>
-      <button id="purgeAllBtn" type="button" class="danger">清空隔离区（彻底删除）</button>
+      <button id="purgeAllBtn" type="button" class="danger-ghost">清空隔离区（彻底删除）</button>
     </div>
     <table>
       <thead>
@@ -292,6 +330,7 @@
       </thead>
       <tbody id="quarantineRows"></tbody>
     </table>
+
     <h3>已直接删除（审计留痕）</h3>
     <p class="hint">这些条目命中了「直删」规则，已搬入隔离区后立刻物理删除，不可还原。</p>
     <div id="purgedBox"></div>
@@ -299,20 +338,31 @@
 
   <!-- ============================== 规则 ============================== -->
   <section class="tab" id="tab-rules">
-    <h2>规则 <span class="step-no">配置</span></h2>
-    <div class="toolbar">
-      <label>规则包
-        <select id="rulePackSelect"></select>
-      </label>
-      <button id="ruleLoadBtn" type="button">查看</button>
-      <button id="ruleSaveBtn" type="button">保存直删配置</button>
+    <div class="page-head">
+      <div class="page-head-main">
+        <h2>规则 <span class="step-no">配置</span></h2>
+        <p class="lead">
+          规则决定「哪些东西会被自动隔离」，保护清单决定「哪些永远不动」。
+        </p>
+        <details class="page-note">
+          <summary>三种动作与直删的含义</summary>
+          <p>
+            动作分三档：<strong>protect</strong>（永不自动隔离，最高优先级）、
+            <strong>auto_quarantine</strong>（进待隔离清单）、<strong>candidate_only</strong>（只进候选，交人工）。
+            标了「建议直删」的规则是<strong>重建成本为零</strong>的类型；勾选「直删」后，它命中的项会
+            先搬入隔离区、随即物理删除，不再占用空间。<strong>保护判定依然优先</strong>——直删不会成为绕过保护的缝。
+          </p>
+        </details>
+      </div>
+      <div class="page-head-side">
+        <label>规则包
+          <select id="rulePackSelect"></select>
+        </label>
+        <button id="ruleLoadBtn" type="button">查看</button>
+        <button id="ruleSaveBtn" type="button" class="primary">保存直删配置</button>
+      </div>
     </div>
-    <p class="hint">
-      规则动作分三档：<strong>protect</strong>（永不自动隔离，最高优先级）、
-      <strong>auto_quarantine</strong>（进待隔离清单）、<strong>candidate_only</strong>（只进候选，交人工）。
-      标了「建议直删」的规则是<strong>重建成本为零</strong>的类型；勾选「直删」后，它命中的项会
-      先搬入隔离区、随即物理删除，不再占用空间。<strong>保护判定依然优先</strong>——直删不会成为绕过保护的缝。
-    </p>
+
     <div class="panel">
       <h3>规则清单</h3>
       <table>
@@ -343,7 +393,12 @@
 
   <!-- ============================== 设置 ============================== -->
   <section class="tab" id="tab-settings">
-    <h2>设置 <span class="step-no">配置</span></h2>
+    <div class="page-head">
+      <div class="page-head-main">
+        <h2>设置 <span class="step-no">配置</span></h2>
+        <p class="lead">模型分析是<strong>可选增强</strong>：不用它，规则引擎与人工终审一样完整。</p>
+      </div>
+    </div>
 
     <div class="panel form">
       <h3>模型分析</h3>
@@ -352,7 +407,6 @@
         启用模型分析（关闭时「审阅」页不会调用任何模型，也不外发任何内容）
       </label>
       <p class="hint">
-        模型是<strong>可选增强</strong>：不用它，规则引擎与人工终审一样完整。
         它只对「候选」类文件给建议，且默认只外发安全摘要（可截断的文本片段，密钥会被打码）。
       </p>
       <label>provider
@@ -386,7 +440,7 @@
       <label>非候选文件保留层级
         <input id="maxDepth" type="number" min="0" />
       </label>
-      <button id="saveModelBtn" type="button">保存模型配置</button>
+      <button id="saveModelBtn" type="button" class="primary">保存模型配置</button>
       <button id="saveUseModelBtn" type="button">保存开关</button>
       <p class="hint" id="modelStatus"></p>
     </div>
@@ -406,14 +460,26 @@
 
   <!-- ============================== 监视 ============================== -->
   <section class="tab" id="tab-watch">
-    <h2>监视 <span class="step-no">长期运行</span></h2>
-    <p class="hint">
-      监视会<strong>定期扫描并报告新增命中</strong>，但<strong>绝不执行任何隔离</strong>——
-      它只回答「现在有什么」，动不动是人的决定。命令行等价于 <code>dirtidy watch</code>。
-    </p>
+    <div class="page-head">
+      <div class="page-head-main">
+        <h2>监视 <span class="step-no">长期运行</span></h2>
+        <p class="lead">
+          监视会<strong>定期扫描并报告新增命中</strong>，但<strong>绝不执行任何隔离</strong>。
+        </p>
+        <details class="page-note">
+          <summary>它和「扫描」页的分工</summary>
+          <p>
+            它只回答「现在有什么」，动不动是人的决定。命令行等价于 <code>dirtidy watch</code>。
+          </p>
+        </details>
+      </div>
+    </div>
     <div class="panel form">
       <label>扫描间隔（分钟）
         <input id="watchInterval" type="number" min="0.1" step="0.1" value="30" />
+      </label>
+      <label>单轮扫描时限（秒；0 表示不限）
+        <input id="watchTimeout" type="number" min="0" step="1" />
       </label>
       <label>规则包
         <select id="watchRules"></select>
@@ -429,8 +495,8 @@
       <label>额外保护路径（每行一个）
         <textarea id="watchProtect" rows="2" placeholder="留空即不加额外保护"></textarea>
       </label>
-      <button id="watchStartBtn" type="button">启动监视</button>
-      <button id="watchStopBtn" type="button" class="danger">停止监视</button>
+      <button id="watchStartBtn" type="button" class="primary">启动监视</button>
+      <button id="watchStopBtn" type="button" class="danger-ghost">停止监视</button>
     </div>
     <div class="cards" id="watchCards"></div>
     <div class="panel" id="watchDetail"></div>

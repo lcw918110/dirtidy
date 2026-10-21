@@ -312,6 +312,11 @@ def apply_pending_rules(
     rdir = run_dir(root, run_id)
     pending_path = rdir / "pending_auto_hits.json"
     if not pending_path.exists():
+        if dry_run:
+            return {"dry_run": True, "run_id": run_id, "would_quarantine": 0,
+                    "paths": [], "would_purge": 0, "would_purge_paths": [],
+                    "blocked_by_protect": 0, "blocked_paths": [],
+                    "kept_by_user": 0, "kept_paths": [], "purge_refused": []}
         return {"quarantined": 0, "message": "无 pending_auto_hits"}
 
     hits = [RuleHit(**h) for h in read_json(pending_path)]

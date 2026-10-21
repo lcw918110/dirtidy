@@ -1,427 +1,813 @@
-:root {
-  --bg: #f6f4ef;
-  --ink: #1c1b19;
-  --line: #d9d2c5;
-  --accent: #2f5d50;
-  --danger: #9b2c2c;
-  --muted: #6b6459;
-  --header-h: 6.2rem;   /* app-header 近似高度，用于 calc */
-}
-* { box-sizing: border-box; }
+/* dirtidy 控制台样式表
+ *
+ * 设计取向：**克制的专业工具感**。
+ * 这是个本地文件整理工具，用户会在它面前做「删不删」的判断，
+ * 所以界面必须像仪器而不像海报：
+ *   - 信息密度高，但层级靠留白与字重，不靠花哨装饰；
+ *   - 颜色只用来编码**后果**（可还原 / 不可还原 / 待判断 / 受保护），
+ *     装饰性用色一律没有；
+ *   - 数字全部等宽对齐，竖着扫一眼能比出大小。
+ *
+ * 组织方式（改之前先看这里）：
+ *   §1  设计令牌（token）——所有颜色/间距/字号/圆角都从这里取
+ *   §2  基础元素（reset、排版、表单控件）
+ *   §3  布局骨架（页头、导航、内容区）
+ *   §4  通用元件（按钮、面板、表格、卡片、标签、状态条）
+ *   §5  页面专属（步骤条、引导区、清单、弹窗）
+ *   §6  状态与可达性（焦点、禁用、加载、空态）
+ *
+ * 铁律：**组件里不许写裸色值**。要新颜色就加 token，
+ * 否则「同一语义两种颜色」必然发生——而这正是这个项目反复栽的形态。
+ */
 
-/* ======================== 布局骨架 ========================
-   核心目标：切页时视口高度不变。
-   body = flex column；header 固定高度；main 占满剩余、内部滚动。
-   以前 header+nav+warn 和内容全在文档流里，哪页内容多页面就撑多高——切页像在跳。 */
-html, body { height: 100%; }
+:root {
+  /* ---------- 颜色：中性基底 ---------- */
+  --bg: #f7f6f2;             /* 页面底 */
+  --surface: #ffffff;       /* 卡片 / 面板 */
+  --surface-sunken: #f1efe9;/* 凹陷区（表头、只读框） */
+  --line: #e0ddd4;          /* 分隔线 */
+  --line-strong: #cdc9bd;   /* 强调分隔线（表头下沿、输入框） */
+  --ink: #1f1e1b;            /* 主文字 */
+  --ink-soft: #55524b;      /* 次级文字：说明、标签 */
+  --ink-muted: #7d7a71;     /* 弱化文字：占位、编号 */
+
+  /* ---------- 颜色：语义 ---------- */
+  --accent: #2f5d50;         /* 主色：可安全执行的动作 */
+  --accent-hover: #24483e;
+  --accent-ink: #ffffff;
+  --accent-soft: #e8f0ec;    /* 主色浅底 */
+  --accent-line: #b9cfc6;
+
+  --danger: #a03232;         /* 危险动作：彻底删除 */
+  --danger-hover: #852929;
+  --danger-soft: #fbedec;
+  --danger-line: #e5c3c1;
+
+  --warn: #8a5a12;           /* 待判断 */
+  --warn-soft: #f8f0e0;
+  --warn-line: #e2cda2;
+
+  --info-ink: #23485c;       /* 需要你判断 */
+  --info-soft: #e7eef3;
+  --info-line: #bfd2de;
+
+  /* ---------- 尺寸：4px 基线 ---------- */
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  --shadow-sm: 0 1px 2px rgba(31, 30, 27, 0.06);
+  --shadow: 0 2px 8px rgba(31, 30, 27, 0.08);
+  --shadow-lg: 0 8px 28px rgba(31, 30, 27, 0.14);
+
+  --font: "IBM Plex Sans", "Noto Sans SC", -apple-system, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  --font-mono: "IBM Plex Mono", "SF Mono", ui-monospace, "Menlo", monospace;
+}
+
+/* ======================== §2 基础元素 ======================== */
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html,
+body { height: 100%; }
+
 body {
   margin: 0;
-  font-family: "IBM Plex Sans", "Noto Sans SC", sans-serif;
-  background: linear-gradient(160deg, #eef3ef, var(--bg) 40%, #ebe4d8);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.55;
   color: var(--ink);
+  background: var(--bg);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  -webkit-font-smoothing: antialiased;
 }
+
+h1 { margin: 0; font-size: 1.2rem; font-weight: 600; letter-spacing: 0.01em; }
+h2 { margin: 0 0 var(--sp-3); font-size: 1.1rem; font-weight: 600; }
+h3 { margin: var(--sp-5) 0 var(--sp-2); font-size: 0.98rem; font-weight: 600; }
+
+code,
+pre {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+}
+
+p { margin: 0 0 var(--sp-2); }
+
+/* 表单控件：统一外观。默认值是「中性地可编辑」，不用灰底暗示不可用。 */
+select,
+input,
+textarea {
+  font: inherit;
+  color: var(--ink);
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+input[type="search"] { min-width: 12rem; }
+
+textarea { font-family: inherit; resize: vertical; }
+
+select:disabled,
+input:disabled,
+textarea:disabled {
+  background: var(--surface-sunken);
+  color: var(--ink-muted);
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+/* ======================== §3 布局骨架 ========================
+   核心目标：切页时视口高度不变。
+   body = flex column；header 固定高度；main 占满剩余、内部滚动。 */
+
 .app-header {
   flex: 0 0 auto;
-  padding: 0.8rem 1.5rem 0;
-  background: rgba(246, 244, 239, 0.92);
-  backdrop-filter: blur(6px);
+  padding: var(--sp-3) var(--sp-5) 0;
+  background: var(--surface);
   border-bottom: 1px solid var(--line);
   z-index: 10;
 }
+
 .app-main {
   flex: 1 1 auto;
   overflow-y: auto;
-  padding: 0.6rem 1.5rem 4.5rem; /* 底部留够状态条 + 呼吸空间 */
+  padding: var(--sp-4) var(--sp-5) 5rem; /* 底部留够状态条 + 呼吸空间 */
   scroll-behavior: smooth;
 }
 
-/* ======================== 字体层级 ======================== */
-h1 { margin: 0; letter-spacing: 0.04em; font-size: 1.35rem; }
-h2 { margin: 0 0 0.5rem; font-size: 1.15rem; }
-h3 { margin: 1.2rem 0 0.35rem; font-size: 1rem; }
-header { margin-bottom: 0.3rem; }
-.brand { display: flex; align-items: baseline; gap: 0.7rem; flex-wrap: wrap; }
-.tag { color: var(--muted); font-size: 0.85rem; }
-#meta { margin: 0.3rem 0 0; font-size: 0.88rem; }
-#stateDir { margin: 0.1rem 0 0; }
+.app-main > .tab {
+  max-width: 1180px;
+  margin: 0 auto;
+}
 
-/* ======================== 分页导航 ======================== */
+/* ---------------------------- 页面标题区 ---------------------------- */
+/* 每个分页的第一块都长这个样子：左边是「这页是什么」，右边是「看哪个 run」。
+ * 统一结构比统一措辞重要——位置一致，用户换页时眼睛不用重新找。 */
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4) var(--sp-5);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-4);
+}
+
+.page-head-main { flex: 1 1 26rem; min-width: 0; }
+.page-head h2 { margin-bottom: var(--sp-2); }
+/* 标题区里的段落（含 .lead）不需要自身的外边距，间距由 .page-head 统一给。 */
+.page-head p { margin-bottom: 0; }
+
+.page-head-side { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.page-head-side label { font-size: 0.85rem; color: var(--ink-soft); }
+
+/* 页头里的次级说明：默认收起。首屏只留一句「这页做什么」，
+ * 细节（会发生什么、还有哪些例外）放到这里——不删信息，只是不抢注意力。 */
+.page-note {
+  margin-top: var(--sp-2);
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.page-note > summary { cursor: pointer; width: fit-content; }
+.page-note > summary:hover { color: var(--accent); }
+.page-note p { margin: var(--sp-2) 0 0; line-height: 1.6; }
+
+/* ======================== §3.1 页头与导航 ======================== */
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.brand .tag {
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+
+#meta { margin: var(--sp-1) 0 0; font-size: 0.85rem; color: var(--ink-soft); }
+#stateDir { margin: 0; font-size: 0.78rem; color: var(--ink-muted); }
+
 .tabs {
   display: flex;
-  gap: 0.15rem;
+  gap: var(--sp-1);
   flex-wrap: wrap;
-  margin: 0.4rem 0 0.2rem;
+  margin: var(--sp-3) 0 0;
 }
+
+/* 分页按钮：不是胶囊，是「下划线标签」——像文档目录，不抢内容的注意力。 */
 .tabbtn {
   background: transparent;
-  color: var(--muted);
-  border: 1px solid transparent;
+  color: var(--ink-soft);
+  border: 0;
   border-bottom: 2px solid transparent;
   border-radius: 0;
-  padding: 0.45rem 0.85rem;
+  padding: 0.4rem 0.8rem 0.5rem;
   font-size: 0.92rem;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease;
 }
-.tabbtn:hover { color: var(--accent); }
+
+.tabbtn:hover { color: var(--ink); }
+
 .tabbtn[aria-selected="true"] {
   color: var(--accent);
   border-bottom-color: var(--accent);
   font-weight: 600;
 }
+
 .tab { display: none; }
-.tab.active { display: block; animation: tab-in 0.16s ease-out; }
+
 /* 淡入 + 轻微上移：让切页有「进来」的感觉，而不是生硬地闪现。
-   幅度刻意压小（3px / 0.16s），不抢内容、也不造成滚动跳动。 */
+   幅度刻意压小（2px / 0.15s），不抢内容、也不造成滚动跳动。 */
+.tab.active { display: block; animation: tab-in 0.15s ease-out; }
+
 @keyframes tab-in {
-  from { opacity: 0; transform: translateY(3px); }
+  from { opacity: 0; transform: translateY(2px); }
   to { opacity: 1; transform: none; }
 }
-/* 尊重系统「减少动态效果」设置：关了动画就一步到位 */
-@media (prefers-reduced-motion: reduce) {
-  .tab.active { animation: none; }
-}
 
-/* ======================== 通用元件 ======================== */
-/* 工具栏：统一间距，不让按钮贴得太紧或太远 */
-.toolbar {
-  display: flex;
-  gap: 0.6rem;
-  align-items: center;
-  margin: 0.5rem 0 0.8rem;
-  flex-wrap: wrap;
-}
-.toolbar > .hint { margin: 0; }
-/* 筛选条贴着表格上方，与底部「执行」按钮分开——它只改显示，不动任何文件。 */
-.filterbar { margin-bottom: 0.3rem; }
+/* ======================== §4 通用元件 ======================== */
+
+/* --------------------------------- 按钮 --------------------------------- */
+/* 三档语义，不靠颜色深浅而靠**边框与底色**区分：
+   primary 实心（唯一的主行动）；default 描边（次要）；
+   ghost 无框（表格里的行内操作）。 */
 
 button {
-  background: var(--accent);
-  color: white;
-  border: 0;
-  padding: 0.42rem 0.85rem;
-  cursor: pointer;
-  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  font: inherit;
   font-size: 0.9rem;
+  line-height: 1.2;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
 }
-button.danger { background: var(--danger); }
-button:disabled { opacity: 0.45; cursor: not-allowed; }
-button.primary { padding: 0.55rem 1.4rem; font-size: 0.98rem; }
 
-/* 面板：所有「一块内容」都用同一个容器，不要有的带边框有的不带 */
+button:hover:not(:disabled) { background: var(--surface-sunken); }
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 500;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--accent-ink);
+}
+
+button.danger:hover:not(:disabled) {
+  background: var(--danger-hover);
+  border-color: var(--danger-hover);
+}
+
+/* 「有风险但还没到不可逆」的按钮：描边红字，不抢主行动。 */
+button.danger-ghost {
+  background: var(--surface);
+  border-color: var(--danger-line);
+  color: var(--danger);
+}
+
+button.danger-ghost:hover:not(:disabled) { background: var(--danger-soft); }
+
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* --------------------------------- 面板 --------------------------------- */
+/* 面板 = 一块内容单元。边框浅、底色白、圆角小而一致。 */
 .panel {
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.6);
-  padding: 0.8rem 1rem;
-  margin-bottom: 0.9rem;
-  border-radius: 4px;
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: var(--sp-4);
+  margin-bottom: var(--sp-4);
+  box-shadow: var(--shadow-sm);
 }
 
-/* 表格：统一背景、边框、字重 */
-table { width: 100%; border-collapse: collapse; background: rgba(255,255,255,0.65); border-radius: 4px; overflow: hidden; }
-th, td { border-bottom: 1px solid var(--line); padding: 0.42rem 0.5rem; text-align: left; font-size: 0.88rem; }
-th { font-weight: 600; color: var(--muted); background: rgba(255,255,255,0.45); }
+/* --------------------------------- 工具栏 ------------------------------- */
 
-/* 表单控件 */
-select, input, textarea { padding: 0.3rem; font: inherit; border: 1px solid var(--line); background: #fff; border-radius: 3px; }
-input[type="search"] { padding: 0.3rem 0.5rem; min-width: 12rem; }
-/* 归档目标路径只在决策选「归档」时才用得上；不可用时给灰底 */
-select:disabled, input:disabled, textarea:disabled {
-  background: var(--bg);
-  color: var(--muted);
-  border-style: dashed;
-  cursor: not-allowed;
-}
-/* ------------------------------- 状态条 ------------------------------- */
-/* 底部固定的一条人话提示。以前是页面末尾一个黑色 <pre> 直接 JSON.stringify，
-   用户看不懂、而且位于所有分页之外，每页都会漏出来。 */
-.statusbar {
-  position: fixed;
-  left: 50%;
-  bottom: 1rem;
-  transform: translateX(-50%);
-  z-index: 50;
+.toolbar {
   display: flex;
-  align-items: flex-start;
-  gap: 0.7rem;
-  max-width: min(760px, 92vw);
-  padding: 0.55rem 0.7rem 0.55rem 0.95rem;
+  gap: var(--sp-3);
+  align-items: center;
+  margin: var(--sp-2) 0 var(--sp-4);
+  flex-wrap: wrap;
+}
+
+.toolbar > .hint { margin: 0; }
+
+/* 筛选条贴着表格上方，与底部「执行」按钮分开——它只改显示，不动任何文件。 */
+.filterbar { margin-bottom: var(--sp-2); }
+
+/* --------------------------------- 表格 --------------------------------- */
+
+table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--surface);
   border: 1px solid var(--line);
-  border-left: 4px solid var(--accent);
-  border-radius: 6px;
-  background: #fffdf8;
-  color: var(--ink);
-  box-shadow: 0 6px 20px rgba(28, 27, 25, 0.16);
-  font-size: 0.88rem;
+  border-radius: var(--radius);
+  overflow: hidden;
 }
-.statusbar[hidden] { display: none; }
-.statusbar.error { border-left-color: var(--danger); }
-.statusbar.error #status { color: var(--danger); }
-#status { flex: 1; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
-#statusClose {
-  border: none;
-  background: transparent;
-  color: var(--muted);
-  font-size: 1.15rem;
-  line-height: 1;
-  padding: 0 0.25rem;
-  cursor: pointer;
-}
-#statusClose:hover { color: var(--danger); }
-.dup-group { border: 1px solid var(--line); padding: 0.75rem; margin-bottom: 0.5rem; background: rgba(255,255,255,0.65); }
-/* 重复组的报账行：「几份 · 每份多大 · 保留一份可释放多少」。
-   这是用户决定留哪份的唯一依据，给它加粗、单独成行，别混进说明里。 */
-.dup-head { font-weight: 600; margin-bottom: 0.15rem; }
-/* 组内每份：路径靠左、大小与状态靠右对齐，竖着扫能一眼比出各份大小。 */
-.dup-row { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.2rem 0; }
-.dup-row label { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-.dup-size { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.dup-state { color: var(--muted); font-size: 0.82rem; white-space: nowrap; min-width: 3.6rem; text-align: right; }
-.hint { color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0 0.6rem; line-height: 1.55; }
-/* 跨分页的警告条：只扫了一部分的产物，数字看起来和完整的一模一样，
-   必须摆在所有分页之上，不能只藏在某一页里。 */
-.warn {
-  color: var(--danger);
-  background: #fbeeee;
-  border-left: 3px solid var(--danger);
-  border-radius: 0 6px 6px 0;
-  padding: 0.5rem 0.8rem;
-  margin: 0.35rem 0 0.2rem;
-  font-size: 0.88rem;
-  line-height: 1.55;
-}
-.warn[hidden] { display: none; }
-.rowline { padding: 0.25rem 0; font-size: 0.9rem; border-bottom: 1px solid var(--line); }
 
-/* 规则表最后一列是「直删」开关。列宽被前四列挤窄时，
-   「建议直删」会被折成竖排单字，所以这一列不许换行、给它一个下限宽度。 */
-#ruleRows td:last-child { white-space: nowrap; width: 8.5rem; }
-.purge-badge {
-  display: inline-block;
-  margin-left: 0.35rem;
-  padding: 0.05rem 0.35rem;
+th,
+td {
+  border-bottom: 1px solid var(--line);
+  padding: 0.5rem 0.65rem;
+  text-align: left;
+  font-size: 0.88rem;
+  vertical-align: top;
+}
+
+th {
+  font-weight: 600;
+  color: var(--ink-soft);
+  background: var(--surface-sunken);
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+}
+
+tbody tr:last-child td { border-bottom: 0; }
+
+tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 45%, transparent); }
+
+/* --------------------------------- 卡片 --------------------------------- */
+/* 卡片是「一个数字 + 一句解释」。数字要最显眼，解释最弱。 */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+
+.card {
   border: 1px solid var(--line);
-  border-radius: 3px;
-  background: rgba(47, 93, 80, 0.08);
-  color: var(--accent);
-  white-space: nowrap;
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: var(--sp-3) var(--sp-4);
+  box-shadow: var(--shadow-sm);
 }
 
-/* 空表/空区块：只有表头没有内容会让人以为「加载失败」，统一给一句人话。 */
-.empty-note { color: var(--muted); font-size: 0.88rem; padding: 0.6rem 0.2rem; }
+.card .k { color: var(--ink-soft); font-size: 0.8rem; }
+.card .v {
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.card .s { color: var(--ink-muted); font-size: 0.78rem; }
 
-/* --------------------- 建议标签 / 扫描结果分组 --------------------- */
+/* --------------------------------- 标签 --------------------------------- */
+/* 建议标签：颜色编码**后果**，不是装饰。
+   绿=可放心清、蓝=能重建但要费事、橙=要你判断、灰=永不自动动。 */
 
-/* 建议只有四档，颜色必须和后果一致：绿的一定可还原，橙的一定还没决定。
-   颜色在这里不是装饰——用户扫一眼就知道这一屏要不要细看。 */
 .advice {
   display: inline-block;
-  padding: 0.1rem 0.5rem;
-  border-radius: 3px;
-  font-size: 0.8rem;
+  padding: 0.08rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  line-height: 1.5;
   white-space: nowrap;
   border: 1px solid transparent;
+  font-weight: 500;
 }
-.advice-safe_clean { color: #1f4d3f; background: #dcece4; border-color: #b6d5c6; }
-.advice-clean { color: #1f4a63; background: #dce8f0; border-color: #b6cddd; }
-.advice-review { color: #7a4b12; background: #f6e8d2; border-color: #e2c99f; }
-.advice-protected { color: var(--muted); background: #ece8df; border-color: var(--line); }
+
+.advice-safe_clean { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-line); }
+.advice-clean { color: var(--info-ink); background: var(--info-soft); border-color: var(--info-line); }
+.advice-review { color: var(--warn); background: var(--warn-soft); border-color: var(--warn-line); }
+.advice-protected { color: var(--ink-soft); background: var(--surface-sunken); border-color: var(--line-strong); }
 
 /* 路径旁的小角标：目录 / 已含在上层目录里 / 规则候选 / 模型建议 */
 .badge {
   display: inline-block;
-  margin-left: 0.35rem;
+  margin-left: 0.3rem;
   padding: 0.02rem 0.35rem;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  background: rgba(47, 93, 80, 0.06);
-  color: var(--muted);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--ink-soft);
   font-size: 0.74rem;
   white-space: nowrap;
 }
-.badge-ai { color: var(--accent); border-color: #b6d5c6; background: #dcece4; }
-.tiny { font-size: 0.76rem; color: var(--muted); line-height: 1.45; margin-top: 0.15rem; }
+
+.badge-ai { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+
+/* 路径用等宽字体 + 浅底：一眼能认出「这是路径不是文字」。 */
+.rowline code,
+td code {
+  background: var(--surface-sunken);
+  padding: 0.05rem 0.25rem;
+  border-radius: var(--radius-sm);
+  word-break: break-all;
+}
 
 /* 占用列右对齐 + 等宽数字：竖着比大小时，个位不对齐就看不出谁更大 */
 td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
 /* 短字段（动作 / 类型这类 2-4 个字）不许折行：匹配列一长，它们会被挤成竖排单字。 */
 td.nowrap { white-space: nowrap; }
+
 /* 可排序表头：箭头用伪元素，不占列宽、也不污染 textContent（markSortHeaders 要读它）。 */
 th.sortable { cursor: pointer; user-select: none; }
 th.sortable:hover { color: var(--ink); }
 th.sortable[data-dir="asc"]::after { content: " ▲"; font-size: 0.72em; }
 th.sortable[data-dir="desc"]::after { content: " ▼"; font-size: 0.72em; }
+
 /* 分组横条：一眼看清「这一档有几项、共占多少」，同时不牺牲列宽。 */
 tr.group-row td {
-  background: rgba(28, 27, 25, 0.045);
+  background: var(--surface-sunken);
   font-weight: 600;
   padding-top: 0.7rem;
 }
-.group-meta { color: var(--muted); font-weight: 400; font-size: 0.85rem; margin-left: 0.5rem; }
+
+.group-meta { color: var(--ink-soft); font-weight: 400; font-size: 0.85rem; margin-left: 0.5rem; }
 
 /* 四色图例：颜色必须配解释，否则用户只能猜绿的好还是橙的好 */
 .legend {
   display: flex;
-  gap: 0.9rem;
+  gap: var(--sp-3);
   flex-wrap: wrap;
   align-items: center;
-  margin: 0 0 0.8rem;
+  margin: 0 0 var(--sp-4);
   font-size: 0.82rem;
-  color: var(--muted);
+  color: var(--ink-soft);
 }
+
 .legend .advice { margin-right: 0.15rem; }
 
-/* 扫描页的结论句：整页第一眼看到的就是它，比正文略大一点 */
-.lead { font-size: 1rem; margin: 0 0 0.2rem; line-height: 1.5; }
+/* --------------------------------- 文字 --------------------------------- */
 
-/* 一条规则一组。组内文件收进折叠，默认只看「有几类、各多少」。 */
-.scan-group {
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.6);
-  padding: 0.6rem 0.8rem;
-  margin-bottom: 0.5rem;
+.hint {
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+  margin: var(--sp-1) 0 var(--sp-3);
+  line-height: 1.6;
 }
-.scan-group-head { display: flex; gap: 0.6rem; align-items: baseline; flex-wrap: wrap; }
-.scan-group-title { display: flex; flex-direction: column; gap: 0.1rem; }
-.scan-group details { margin-top: 0.4rem; }
-.scan-group summary { cursor: pointer; color: var(--muted); font-size: 0.82rem; }
-.scan-group summary:hover { color: var(--accent); }
-/* 扫描结果区在没跑过扫描时是个带边框的空盒子，看着像坏了——空着就别占位。 */
-#scanResult:empty { display: none; }
-.rowline code, td code { background: rgba(47,93,80,0.08); padding: 0.05rem 0.25rem; }
-.why {
-  background: transparent;
-  color: var(--accent);
-  border: 1px solid var(--line);
-  padding: 0.1rem 0.45rem;
+
+/* 页面引导语：每页最上面一句，回答「这页做什么」。 */
+.lead {
+  font-size: 0.95rem;
+  color: var(--ink);
+  border-left: 3px solid var(--accent);
+  padding-left: var(--sp-3);
+  margin: 0 0 var(--sp-4);
+  line-height: 1.6;
+}
+
+.tiny { font-size: 0.76rem; color: var(--ink-muted); line-height: 1.45; margin-top: 0.15rem; }
+
+/* 步骤编号：h2 旁边的小标签，让页面一眼看出自己在哪一步 */
+.step-no {
+  color: var(--ink-muted);
   font-size: 0.78rem;
-  margin-left: 0.45rem;
-  border-radius: 3px;
+  font-weight: 400;
+  margin-left: var(--sp-2);
+  vertical-align: middle;
 }
 
-/* -------------------------------- 表单 -------------------------------- */
-.form label { display: block; margin-bottom: 0.7rem; font-size: 0.9rem; }
-.form label.inline { display: flex; align-items: center; gap: 0.45rem; }
-.form input[type="text"], .form input[type="number"], .form input[type="password"] { width: min(420px, 100%); display: block; margin-top: 0.2rem; }
-.form textarea { width: min(520px, 100%); display: block; margin-top: 0.2rem; font-family: inherit; }
-#openaiFields, #ollamaFields { border-left: 3px solid var(--line); padding-left: 0.8rem; margin-bottom: 0.8rem; }
+/* 空表/空区块：只有表头没有内容会让人以为「加载失败」，统一给一句人话。 */
+.empty-note { color: var(--ink-soft); font-size: 0.88rem; padding: var(--sp-4) var(--sp-2); }
 
-/* -------------------------------- 卡片 -------------------------------- */
-.cards { display: flex; gap: 0.8rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
-.card {
-  border: 1px solid var(--line);
-  background: rgba(255,255,255,0.75);
-  padding: 0.7rem 1rem;
-  min-width: 8.5rem;
+.rowline { padding: 0.28rem 0; font-size: 0.9rem; border-bottom: 1px solid var(--line); }
+
+/* 跨分页的警告条：只扫了一部分的产物，数字看起来和完整的一模一样，
+   必须摆在所有分页之上，不能只藏在某一页里。 */
+.warn {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-line);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2) var(--sp-3);
+  margin: var(--sp-3) 0 0;
+  font-size: 0.88rem;
+  line-height: 1.55;
 }
-.card .k { color: var(--muted); font-size: 0.78rem; }
-.card .v { font-size: 1.35rem; font-weight: 600; letter-spacing: 0.02em; }
-.card .s { color: var(--muted); font-size: 0.76rem; }
 
-/* ------------------------------- 引导区 ------------------------------- */
+.warn[hidden] { display: none; }
+
+/* ======================== §5 页面专属 ======================== */
+
+/* -------------------------------- 概览页 ------------------------------- */
 /* 概览页第一眼要回答「现在该做什么」。之前是六个数字 + 一段说明，
    用户看完仍不知道该点哪——数字是给已经懂流程的人看的。 */
 .guide {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: var(--sp-4);
   flex-wrap: wrap;
-  border: 1px solid var(--line);
+  border: 1px solid var(--accent-line);
   border-left: 4px solid var(--accent);
-  background: rgba(47, 93, 80, 0.06);
-  padding: 1rem 1.2rem;
-  margin-bottom: 0.9rem;
+  background: var(--accent-soft);
+  border-radius: var(--radius);
+  padding: var(--sp-4);
+  margin-bottom: var(--sp-4);
 }
-.guide.done { border-left-color: #6b8f5e; }
+
+.guide.done { border-left-color: var(--accent); background: var(--surface); border-color: var(--line); }
 .guide .g-text { flex: 1; min-width: 14rem; }
-.guide .g-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.2rem; }
-.guide .g-sub { color: var(--muted); font-size: 0.88rem; line-height: 1.5; }
-.guide .g-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; }
-.guide button { padding: 0.6rem 1.4rem; font-size: 0.98rem; }
+.guide .g-title { font-size: 1.05rem; font-weight: 600; margin-bottom: 0.2rem; }
+.guide .g-sub { color: var(--ink-soft); font-size: 0.88rem; line-height: 1.55; }
+.guide .g-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.guide button { padding: 0.5rem 1.1rem; font-size: 0.95rem; }
 
 /* 步骤条：四步一屏看清自己在哪一步，可点击跳转 */
-.steps { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
-.step {
+.steps {
   display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-4);
+}
+
+.step {
+  display: inline-flex;
   align-items: center;
   gap: 0.4rem;
   font-size: 0.84rem;
-  color: var(--muted);
-  border: 1px solid var(--line);
+  color: var(--ink-soft);
+  border: 1px solid var(--line-strong);
   border-radius: 999px;
-  padding: 0.2rem 0.7rem;
-  background: rgba(255, 255, 255, 0.6);
+  padding: 0.2rem 0.7rem 0.2rem 0.25rem;
+  background: var(--surface);
   cursor: pointer;
 }
+
 .step .n {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 1.15rem;
-  height: 1.15rem;
+  width: 1.2rem;
+  height: 1.2rem;
   border-radius: 50%;
-  background: var(--line);
-  color: var(--ink);
+  background: var(--surface-sunken);
+  color: var(--ink-soft);
   font-size: 0.72rem;
+  font-weight: 600;
 }
+
 .step[data-state="now"] {
   color: var(--accent);
   border-color: var(--accent);
-  background: rgba(47, 93, 80, 0.1);
+  background: var(--accent-soft);
   font-weight: 600;
 }
-.step[data-state="now"] .n { background: var(--accent); color: #fff; }
-.step[data-state="done"] { color: var(--accent); }
-.step[data-state="done"] .n { background: rgba(47, 93, 80, 0.25); }
 
-/* 折叠区：高级选项与长说明默认收起，首屏只留一个动作 */
-details.panel > summary,
-.form details > summary {
-  cursor: pointer;
-  color: var(--muted);
+.step[data-state="now"] .n { background: var(--accent); color: var(--accent-ink); }
+.step[data-state="done"] { color: var(--accent); }
+.step[data-state="done"] .n { background: var(--accent-soft); color: var(--accent); }
+
+/* -------------------------------- 扫描页 ------------------------------- */
+/* 一条规则一组。组内文件收进折叠，默认只看「有几类、各多少」。 */
+.scan-group {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: var(--sp-3);
+  margin-bottom: var(--sp-2);
+  box-shadow: var(--shadow-sm);
+}
+
+.scan-group-head { display: flex; gap: var(--sp-3); align-items: baseline; flex-wrap: wrap; }
+.scan-group-title { display: flex; flex-direction: column; gap: 0.1rem; }
+.scan-group details { margin-top: var(--sp-2); }
+.scan-group summary { cursor: pointer; color: var(--ink-soft); font-size: 0.82rem; }
+.scan-group summary:hover { color: var(--accent); }
+
+/* 扫描结果区在没跑过扫描时是个带边框的空盒子，看着像坏了——空着就别占位。 */
+#scanResult:empty { display: none; }
+
+/* 「为什么？」：行内小按钮，不做成主行动。 */
+.why {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent-line);
+  padding: 0.05rem 0.4rem;
+  font-size: 0.76rem;
+  margin-left: 0.35rem;
+  border-radius: var(--radius-sm);
+}
+
+.why:hover { background: var(--accent-soft); }
+
+/* -------------------------------- 执行页 ------------------------------- */
+/* 执行页清单：不用 table（长度不确定，空 thead 不好看），用窄边框行列表 */
+.execlist { margin: var(--sp-2) 0; }
+
+.execrow {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.9rem;
+}
+
+.execrow code { flex: 1; word-break: break-all; }
+.execrow .exec-meta { color: var(--ink-soft); font-size: 0.82rem; white-space: nowrap; }
+.execrow .exec-size {
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 4.2rem;
+  text-align: right;
+}
+.execrow .exec-tag { color: var(--accent); font-size: 0.8rem; margin-left: 0.3rem; white-space: nowrap; }
+.execrow.kept { opacity: 0.55; }
+
+/* 候选表批量选择：缩小复选框列宽，不占太多地方 */
+.cand-pick { margin: 0; }
+
+/* ------------------------- 候选表的「决策」与「归档路径」 -------------------------
+ * 这两个控件原先完全没有样式，于是走全局默认：决策下拉被挤成很窄的一条，
+ * 「保留不动」只露出前面两个字；归档输入框的 placeholder「archive/...」也看不全。
+ *
+ * 而「决策」这一列恰恰是这一页唯一真正写状态的地方——它比旁边任何一列都该好点。
+ * 给它一个固定下限宽度（够放下三个选项里最长的「保留不动」），
+ * 目标路径再给等宽字体 + 足够宽度（路径本来就要照着看）。 */
+td select.act,
+select.act {
+  min-width: 6.4rem;
+  font-size: 0.86rem;
+}
+
+input.tgt {
+  width: 100%;
+  min-width: 9rem;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+
+/* 非归档时目标路径框是禁用的——禁用态已在 §2 统一给了虚线边框，
+ * 这里只补一句「为什么它是灰的」：鼠标悬停时说明它归谁管。 */
+input.tgt:disabled { cursor: not-allowed; }
+
+/* 审阅页底部「下一步」栏 */
+.nextbar { display: flex; justify-content: space-between; align-items: center; margin-top: var(--sp-2); }
+
+/* -------------------------------- 隔离区 ------------------------------- */
+/* 重复组的报账行：「几份 · 每份多大 · 保留一份可释放多少」。
+   这是用户决定留哪份的唯一依据，给它加粗、单独成行，别混进说明里。 */
+.dup-group {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--sp-3);
+  margin-bottom: var(--sp-2);
+  background: var(--surface);
+}
+
+.dup-head { font-weight: 600; margin-bottom: 0.15rem; }
+
+/* 组内每份：路径靠左、大小与状态靠右对齐，竖着扫能一眼比出各份大小。 */
+.dup-row { display: flex; align-items: baseline; gap: var(--sp-2); padding: 0.22rem 0; }
+.dup-row label { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.dup-size { color: var(--ink-soft); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dup-state { color: var(--ink-muted); font-size: 0.82rem; white-space: nowrap; min-width: 3.6rem; text-align: right; }
+
+/* -------------------------------- 规则页 ------------------------------- */
+/* 规则表最后一列是「直删」开关。列宽被前四列挤窄时，
+   「建议直删」会被折成竖排单字，所以这一列不许换行、给它一个下限宽度。 */
+#ruleRows td:last-child { white-space: nowrap; width: 8.5rem; }
+
+.purge-badge {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.35rem;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+/* -------------------------------- 状态条 ------------------------------- */
+/* 底部固定的一条人话提示。以前是页面末尾一个黑色 <pre> 直接 JSON.stringify，
+   用户看不懂、而且位于所有分页之外，每页都会漏出来。 */
+.statusbar {
+  position: fixed;
+  left: 50%;
+  bottom: var(--sp-4);
+  transform: translateX(-50%);
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  max-width: min(760px, 92vw);
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-4);
+  border: 1px solid var(--line-strong);
+  border-left: 4px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-lg);
   font-size: 0.88rem;
 }
-details.panel > summary:hover,
-.form details > summary:hover { color: var(--accent); }
-details.panel[open] > summary { margin-bottom: 0.7rem; }
-.form details > summary { margin-bottom: 0.6rem; }
-.form details[open] > summary { margin-bottom: 0.8rem; }
-button.primary { padding: 0.6rem 1.5rem; font-size: 1rem; }
 
-/* ------------------------------- 弹窗 ------------------------------- */
-dialog { border: 1px solid var(--line); border-radius: 6px; padding: 0; max-width: min(920px, 92vw); }
+.statusbar[hidden] { display: none; }
+.statusbar.error { border-left-color: var(--danger); }
+.statusbar.error #status { color: var(--danger); }
+#status { flex: 1; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+
+#statusClose {
+  border: 0;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 1.15rem;
+  line-height: 1;
+  padding: 0 0.25rem;
+  cursor: pointer;
+}
+
+#statusClose:hover { color: var(--danger); }
+
+/* -------------------------------- 弹窗 ------------------------------- */
+dialog {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  padding: 0;
+  max-width: min(920px, 92vw);
+  box-shadow: var(--shadow-lg);
+}
+
 .dlg-head {
   display: flex;
-  gap: 0.6rem;
+  gap: var(--sp-2);
   align-items: center;
-  padding: 0.6rem 0.9rem;
+  padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--line);
-  background: rgba(47, 93, 80, 0.07);
+  background: var(--surface-sunken);
 }
+
 .dlg-head code { flex: 1; word-break: break-all; }
+
 /* 弹窗头部两个按钮（复制 / 关闭）不许折行：路径一长，flex 会把它们压窄，
    「复制这段解释」折成两行会顶高整条头部。 */
 .dlg-head button { white-space: nowrap; flex: 0 0 auto; }
+
 /* 弹窗主体：人话四段在上、技术明细折叠在下 */
-.dlg-body { padding: 0.9rem; overflow: auto; max-height: 62vh; }
+.dlg-body { padding: var(--sp-4); overflow: auto; max-height: 62vh; }
+
 /* 四段人话结论：左标签右正文，一眼扫出「这是什么 → 怎么办 → 为什么 → 删了怎么办」。 */
-.explain-row { display: flex; gap: 0.7rem; padding: 0.25rem 0; font-size: 0.88rem; line-height: 1.55; }
+.explain-row { display: flex; gap: var(--sp-3); padding: 0.25rem 0; font-size: 0.88rem; line-height: 1.55; }
+
 .explain-k {
   flex: 0 0 auto;
   min-width: 5.2rem;
-  color: var(--muted);
+  color: var(--ink-muted);
   font-size: 0.8rem;
   padding-top: 0.1rem;
 }
+
 .explain-v { flex: 1; word-break: break-word; }
-.explain-detail { margin-top: 0.7rem; border-top: 1px solid var(--line); padding-top: 0.5rem; }
-.explain-detail summary { cursor: pointer; color: var(--muted); font-size: 0.82rem; }
+.explain-detail { margin-top: var(--sp-3); border-top: 1px solid var(--line); padding-top: var(--sp-2); }
+.explain-detail summary { cursor: pointer; color: var(--ink-soft); font-size: 0.82rem; }
 .explain-detail summary:hover { color: var(--accent); }
+
 #explainBody {
-  margin: 0.4rem 0 0;
-  padding: 0.6rem 0;
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-2) 0;
   overflow: auto;
   max-height: 40vh;
   font-size: 0.8rem;
@@ -429,19 +815,87 @@ dialog { border: 1px solid var(--line); border-radius: 6px; padding: 0; max-widt
   white-space: pre-wrap;
 }
 
-/* 步骤编号：h2 旁边的小标签，让页面一眼看出自己在哪一步 */
-.step-no { color: var(--muted); font-size: 0.78rem; font-weight: 400; margin-left: 0.6rem; vertical-align: middle; }
-/* 顶部引导语：每页最上面一句，回答「这页做什么」 */
-.lead { font-size: 0.95rem; border-left: 3px solid var(--accent); padding-left: 0.6rem; margin: 0.4rem 0 0.8rem; }
-/* 审阅页底部「下一步」栏 */
-.nextbar { display: flex; justify-content: space-between; align-items: center; margin-top: 0.6rem; }
-/* 执行页清单：不用 table（长度不确定，空 thead 不好看），用窄边框行列表 */
-.execlist { margin: 0.4rem 0; }
-.execrow { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--line); font-size: 0.9rem; }
-.execrow code { flex: 1; word-break: break-all; }
-.execrow .exec-meta { color: var(--muted); font-size: 0.82rem; white-space: nowrap; }
-.execrow .exec-size { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 4.2rem; text-align: right; }
-.execrow .exec-tag { color: var(--accent); font-size: 0.8rem; margin-left: 0.3rem; }
-.execrow.kept { opacity: 0.55; }
-/* 候选表批量选择：缩小复选框列宽，不占太多地方 */
-.cand-pick { margin: 0; }
+/* -------------------------------- 表单 -------------------------------- */
+.form label { display: block; margin-bottom: var(--sp-3); font-size: 0.9rem; }
+.form label.inline { display: flex; align-items: center; gap: var(--sp-2); }
+.form input[type="text"],
+.form input[type="number"],
+.form input[type="password"] { width: min(420px, 100%); display: block; margin-top: 0.2rem; }
+.form textarea { width: min(520px, 100%); display: block; margin-top: 0.2rem; }
+
+#openaiFields,
+#ollamaFields {
+  border-left: 3px solid var(--line-strong);
+  padding-left: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+
+/* 折叠区：高级选项与长说明默认收起，首屏只留一个动作 */
+details.panel > summary,
+.form details > summary {
+  cursor: pointer;
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+}
+
+details.panel > summary:hover,
+.form details > summary:hover { color: var(--accent); }
+details.panel[open] > summary { margin-bottom: var(--sp-3); }
+.form details > summary { margin-bottom: var(--sp-2); }
+.form details[open] > summary { margin-bottom: var(--sp-3); }
+
+/* ======================== §6 状态与可达性 ======================== */
+
+/* ------------------------------- 忙态 -------------------------------
+ * 按钮自己会说话：禁用 + aria-busy + 文案换成「扫描中…」，右侧转一个圈。
+ * 转圈用伪元素而不是改文案里的省略号——文案由 JS 管，样式不插手里面的字。
+ * 这些按钮都会真动文件，慢下来时若毫无反馈，用户会以为没点上再点一次。 */
+button[aria-busy="true"] {
+  cursor: progress;
+  opacity: 0.75;
+}
+
+button[aria-busy="true"]::after {
+  content: "";
+  width: 0.7em;
+  height: 0.7em;
+  border: 2px solid currentcolor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: busy-spin 0.7s linear infinite;
+  flex: 0 0 auto;
+}
+
+@keyframes busy-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ------------------------------- 空态 -------------------------------
+ * 只有表头没有内容会被读成「加载失败」。统一由 .empty-note 给一句人话，
+ * 这里只保证它不会挤成一行贴边文字。 */
+.empty-note code { background: var(--surface-sunken); }
+
+/* ------------------------------- 焦点 -------------------------------
+ * 键盘可达：所有可交互元素都有清晰焦点环（见 §4 按钮处的 focus-visible）。 */
+
+/* ------------------------------- 动效降级 -------------------------------
+ * 系统开了「减少动态效果」就把入场动画与转圈一起停掉。
+ * 转圈停在一个固定角度仍然读得出「在忙」，不会变成一个卡住的怪圈。 */
+@media (prefers-reduced-motion: reduce) {
+  .tab.active { animation: none; }
+  button[aria-busy="true"]::after { animation: none; border-right-color: currentcolor; opacity: 0.5; }
+  * { transition-duration: 0.01ms !important; }
+}
+
+/* 窄屏：表格横向滚动而不是挤成竖排单字；卡片单列。 */
+@media (max-width: 720px) {
+  .app-header { padding: var(--sp-3) var(--sp-3) 0; }
+  .app-main { padding: var(--sp-3) var(--sp-3) 5rem; }
+  .cards { grid-template-columns: 1fr; }
+  .form input[type="text"],
+  .form input[type="number"],
+  .form input[type="password"],
+  .form textarea { width: 100%; }
+  .toolbar { gap: var(--sp-2); }
+  table { display: block; overflow-x: auto; white-space: nowrap; }
+}

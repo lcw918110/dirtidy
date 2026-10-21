@@ -129,12 +129,18 @@ def plan_quarantine(
     root: Path,
     hits: Sequence[RuleHit],
     *,
-    is_protected: ProtectCheck | None = None,
+    is_protected: ProtectCheck,
 ) -> tuple[list[RuleHit], list[dict]]:
     """把「命中列表」拆成「可执行列表 + 被保护拦下列表」。
 
     dry-run 预测与真实执行**共用这一个函数**，否则两条路迟早漂移——
     而「预览说会搬、实跑不搬」或反过来的工具，比没有预览更危险。
+
+    `is_protected` **必须显式传入**，不给默认值。这一条不是风格问题：
+    `is_protected=None` 时函数会跳过整段保护检查，于是「含受保护后代的目录」
+    会被原样放进可执行列表——保护静默失效，且预览与实跑都失效。
+    本项目已经因为「可选参数 = 漏传也不报错」栽过一次
+    （`sweep_empty_dirs` 同形态），这里按同一标准收口。
 
     顺序不可颠倒：
       1. 先按保护拦下「子树内含受保护路径」的目录命中（保护优先）；
@@ -143,34 +149,33 @@ def plan_quarantine(
     blocked: list[dict] = []
     survivors: list[RuleHit] = list(hits)
 
-    if is_protected is not None:
-        blocks = find_protected_descendants(root, survivors, is_protected)
-        if blocks:
-            rest: list[RuleHit] = []
-            for hit in survivors:
-                found = blocks.get(hit.path)
-                if found is None:
-                    rest.append(hit)
-                    continue
-                descendant, protect_rule_id, protect_reason = found
-                blocked.append(
-                    {
-                        "path": hit.path,
-                        "protect_rule_id": protect_rule_id,
-                        "protect_reason": (
-                            f"子树内含受保护路径 {descendant}（{protect_reason}）"
-                            if descendant
-                            else f"子树内含受保护内容（{protect_reason}）"
-                        ),
-                        "blocking_path": descendant,
-                        "intended_rule_id": hit.rule_id,
-                        "intended_action": "auto_quarantine",
-                        "blocked_auto": True,
-                        "is_dir": hit.is_dir,
-                        "blocked_at": "protected_descendant",
-                    }
-                )
-            survivors = rest
+    blocks = find_protected_descendants(root, survivors, is_protected)
+    if blocks:
+        rest: list[RuleHit] = []
+        for hit in survivors:
+            found = blocks.get(hit.path)
+            if found is None:
+                rest.append(hit)
+                continue
+            descendant, protect_rule_id, protect_reason = found
+            blocked.append(
+                {
+                    "path": hit.path,
+                    "protect_rule_id": protect_rule_id,
+                    "protect_reason": (
+                        f"子树内含受保护路径 {descendant}（{protect_reason}）"
+                        if descendant
+                        else f"子树内含受保护内容（{protect_reason}）"
+                    ),
+                    "blocking_path": descendant,
+                    "intended_rule_id": hit.rule_id,
+                    "intended_action": "auto_quarantine",
+                    "blocked_auto": True,
+                    "is_dir": hit.is_dir,
+                    "blocked_at": "protected_descendant",
+                }
+            )
+        survivors = rest
 
     return drop_covered_descendants(survivors), blocked
 

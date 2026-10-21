@@ -48,6 +48,7 @@ def apply_decisions(
     quarantine_dir: Path,
     *,
     dry_run: bool = False,
+    decisions: Sequence[Decision] | None = None,
 ) -> dict:
     """按 decisions.json 执行：保留计数、归档移动、或转入隔离区。
 
@@ -62,7 +63,8 @@ def apply_decisions(
     dry_run=True 时只做完整校验与冲突检测并报告，不动任何文件；
     同批次内两个决策落到同一归档目标的情况，也会在 dry-run 里被指出。
     """
-    decisions = load_decisions(run_path)
+    # 预览可使用尚未保存的输入；绝不为了预览改写 decisions.json。
+    decisions = load_decisions(run_path) if decisions is None else decisions
     manifest_path = run_path / "quarantine_manifest.json"
     matchers = _protect_matchers(run_path)
 

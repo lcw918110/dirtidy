@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from dirtidy import cli
+from dirtidy.advice import ADVICE_HINTS, ADVICE_LABELS, ADVICE_ORDER
 from dirtidy.rules.engine import load_rule_pack
 from dirtidy.web.app import _reload_target, create_app
 
@@ -52,6 +54,65 @@ def client(tmp_path: Path) -> TestClient:
     dest = tmp_path / "ws"
     shutil.copytree(FIXTURE_SRC, dest)
     return TestClient(create_app(default_root=dest))
+
+
+def test_advice_order_matches_frontend(client: TestClient, monkeypatch) -> None:
+    """建议顺序及措辞只由 advice.py 提供，前端不能再复制一份顺序。"""
+    response = client.get("/api/meta")
+    assert response.status_code == 200
+    meta = response.json()
+    assert meta["advice_order"] == list(ADVICE_ORDER)
+    assert meta["advice_labels"] == ADVICE_LABELS
+    assert meta["advice_hints"] == ADVICE_HINTS
+
+    # 调整唯一来源后接口应立即反映变化，而不是恰好相等的另一份常量。
+    monkeypatch.setattr("dirtidy.web.app.ADVICE_ORDER", tuple(reversed(ADVICE_ORDER)))
+    monkeypatch.setitem(ADVICE_LABELS, "review", "测试建议标签")
+    monkeypatch.setitem(ADVICE_HINTS, "review", "测试建议说明")
+    changed = client.get("/api/meta").json()
+    assert changed["advice_order"] == list(reversed(ADVICE_ORDER))
+    assert changed["advice_labels"]["review"] == "测试建议标签"
+    assert changed["advice_hints"]["review"] == "测试建议说明"
+
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assignments = re.findall(r"(?:const|let|var)\s+ADVICE_KINDS\s*=\s*([^;]+);", js)
+    assert assignments == ["[]"], "前端不能硬编码建议档位及排序"
+    body = _js_function(js, "loadRuns")
+    assert 'await api("/api/meta")' in body
+    assert "ADVICE_KINDS = meta.advice_order" in body
+    assert body.index("ADVICE_KINDS = meta.advice_order") < body.index("await loadRun(")
+    assert 'document.getElementById("adviceLegend")' in body
+    assert 'document.getElementById("pendingAdvice")' in body
+    assert "for (const kind of ADVICE_KINDS)" in body
+    assert "text: meta.advice_labels[kind]" in body
+    assert "meta.advice_hints[kind]" in body
+    assert "value: kind" in body
+    assert "adviceSelect.value = pendingFilter.advice" in body
+
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert '<p class="legend" id="adviceLegend"></p>' in html
+    select = html.split('id="pendingAdvice"')[1].split("</select>")[0]
+    assert re.findall(r'<option value="([^"]*)">([^<]*)</option>', select) == [("", "全部")]
+    for kind in ADVICE_ORDER:
+        assert f'value="{kind}"' not in html
+        assert f"advice-{kind}" not in html
+
+
+def test_protection_uses_reason_and_keeps_ids_in_titles() -> None:
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = _js_function(js, "renderProtection")
+    assert 'text: ` ← ${r.protect_reason ||' in body
+    assert 'title: r.protect_rule_id || ""' in body
+    assert 'text: p.reason ||' in body
+    assert 'title: p.id || ""' in body
+    assert 'text: policy.map((p) => p.id)' not in body
+
+
+def test_shared_styles_have_one_definition() -> None:
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    for selector in ("button.primary", ".lead"):
+        assert len(re.findall(re.escape(selector) + r"\s*\{", css)) == 1
+    assert "--header-h" not in css
 
 
 # ----------------------------- 规则的中文短名 -----------------------------
@@ -155,7 +216,8 @@ def test_pending_filter_only_changes_display() -> None:
 
     body = _js_function(js, "renderPending")
     assert "all.filter(" in body, "应先保留全量，再筛出要显示的行"
-    assert "currentPendingCount = all.length" in body, "执行条数必须按全量报"
+    assert "schedulePlanRefresh()" in body, "执行条数必须经后端全量 dry-run 核对"
+    assert "currentPendingCount = all.length" not in body, "命中数不是实际执行数"
     assert "筛选只影响显示" in body, "界面必须把「筛选不改执行范围」说出来"
 
 
@@ -238,7 +300,8 @@ def test_sort_and_group_are_display_only() -> None:
         for token in ("api(", "fetch(", "confirm("):
             assert token not in body, f"{fn} 里出现了 {token}，排序/分组不该动手"
     body = _js_function(js, "renderPending")
-    assert "currentPendingCount = all.length" in body, "执行条数必须按全量报"
+    assert "schedulePlanRefresh()" in body, "执行条数必须经后端全量 dry-run 核对"
+    assert "currentPendingCount = all.length" not in body, "命中数不是实际执行数"
 
 
 # ---------------------------- 批量勾选「保留」 ----------------------------
@@ -485,4 +548,173 @@ def test_copy_explain_falls_back_when_clipboard_unavailable() -> None:
     assert "加载中" in body, "正文还没回来时不该把「加载中…」复制出去"
     # 失败要有话说，不能静默
     assert "复制失败" in body
+
+
+# ---------------------------- 视觉改造的守卫 ----------------------------
+#
+# 这一组守的是「样式表还是不是一个有纪律的样式表」。
+# 起因：改造前 443 行里有 25 处硬编码色值、只有 6 个变量。同一语义
+# （比如「危险红」）在五个地方各写一遍，改一处就会漂——而漂掉的那处
+# 往往正好是「彻底删除」按钮，后果不可逆。
+
+
+def test_styles_have_no_bare_colors_outside_root() -> None:
+    """:root 之外不许出现裸色值。
+
+    要新颜色就加 token。否则「同一语义两种颜色」必然发生，而这个项目
+    反复栽在「同一个判定写两份」上——颜色只是它的外观版本。
+    """
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    assert css.lstrip().startswith("/*"), "样式表应以说明性注释开头，先讲组织方式"
+    root_end = css.index("}", css.index(":root"))
+    body = css[root_end + 1 :]
+
+    hexes = re.findall(r"#[0-9a-fA-F]{3,8}\b", body)
+    rgbs = re.findall(r"\brgba?\(", body)
+    assert not hexes, f":root 之外还有裸十六进制色值：{hexes}"
+    assert not rgbs, f":root 之外还有裸 rgb()/rgba()：{len(rgbs)} 处"
+
+
+def test_styles_define_the_tokens_they_use() -> None:
+    """用到的每个 var(--x) 都必须有定义。
+
+    拼错的变量名不会报错，只会静默失效——颜色退回继承值，
+    看起来像「样式没生效」，很难查。
+    """
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    root = css[: css.index("}", css.index(":root"))]
+    defined = set(re.findall(r"(--[\w-]+)\s*:", root))
+    used = set(re.findall(r"var\((--[\w-]+)", css))
+    missing = used - defined
+    assert not missing, f"这些变量用了但没定义：{sorted(missing)}"
+
+
+def test_every_tab_uses_one_page_head_shape() -> None:
+    """每个分页的首屏都长同一个样子：`.page-head` + `.page-head-main`。
+
+    统一结构比统一措辞重要——位置一致，用户换页时眼睛不用重新找
+    「这页是干什么的」。缺陷背景：改造前有的页是 `h2 + p.hint`，
+    有的页直接一张表单打头，切换时标题忽高忽低、引导语时有时无。
+    """
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    # 先抹掉 HTML 注释：分页开头的说明性注释是允许的，不算「内容」。
+    html = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    sections = re.findall(r'<section class="tab" id="tab-(\w+)">(.*?)</section>', html, re.S)
+    assert len(sections) >= 8, "分页数量不对，切分可能失败"
+
+    missing = []
+    for name, body in sections:
+        # 页头必须是这一页的第一个元素：中间不许先塞表单或表格，
+        # 否则切页时标题忽高忽低——那正是改造前的样子。
+        assert body.lstrip().startswith('<div class="page-head"'), (
+            f"{name} 页的第一个元素不是页头：{body.strip()[:60]}"
+        )
+        if 'class="page-head-main"' not in body:
+            missing.append(name)
+    assert not missing, f"这些页的页头缺 .page-head-main：{missing}"
+
+
+def test_page_lead_is_one_sentence_not_a_paragraph() -> None:
+    """每个分页正好一句引导语，长说明收进 details。
+
+    回归背景：审阅页原先首屏是 4 行引导语 + 3 段说明，用户滚两屏才看到表格。
+    说明本身有用，但它的位置不对——先给结论，细节放可展开处。
+
+    注意这里按**分页**统计而不是全文统计：只查总数的话，删掉一页的引导语
+    仍然能凑够数量，守卫就白写了（这条自己去踩过一次）。
+    """
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    html = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    sections = re.findall(r'<section class="tab" id="tab-(\w+)">(.*?)</section>', html, re.S)
+    assert len(sections) >= 8
+
+    problems = []
+    for name, body in sections:
+        leads = re.findall(r'<p class="lead">(.*?)</p>', body, re.S)
+        if len(leads) != 1:
+            problems.append(f"{name} 有 {len(leads)} 句引导语（应恰好 1 句）")
+            continue
+        if leads[0].count("。") > 2:
+            problems.append(f"{name} 的引导语超过三句，应把细节收进 details")
+    assert not problems, "；".join(problems)
+
+    # 长说明必须真的存在 details 里，而不是被删掉了
+    assert html.count('class="page-note"') >= 4, "长说明应保留在 details.page-note 里"
+
+
+def test_slow_buttons_report_busy_state() -> None:
+    """会真动文件、或要等一阵的按钮，必须进忙态。
+
+    回归背景：扫描按钮原先只 `disabled = true`，文案仍是「开始扫描」，
+    用户看不出「在跑」，只能靠底部状态条猜；而重复点「清空隔离区」
+    会把刚搬进去的东西全删掉——这些按钮必须点一下就点不动。
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    for fn in ("busyOn", "busyOff", "withBusy"):
+        assert f"function {fn}(" in js, f"缺少 {fn}"
+
+    # 忙态要真的禁用 + 无障碍语义 + 文案替换
+    body = _js_function(js, "busyOn")
+    for token in ('aria-busy', "disabled = true", "dataset.busyLabel"):
+        assert token in body, f"busyOn 里缺 {token}"
+
+    # 收尾必须能被渲染接管：执行完 loadRun 会重画按钮文案与 disabled，
+    # 忙态若强行还原，就会出现「文案说无可执行项、按钮却亮着可点」。
+    off = _js_function(js, "busyOff")
+    assert "if (takenOver) return;" in off, (
+        "busyOff 必须在文案已被渲染改过时提前返回，不能无条件还原"
+    )
+    assert "removeAttribute" in off, "aria-busy 必须清掉，否则读屏会一直说「忙」"
+
+    # 每个会动文件的按钮都要走忙态
+    for btn in (
+        "scanBtn",
+        "applyRulesBtn",
+        "applyBtn",
+        "saveBtn",
+        "purgeSelBtn",
+        "purgeAllBtn",
+        "restoreSelBtn",
+        "restoreAllBtn",
+        "watchStartBtn",
+        "watchStopBtn",
+    ):
+        assert btn in js, f"找不到按钮 {btn}"
+    assert js.count("withBusy(") + js.count("busyOn(") >= 8, "多数慢动作按钮没套忙态"
+
+
+def test_candidate_decision_controls_are_styled() -> None:
+    """候选表的「决策」下拉与归档路径框必须有样式。
+
+    这两个控件原先完全没有对应规则，走全局默认：下拉被挤窄到只露出
+    「保留」两个字，归档框的 placeholder 也看不全。而「决策」列恰恰是
+    这一页唯一真正写状态的地方——它比旁边任何一列都该好点。
+    静态检查与接口测试都看不出这个，只有渲染出来才知道。
+    """
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    assert re.search(r"select\.act\s*\{", css), "select.act 没有样式"
+    assert re.search(r"input\.tgt\s*\{", css), "input.tgt 没有样式"
+
+    act = css[css.index("select.act {") :].split("}", 1)[0]
+    assert "min-width" in act, "决策下拉要给下限宽度，否则选项文字被截断"
+
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    # 类名必须真的是这两个，否则样式挂空
+    assert 'cls: "act"' in js
+    assert 'cls: "tgt"' in js
+
+
+def test_mobile_layout_keeps_tables_scrollable() -> None:
+    """窄屏下表格必须横向可滚，而不是挤成竖排单字。"""
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    narrow = css[css.index("@media (max-width: 720px)") :]
+    assert "overflow-x: auto" in narrow, "窄屏表格要横向滚动"
+    assert "grid-template-columns: 1fr" in narrow, "窄屏卡片要单列"
+
+
+def test_reduced_motion_covers_the_spinner_too() -> None:
+    """开了「减少动态效果」时，按钮的转圈也要停——否则这个设置形同虚设。"""
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    block = css[css.index("@media (prefers-reduced-motion: reduce)") :]
+    assert 'button[aria-busy="true"]::after' in block, "转圈也要尊重减少动态效果"
 

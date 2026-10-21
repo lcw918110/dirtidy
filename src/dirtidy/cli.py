@@ -14,6 +14,7 @@ from dirtidy.decision.store import apply_decisions, save_decisions
 from dirtidy.models import Decision, iter_json_array, quarantine_root, read_json, run_dir, state_root
 from dirtidy.pipeline import apply_pending_rules, create_run
 from dirtidy.quarantine.store import purge_entries, purge_quarantine_dir, restore_entries
+from dirtidy.watch import WATCH_DEFAULT_TIMEOUT
 
 #: 单次运行超时时的退出码。与 1（explain 找不到路径）、2（用法错误）区分开，
 #: 脚本能凭它判断「这次是超时，重跑或调大时限即可」，而不是「跑失败了」。
@@ -490,7 +491,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--timeout",
         type=float,
-        default=1800.0,
+        default=WATCH_DEFAULT_TIMEOUT,
         metavar="秒",
         help="单轮扫描的时限（秒，默认 1800=30 分钟；0 = 不限）。"
         "监视是无人值守的，一轮卡住就等于整个监视静默停摆，所以这里默认有限时；"

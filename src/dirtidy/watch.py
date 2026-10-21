@@ -137,6 +137,13 @@ def _report_timeout(e: RunTimeout, rounds: int, *, first: bool) -> None:
         )
 
 
+# 单轮扫描的默认时限（秒）。**监视是无人值守的**：一轮卡在慢盘/NFS 上就等于整个
+# 监视静默停摆。CLI `watch --timeout` 与 Web 启动监视都从这里取默认值，
+# 两处各写一个数字迟早对不上——对不上的那天，网页上开的监视会比命令行开的更容易
+# 变成僵尸体，而用户以为自己在盯着。
+WATCH_DEFAULT_TIMEOUT: float = 1800.0
+
+
 def run_watch(
     root: Path,
     *,
@@ -146,7 +153,7 @@ def run_watch(
     protect: Sequence[str] = (),
     max_rounds: int | None = None,
     notify_enabled: bool = True,
-    timeout: float = 0.0,
+    timeout: float = WATCH_DEFAULT_TIMEOUT,
     stop_event: StopSignal | None = None,
     on_round: Callable[[dict[str, Any]], None] | None = None,
     _sleep: Callable[[float], None] = time.sleep,
