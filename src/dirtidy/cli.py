@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 from dirtidy import __version__
@@ -296,6 +297,63 @@ def cmd_save_decisions(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cursor_cleanup(args: argparse.Namespace) -> int:
+    """清理 Cursor 的全局状态库。
+
+    默认只统计不改库（与 `scan` / `apply-rules` 的 `--dry-run` 语义一致），
+    真正动手必须显式加 `--apply`。
+    """
+    from dirtidy.cursor_cleanup import (
+        DEFAULT_DB,
+        CursorCleanupError,
+        analyze,
+        clean,
+        cursor_running,
+    )
+
+    db = Path(args.db).expanduser() if args.db else DEFAULT_DB
+    try:
+        if not args.apply:
+            report = analyze(
+                db,
+                days=args.days,
+                include_orphan=not args.no_orphan,
+                include_blob=not args.no_blob,
+                measure_blob_bytes=args.measure,
+            )
+            print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+            print()
+            print("干跑结束（未改动任何东西）。确认无误后加 --apply 真正清理。")
+            return 0
+
+        # 写库前先确认 Cursor 已退出：在跑就改库会抢 WAL 锁，
+        # Cursor 会报 storage file corrupted/moved/permission 而拒绝启动。
+        if cursor_running():
+            print(
+                "检测到 Cursor 仍在运行。请先完全退出 Cursor（菜单栏 Cursor → Quit）"
+                "再执行 —— 边跑边改状态库会抢锁，可能让 Cursor 起不来。",
+                file=sys.stderr,
+            )
+            return 2
+
+        report = clean(
+            db,
+            days=args.days,
+            include_orphan=not args.no_orphan,
+            include_blob=not args.no_blob,
+            vacuum=not args.no_vacuum,
+            backup_dir=Path(args.backup_dir).expanduser() if args.backup_dir else None,
+            blob_pause=args.blob_pause,
+        )
+        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+        print()
+        print("清理完成。请重新打开 Cursor 验证。")
+        return 0
+    except CursorCleanupError as e:
+        print(f"错误：{e}", file=sys.stderr)
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dirtidy", description="本地目录整理：规则隔离 + 模型建议 + 人工终审")
     p.add_argument("--version", action="version", version=f"dirtidy {__version__}")
@@ -428,6 +486,46 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--protect", action="append", default=[], metavar="REL_PATH",
                    help="额外保护某个相对路径（含其整棵子树），可重复")
     s.set_defaults(func=cmd_watch)
+
+    s = sub.add_parser(
+        "cursor-cleanup",
+        help="清理 Cursor 全局状态库 state.vscdb（默认只统计，加 --apply 才动手）",
+    )
+    s.add_argument(
+        "--days",
+        type=int,
+        default=90,
+        metavar="N",
+        help="保留最近 N 天内的会话（默认 90，约三个月）",
+    )
+    s.add_argument(
+        "--apply",
+        action="store_true",
+        help="真正动手清理（默认只统计、不改库）",
+    )
+    s.add_argument("--db", default=None, help="state.vscdb 路径（默认本机 Cursor globalStorage）")
+    s.add_argument(
+        "--backup-dir",
+        default=None,
+        metavar="目录",
+        help="冷备份目录（默认 Cursor globalStorage 下的 CursorStateBackup-<时间戳>）",
+    )
+    s.add_argument(
+        "--blob-pause",
+        type=float,
+        default=3.0,
+        metavar="秒",
+        help="删 blob 时每批之间的间隔秒数（默认 3；越大越不影响 Cursor，但越慢）",
+    )
+    s.add_argument("--no-orphan", action="store_true", help="不清理孤儿会话正文")
+    s.add_argument("--no-blob", action="store_true", help="不清理无引用的 agentKv:blob")
+    s.add_argument("--no-vacuum", action="store_true", help="跳过 VACUUM（删除快，但文件体积暂不缩小）")
+    s.add_argument(
+        "--measure",
+        action="store_true",
+        help="干跑时额外估算将腾出多少空间（较慢：要读 blob 内容算体积）",
+    )
+    s.set_defaults(func=cmd_cursor_cleanup)
 
     return p
 

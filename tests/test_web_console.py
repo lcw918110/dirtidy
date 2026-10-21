@@ -355,13 +355,18 @@ CLI_TO_UI: dict[str, tuple[str, str]] = {
 #: 这三个子命令本身就是「起界面」（`start` 是「扫描 + 起界面」），不需要再给它们做界面入口。
 CLI_UI_EXEMPT = {"start", "serve", "desktop"}
 
+#: 有意不做界面入口的子命令，必须写明理由。
+#: - cursor-cleanup：清的是 Cursor 自己的 state.vscdb，不属于「扫描 → 建议 → 人工」管道；
+#:   真实库单次扫描 20+ 分钟、执行前必须先退出 Cursor，放进网页按钮只会诱导误操作。
+CLI_UI_NOT_PIPELINE = {"cursor-cleanup"}
+
 
 def test_web_page_covers_every_cli_command() -> None:
     from dirtidy.cli import build_parser
 
     parser = build_parser()
     actual = set(parser._subparsers._group_actions[0].choices)  # type: ignore[attr-defined]
-    mapped = set(CLI_TO_UI) | CLI_UI_EXEMPT
+    mapped = set(CLI_TO_UI) | CLI_UI_EXEMPT | CLI_UI_NOT_PIPELINE
     assert mapped == actual, (
         f"界面覆盖表与 CLI 不一致：界面多出 {sorted(mapped - actual)}，"
         f"CLI 多出 {sorted(actual - mapped)}——新增子命令后请补 CLI_TO_UI 或 CLI_UI_EXEMPT"

@@ -94,6 +94,12 @@ dirtidy desktop /path/to/root
 
 # 定时监视：定期扫描并报告新增/消失的命中项 —— 只扫描，绝不执行隔离
 dirtidy watch /path/to/root --interval 30
+
+# 清理 Cursor 状态库 state.vscdb（约 75 GB，99% 体积是无人引用的 agentKv:blob）。
+# 默认只统计、不改库；确认后加 --apply 真正清理。
+# ★ 请先完全退出 Cursor：边跑边改状态库会抢 WAL 锁，可能让 Cursor 起不来。
+dirtidy cursor-cleanup
+dirtidy cursor-cleanup --apply --days 90
 ```
 
 产物目录：`<root>/.dirtidy/runs/<run_id>/`；隔离区：`<root>/.dirtidy/quarantine/<run_id>/`。未改动文件的内容 hash 缓存在 `<root>/.dirtidy/hash_cache.sqlite`。扫描可加 `--workers 8` 并行算 hash。
@@ -175,7 +181,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 294 个用例
+pytest -q            # 307 个用例
 ruff check src tests
 mypy
 ```
