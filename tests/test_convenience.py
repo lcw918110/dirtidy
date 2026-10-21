@@ -553,7 +553,7 @@ def test_copy_explain_falls_back_when_clipboard_unavailable() -> None:
 # ---------------------------- 视觉改造的守卫 ----------------------------
 #
 # 这一组守的是「样式表还是不是一个有纪律的样式表」。
-# 起因：改造前 443 行里有 25 处硬编码色值、只有 6 个变量。同一语义
+# 起因：改造前 447 行里有 36 处硬编码色值（29 个不同值）、只有 7 个变量。同一语义
 # （比如「危险红」）在五个地方各写一遍，改一处就会漂——而漂掉的那处
 # 往往正好是「彻底删除」按钮，后果不可逆。
 
@@ -587,6 +587,21 @@ def test_styles_define_the_tokens_they_use() -> None:
     used = set(re.findall(r"var\((--[\w-]+)", css))
     missing = used - defined
     assert not missing, f"这些变量用了但没定义：{sorted(missing)}"
+
+
+def test_styles_have_no_unused_tokens() -> None:
+    """定义了的 token 必须真的有人用。
+
+    反过来的漏洞：`--shadow` / `--sp-6` 这种「定义了但没人引用」的变量
+    会让人以为某一档间距或阴影已经在用，于是新写样式时照着它抄，实际
+    渲染毫无变化——排查方向会被彻底带偏。要么用起来，要么删掉。
+    """
+    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    root = css[: css.index("}", css.index(":root"))]
+    defined = set(re.findall(r"(--[\w-]+)\s*:", root))
+    used = set(re.findall(r"var\((--[\w-]+)", css))
+    unused = defined - used
+    assert not unused, f"这些 token 定义了但无人使用，应删除或接入：{sorted(unused)}"
 
 
 def test_every_tab_uses_one_page_head_shape() -> None:

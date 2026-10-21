@@ -87,10 +87,11 @@ MEASURE = r"""
       return r.h > 4;
     });
     const clashes = [];
+    const name = (el) => el.tagName + "." + (el.className || "");
     for (let i = 0; i < blocks.length; i++) {
       for (let j = i + 1; j < blocks.length; j++) {
         if (overlaps(rect(blocks[i]), rect(blocks[j]))) {
-          clashes.push(blocks[i].tagName + "." + (blocks[i].className || "") + " × " + blocks[j].tagName + "." + (blocks[j].className || ""));
+          clashes.push(name(blocks[i]) + " × " + name(blocks[j]));
         }
       }
     }

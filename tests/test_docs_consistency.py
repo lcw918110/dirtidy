@@ -230,6 +230,27 @@ def test_pyproject_declares_desktop_extra() -> None:
         assert pkg not in core, f"{pkg} 是可选增强，不能进核心依赖（缺它也要能跑）"
 
 
+def test_ci_lints_the_whole_repo_not_just_src_and_tests() -> None:
+    """CI 的 ruff 范围必须覆盖 `scripts/`。
+
+    回归背景：加了 `scripts/ui_shots.py` / `scripts/ui_layout_audit.py` 之后，
+    workflow 里还是老写法 `ruff check src tests`，于是这两个文件**从未被 lint 过**；
+    本机跑 `ruff check .` 才发现在里面躺了一条 142 字符的超长行。
+    「CI 绿」和「代码干净」在这类缺省范围下是可以同时成立的假象。
+
+    mypy 不在这里守：它按 `pyproject.toml` 的 `[tool.mypy]` 配置走，范围本就不同。
+    """
+    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    lint_lines = [ln.strip() for ln in ci.splitlines() if "ruff check" in ln and not ln.strip().startswith("#")]
+    assert lint_lines, "CI 里找不到 ruff 检查步骤"
+
+    for line in lint_lines:
+        assert re.search(r"ruff check\s+(\.|--)", line), (
+            f"ruff 范围必须覆盖整个仓库，实际是：{line!r}。"
+            "写成 `src tests` 会让 scripts/ 与根目录配置文件长期漏检。"
+        )
+
+
 def test_gitattributes_pins_fixture_bytes() -> None:
     """fixture 必须关掉换行符转换，否则 Windows 上的归档残留用例会失败。
 
