@@ -120,16 +120,34 @@ def default_backup_dir(db: Path | None = None) -> Path:
     return base / f"CursorStateBackup-{stamp}"
 
 
+def current_platform() -> str:
+    """当前平台标识：`darwin` / `linux` / `nt`。
+
+    单独抽成函数是**为了可测**：用例要在本机验证另外两个平台的分支，
+    最直接的做法是 `monkeypatch.setattr(cc.os, "name", "nt")`——但 `os` 是全局
+    单例模块，改它会影响整个进程。
+
+    实测代价：在 Windows 上跑这类用例，pathlib 会以为自己是 POSIX 而去构造
+    `PosixPath`；一旦该用例失败，pytest 格式化失败信息时调 `Path(os.getcwd())`
+    就抛 `NotImplementedError: cannot instantiate 'PosixPath' on your system`，
+    整个 session 变成 `INTERNALERROR`——**真正的失败被自己的诊断代码吃掉了**。
+    有个函数可以替换，就不必再去动全局状态。
+    """
+    if os.name == "nt":
+        return "nt"
+    return sys.platform if sys.platform in {"darwin", "linux"} else "linux"
+
+
 def default_db_path() -> Path:
     """Cursor 全局状态库在各平台的标准位置。
 
     写死 macOS 路径会让 Linux/Windows 上 `dirtidy cursor-cleanup` 一上手就报
     「找不到数据库」——功能在这两个平台等于不存在。
     """
-    if os.name == "nt":
+    if current_platform() == "nt":
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
         return Path(base) / "Cursor" / "User" / "globalStorage" / "state.vscdb"
-    if sys.platform == "darwin":
+    if current_platform() == "darwin":
         return Path.home() / "Library/Application Support/Cursor/User/globalStorage/state.vscdb"
     # Linux：官方包是 ~/.config/Cursor
     return Path.home() / ".config" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
@@ -152,13 +170,13 @@ _PROCESS_MARKERS: dict[str, tuple[str, ...]] = {
 def _process_args() -> list[str] | None:
     """列出所有进程的命令行；这个平台取不到时返回 None（**不要**当成「没在跑」）。"""
     try:
-        if os.name == "nt":
+        if current_platform() == "nt":
             # Windows 没有 `ps`；`tasklist` 是系统自带的。
             out = subprocess.check_output(
                 ["tasklist", "/FO", "CSV", "/NH"], text=True, errors="replace"
             )
             return [line.split('","')[0].strip('"') for line in out.splitlines() if line.strip()]
-        flag = ["-Ax", "-o", "args="] if sys.platform == "darwin" else ["-eo", "args="]
+        flag = ["-Ax", "-o", "args="] if current_platform() == "darwin" else ["-eo", "args="]
         out = subprocess.check_output(["ps", *flag], text=True, errors="replace")
         return out.splitlines()
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
@@ -180,7 +198,7 @@ def cursor_running() -> bool:
     lines = _process_args()
     if lines is None:
         return True
-    markers = _PROCESS_MARKERS.get("nt" if os.name == "nt" else sys.platform, ())
+    markers = _PROCESS_MARKERS.get(current_platform(), ())
     if not markers:
         # 没适配过的平台：同样按「在跑」处理，让人自己确认。
         return True

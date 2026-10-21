@@ -291,18 +291,20 @@ def test_default_db_path_is_not_macos_only(monkeypatch: pytest.MonkeyPatch) -> N
     写死 macOS 的后果：Linux/Windows 上 `dirtidy cursor-cleanup` 一上手就报
     「找不到数据库」，功能在这两个平台等于不存在。
 
-    注：Windows 分支在 POSIX 上无法真正构造 `WindowsPath`（pathlib 会拒），
-    所以这里只校验**拼出来的字符串**，用 `PurePath` 的思路绕开实例化。
+    只替换 `current_platform()` 而**不去改 `os.name`**：后者是全局单例模块，
+    改它等于整个进程都以为自己是另一个平台。实测在 Windows 上跑这类用例，
+    pathlib 会去构造 `PosixPath`，一旦用例失败，pytest 格式化失败信息时调
+    `Path(os.getcwd())` 就抛 `NotImplementedError`，整个 session 变成
+    `INTERNALERROR`——真失败被自己的诊断代码吃掉，CI 上只看到一堆无关的栈。
     """
     import dirtidy.cursor_cleanup as cc
 
-    monkeypatch.setattr(cc.sys, "platform", "darwin")
-    monkeypatch.setattr(cc.os, "name", "posix")
+    monkeypatch.setattr(cc, "current_platform", lambda: "darwin")
     assert "Library/Application Support/Cursor/User/globalStorage/state.vscdb" in (
         cc.default_db_path().as_posix()
     )
 
-    monkeypatch.setattr(cc.sys, "platform", "linux")
+    monkeypatch.setattr(cc, "current_platform", lambda: "linux")
     assert cc.default_db_path().as_posix().endswith(
         ".config/Cursor/User/globalStorage/state.vscdb"
     ), f"Linux 默认路径不对：{cc.default_db_path()}"
@@ -310,7 +312,7 @@ def test_default_db_path_is_not_macos_only(monkeypatch: pytest.MonkeyPatch) -> N
     # Windows 分支：把 Path 换成 PureWindowsPath 才能在本机构造并比较
     from pathlib import PureWindowsPath
 
-    monkeypatch.setattr(cc.os, "name", "nt")
+    monkeypatch.setattr(cc, "current_platform", lambda: "nt")
     monkeypatch.setenv("APPDATA", r"C:\Users\x\AppData\Roaming")
     monkeypatch.setattr(cc, "Path", PureWindowsPath)
     win = cc.default_db_path()
