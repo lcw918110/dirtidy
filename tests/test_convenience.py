@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import sys
@@ -527,6 +528,42 @@ def test_dup_group_pick_frees_exactly_what_ui_promised(tmp_path: Path) -> None:
     assert sum(p.stat().st_size for p in moved) == promised, (
         "实际移走的字节数与界面承诺的「可释放」不一致"
     )
+
+
+def test_apply_decisions_archive_preserves_parent_timestamps(tmp_path: Path) -> None:
+    """人工决策执行归档时，原父目录与目标祖先目录的时间戳必须保全。"""
+    from dirtidy.decision.store import apply_decisions
+    from dirtidy.models import Decision
+
+    root = tmp_path / "ws"
+    sub = root / "历史项目" / "旧设计"
+    sub.mkdir(parents=True)
+    f = sub / "draft.psd"
+    f.write_text("psd data", encoding="utf-8")
+
+    archive_base = root / "archive"
+    archive_base.mkdir(parents=True)
+
+    run_dir = root / ".dirtidy" / "runs" / "run_arch"
+    run_dir.mkdir(parents=True)
+    qdir = root / ".dirtidy" / "quarantine" / "run_arch"
+
+    t0 = 1600000000.0
+    os.utime(root, (t0, t0))
+    os.utime(root / "历史项目", (t0, t0))
+    os.utime(sub, (t0, t0))
+    os.utime(archive_base, (t0, t0))
+
+    dec = Decision(path="历史项目/旧设计/draft.psd", action="archive", target_relpath="archive/draft.psd")
+    res = apply_decisions(root, "run_arch", run_dir, qdir, decisions=[dec])
+    assert res["archived"] == 1
+    assert not f.exists()
+    assert (archive_base / "draft.psd").exists()
+
+    assert sub.stat().st_mtime == t0, "归档后原目录 mtime 被篡改"
+    assert (root / "历史项目").stat().st_mtime == t0, "归档后原祖先目录 mtime 被篡改"
+    assert archive_base.stat().st_mtime == t0, "归档后目标父目录 mtime 被篡改"
+    assert root.stat().st_mtime == t0, "归档后根目录 mtime 被篡改"
 
 
 # ------------------------- 解释弹窗：能复制 -------------------------

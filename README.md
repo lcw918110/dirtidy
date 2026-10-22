@@ -171,6 +171,7 @@ dirtidy scan /path/to/root --protect path/to/keep --protect another/dir
   处理敏感目录时可加 `--quick` 完全跳过内容 hash 与缓存
 - 产物写盘是**原子**的（临时文件 + 重命名）：进程被杀也不会留下半个 JSON
 - 隔离中途被打断时，**已经搬走**的条目一定在清单里有记录，`quarantine-restore` 能还原回去
+- **父目录时间戳保全**：文件移入隔离区、还原、归档时，自动在移动前后快照并原样恢复所有受影响祖先目录的修改时间（`st_mtime`）与访问时间（`st_atime`），消除操作系统底层（APFS / POSIX）自动将父目录时间刷新为当前时刻的副作用，实现无痕整理
 
 ## 规模
 
@@ -185,7 +186,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 当前收集 357 个用例（含参数化）
+pytest -q            # 当前收集 359 个用例（含参数化）
 ruff check .         # 含 scripts/，CI 同此范围
 mypy
 ```

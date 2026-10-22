@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
 from pathlib import Path
 
 from dirtidy.models import QuarantineEntry, RuleHit, read_json, resolve_under, utc_now_iso, write_json
@@ -18,6 +19,51 @@ from dirtidy.scan.scanner import file_sha256
 #: 保护判定签名：给定相对路径与是否目录，命中返回 (保护规则 ID, 原因)，否则 None。
 #: 与 `rules.protect.evaluate_protect` 同形，便于把判定器直接传进来而不必包一层。
 ProtectCheck = Callable[[str, bool], "tuple[str, str] | None"]
+
+
+@contextlib.contextmanager
+def preserve_parent_times(root: Path, paths: Sequence[Path]) -> Generator[None, None, None]:
+    """在文件/目录发生移动前暂存所有受影响父目录的 mtime/atime，退出时原样恢复。
+
+    在 POSIX / APFS 等文件系统中，当一个子条目被移走或移入时，操作系统内核会自动将
+    其父目录的修改时间刷新为当前系统时间。
+    为了让隔离与还原对用户文件系统「零元数据污染（保持时间戳完全不被篡改）」，
+    在移动发生前快照所有祖先目录（直至 root），移动完成后按深度从深到浅恢复。
+    """
+    saved: dict[Path, tuple[float, float]] = {}
+    try:
+        resolved_root = root.resolve()
+    except OSError:
+        resolved_root = root
+
+    for p in paths:
+        curr = p.parent
+        while True:
+            if curr not in saved and curr.is_dir():
+                try:
+                    st = curr.stat()
+                    saved[curr] = (st.st_atime, st.st_mtime)
+                except OSError:
+                    pass
+            try:
+                resolved_curr = curr.resolve()
+            except OSError:
+                resolved_curr = curr
+            if curr == root or resolved_curr == resolved_root or curr == curr.parent:
+                break
+            curr = curr.parent
+
+    try:
+        yield
+    finally:
+        # 从最深层目录向外层（直到 root）逐级恢复时间戳，避免恢复子级被父级触发刷新
+        sorted_dirs = sorted(saved.keys(), key=lambda d: len(d.parts), reverse=True)
+        for d in sorted_dirs:
+            if d.is_dir() and d in saved:
+                try:
+                    os.utime(d, saved[d])
+                except OSError:
+                    pass
 
 
 def nothing_protected(rel: str, is_dir: bool) -> None:
@@ -240,55 +286,65 @@ def quarantine_hits(
 
     ordered = sorted(executable, key=lambda h: h.path.count("/"), reverse=True)
 
-    try:
-        for hit in ordered:
-            if hit.path in seen_orig:
-                continue
+    # 预先收集可能被移动的文件/目录路径，进入祖先目录时间保全上下文
+    src_paths: list[Path] = []
+    for hit in ordered:
+        if hit.path not in seen_orig:
             try:
-                src = resolve_under(root, hit.path)
-                dest = _safe_dest(quarantine_dir, hit.path)
+                src_paths.append(resolve_under(root, hit.path))
             except ValueError:
-                # 越界路径（外部输入的 .. / 绝对路径）直接跳过，不搬动任何根外文件
-                continue
-            if not src.exists():
-                continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dest))
-            size = 0
-            digest = known_hashes.get(hit.path)
-            if dest.is_file():
-                size = dest.stat().st_size
-                if digest is None:
-                    try:
-                        digest = file_sha256(dest)
-                    except OSError:
-                        digest = None
-            state = root / ".dirtidy"
-            try:
-                qrel = str(dest.relative_to(state))
-            except ValueError:
-                qrel = str(dest)
-            entry = QuarantineEntry(
-                id=uuid.uuid4().hex[:12],
-                original_path=hit.path,
-                quarantine_path=qrel,
-                rule_id=hit.rule_id,
-                reason=hit.reason,
-                size=size,
-                sha256=digest,
-                quarantined_at=utc_now_iso(),
-                is_dir=hit.is_dir,
-            )
-            entries.append(entry)
-            seen_orig.add(hit.path)
-    finally:
-        # 即使中途抛错（含 Ctrl-C 的 KeyboardInterrupt），也必须把**已经搬走**的条目落盘。
-        # 否则会出现「文件已离开原位、清单里却查不到」——用户不知道它去哪了，也无从还原，
-        # 这是本工具最不能出的错。写在 finally 里，成功路径也仍然只写一次。
-        #
-        # 覆盖范围：Python 异常与 SIGINT。被 SIGKILL / OOM 硬杀仍会丢掉最后几条，
-        # 彻底解决需要 append-only 日志，已登记在 `docs/08-稳定性与性能设计.md`。
-        write_json(manifest_path, [e.to_dict() for e in entries])
+                pass
+
+    with preserve_parent_times(root, src_paths):
+        try:
+            for hit in ordered:
+                if hit.path in seen_orig:
+                    continue
+                try:
+                    src = resolve_under(root, hit.path)
+                    dest = _safe_dest(quarantine_dir, hit.path)
+                except ValueError:
+                    # 越界路径（外部输入的 .. / 绝对路径）直接跳过，不搬动任何根外文件
+                    continue
+                if not src.exists():
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dest))
+                size = 0
+                digest = known_hashes.get(hit.path)
+                if dest.is_file():
+                    size = dest.stat().st_size
+                    if digest is None:
+                        try:
+                            digest = file_sha256(dest)
+                        except OSError:
+                            digest = None
+                state = root / ".dirtidy"
+                try:
+                    qrel = str(dest.relative_to(state))
+                except ValueError:
+                    qrel = str(dest)
+                entry = QuarantineEntry(
+                    id=uuid.uuid4().hex[:12],
+                    original_path=hit.path,
+                    quarantine_path=qrel,
+                    rule_id=hit.rule_id,
+                    reason=hit.reason,
+                    size=size,
+                    sha256=digest,
+                    quarantined_at=utc_now_iso(),
+                    is_dir=hit.is_dir,
+                )
+                entries.append(entry)
+                seen_orig.add(hit.path)
+        finally:
+            # 即使中途抛错（含 Ctrl-C 的 KeyboardInterrupt），也必须把**已经搬走**的条目落盘。
+            # 否则会出现「文件已离开原位、清单里却查不到」——用户不知道它去哪了，也无从还原，
+            # 这是本工具最不能出的错。写在 finally 里，成功路径也仍然只写一次。
+            #
+            # 覆盖范围：Python 异常与 SIGINT。被 SIGKILL / OOM 硬杀仍会丢掉最后几条，
+            # 彻底解决需要 append-only 日志，已登记在 `docs/08-稳定性与性能设计.md`。
+            write_json(manifest_path, [e.to_dict() for e in entries])
 
     return entries
 
@@ -308,30 +364,42 @@ def restore_entries(
     restored: list[str] = []
     state = root / ".dirtidy"
 
+    # 预先收集可能被还原到的目标路径，进入祖先目录时间保全上下文
+    potential_dests: list[Path] = []
     for item in raw:
-        eid = item["id"]
+        eid = item.get("id")
         if not restore_all and (entry_ids is None or eid not in entry_ids):
-            remaining.append(item)
             continue
-        qpath = Path(item["quarantine_path"])
-        src = qpath if qpath.is_absolute() else state / qpath
         try:
-            dest = resolve_under(root, item["original_path"])
-        except ValueError:
-            # 原始路径越界（历史脏数据/被篡改的 manifest）：拒绝还原，保留在清单里
-            remaining.append(item)
-            continue
-        if not src.exists():
-            remaining.append(item)
-            continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists():
-            remaining.append(item)
-            continue
-        shutil.move(str(src), str(dest))
-        restored.append(item["original_path"])
+            potential_dests.append(resolve_under(root, item["original_path"]))
+        except (KeyError, ValueError):
+            pass
 
-    write_json(manifest_path, remaining)
+    with preserve_parent_times(root, potential_dests):
+        for item in raw:
+            eid = item["id"]
+            if not restore_all and (entry_ids is None or eid not in entry_ids):
+                remaining.append(item)
+                continue
+            qpath = Path(item["quarantine_path"])
+            src = qpath if qpath.is_absolute() else state / qpath
+            try:
+                dest = resolve_under(root, item["original_path"])
+            except ValueError:
+                # 原始路径越界（历史脏数据/被篡改的 manifest）：拒绝还原，保留在清单里
+                remaining.append(item)
+                continue
+            if not src.exists():
+                remaining.append(item)
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                remaining.append(item)
+                continue
+            shutil.move(str(src), str(dest))
+            restored.append(item["original_path"])
+
+        write_json(manifest_path, remaining)
     return restored
 
 

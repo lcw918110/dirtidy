@@ -9,7 +9,12 @@ from pathlib import Path
 
 from dirtidy.models import Decision, RuleHit, read_json, resolve_under, write_json
 from dirtidy.pipeline import append_protection_records, protect_rules_from_paths
-from dirtidy.quarantine.store import drop_covered_descendants, plan_quarantine, quarantine_hits
+from dirtidy.quarantine.store import (
+    drop_covered_descendants,
+    plan_quarantine,
+    preserve_parent_times,
+    quarantine_hits,
+)
 from dirtidy.rules.engine import effective_protect_rules, load_rule_pack
 from dirtidy.rules.protect import compile_protect_rules, evaluate_protect
 
@@ -146,7 +151,8 @@ def apply_decisions(
                 archived += 1
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dest))
+            with preserve_parent_times(root, [src, dest]):
+                shutil.move(str(src), str(dest))
             archived += 1
 
     if dry_run:

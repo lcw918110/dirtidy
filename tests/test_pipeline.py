@@ -208,3 +208,55 @@ def test_run_id_escape_is_refused_before_anything_is_deleted(workspace: Path) ->
     assert main(["purge-quarantine", str(workspace), "../../../victim", "--yes"]) == 2
     assert victim.exists(), "目标根之外的目录被删了"
     assert (victim / "precious.txt").exists(), "目标根之外的文件被删了"
+
+
+def test_parent_directory_timestamps_are_preserved_on_quarantine_and_restore(workspace: Path) -> None:
+    """隔离与还原文件时，受影响的各级父目录修改时间（mtime）必须毫发无损地保全。
+
+    背景：POSIX / APFS 内核会在目录内文件被移除或新增时自动将父目录 mtime 刷新为当前系统时间。
+    若不予保全，用户运行清理后外层历史业务目录的修改时间会被大面积篡改。
+    保全机制确保：
+      1. 隔离后，包含被移走文件的子目录及祖先目录 mtime 维持原状；
+      2. 还原后，被恢复文件所在的子目录及祖先目录 mtime 维持原状。
+    """
+    from dirtidy.models import RuleHit
+    from dirtidy.quarantine.store import nothing_protected, quarantine_hits, restore_entries
+
+    sub = workspace / "业务历史资料" / "子分类A"
+    sub.mkdir(parents=True)
+    junk_file = sub / "temp.log"
+    junk_file.write_text("temporary log content\n", encoding="utf-8")
+
+    # 预先创建 .dirtidy 结构，避免创建本身修改 workspace 根目录
+    q_dir = workspace / ".dirtidy" / "quarantine" / "run_test"
+    manifest = workspace / ".dirtidy" / "runs" / "run_test" / "quarantine_manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+
+    # 设定历史时间戳（模拟两年前）
+    old_time = 1650000000.0
+    os.utime(workspace, (old_time, old_time))
+    os.utime(workspace / "业务历史资料", (old_time, old_time))
+    os.utime(sub, (old_time, old_time))
+
+    hit = RuleHit(
+        path="业务历史资料/子分类A/temp.log",
+        rule_id="log_suffix",
+        action="auto_quarantine",
+        reason="测试日志",
+    )
+
+    # 1. 执行隔离
+    quarantine_hits(workspace, "run_test", [hit], q_dir, manifest, is_protected=nothing_protected)
+    assert not junk_file.exists(), "垃圾文件未被移至隔离区"
+    assert sub.stat().st_mtime == old_time, f"隔离后子目录 mtime 被改变: {sub.stat().st_mtime} != {old_time}"
+    assert (workspace / "业务历史资料").stat().st_mtime == old_time, "隔离后父目录 mtime 被改变"
+    assert workspace.stat().st_mtime == old_time, "隔离后根目录 mtime 被改变"
+
+    # 2. 执行还原
+    restored = restore_entries(workspace, manifest, restore_all=True)
+    assert "业务历史资料/子分类A/temp.log" in restored
+    assert junk_file.exists(), "文件未能成功还原"
+    assert sub.stat().st_mtime == old_time, f"还原后子目录 mtime 被改变: {sub.stat().st_mtime} != {old_time}"
+    assert (workspace / "业务历史资料").stat().st_mtime == old_time, "还原后父目录 mtime 被改变"
+    assert workspace.stat().st_mtime == old_time, "还原后根目录 mtime 被改变"
+
