@@ -581,7 +581,6 @@ def test_clean_refuses_blob_deletion_without_typed_ack(mini_db: Path) -> None:
         mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=bk,
         include_blob=True, blob_ack=False,
     )
-    assert _blob_keys(mini_db) == _blob_keys(mini_db) or True  # 上面已断言默认不删
     remaining = _blob_keys(mini_db)
     assert f"{BLOB_PREFIX}{HASH_ORPHAN_1}" in remaining, "没给 ack 却删了 blob"
     assert f"{BLOB_PREFIX}{HASH_ORPHAN_2}" in remaining, "没给 ack 却删了 blob"
