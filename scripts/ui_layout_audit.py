@@ -26,6 +26,9 @@ import uvicorn
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _extreme_workspace import build_extreme_workspace  # noqa: E402
 
 from dirtidy.pipeline import create_run  # noqa: E402
 from dirtidy.web.app import create_app  # noqa: E402
@@ -36,9 +39,18 @@ BASE = f"http://127.0.0.1:{PORT}"
 STATIC = ROOT / "src" / "dirtidy" / "web" / "static"
 
 MEASURE = r"""
-(function () {
+(async function () {
   const out = [];
   const tabs = [...document.querySelectorAll(".tab")].map((s) => s.id.replace("tab-", ""));
+
+  // 关键：必须等 boot() 把 run 真正载入、表格渲染完再量。
+  // 否则量到的是**空壳页面**——表格里 0 行，布局当然「全部通过」，
+  // 换什么样本都是一样的结果（这正是第一版脚本一直假绿的原因）。
+  // 判据用「页面出现表格行」，而不是固定等待时长。
+  for (let i = 0; i < 100; i++) {
+    if (document.querySelectorAll("#tab-review tbody tr").length > 0) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
 
   function rect(el) {
     const r = el.getBoundingClientRect();
@@ -87,11 +99,15 @@ MEASURE = r"""
       return r.h > 4;
     });
     const clashes = [];
-    const name = (el) => el.tagName + "." + (el.className || "");
+    // 注意：这里**不能**叫 name——外层 for (const name of tabs) 已经占了这个名字，
+    // 块内再来 const name 会触发 TDZ，把整个测量脚本打成 ReferenceError，
+    // 探针输出恒为空（这个坑踩过一次：脚本一直在报「找不到 probe 输出」，
+    // 却被误当成环境问题）。
+    const elName = (el) => el.tagName + "." + (el.className || "");
     for (let i = 0; i < blocks.length; i++) {
       for (let j = i + 1; j < blocks.length; j++) {
         if (overlaps(rect(blocks[i]), rect(blocks[j]))) {
-          clashes.push(name(blocks[i]) + " × " + name(blocks[j]));
+          clashes.push(elName(blocks[i]) + " × " + elName(blocks[j]));
         }
       }
     }
@@ -109,6 +125,21 @@ MEASURE = r"""
       const r = rect(el);
       if (r.h > 6 && r.t < visH && r.b > 0) visibleBlocks++;
     }
+    // 7) 文字被挤成竖排单字：单元格/段落宽度小于一个字身时，
+    //    中文会一个一个字往下掉。这在「超长路径 + 窄表格」下才会现形，
+    //    示例数据（路径都很短）永远看不到。
+    const squeezed = [];
+    for (const el of sec.querySelectorAll("td, th, .path, .cell, p, span, code, a")) {
+      if (!el.textContent || !el.textContent.trim()) continue;
+      const r = rect(el);
+      if (r.w === 0 || r.h === 0) continue;
+      const fs = parseFloat(getComputedStyle(el).fontSize) || 14;
+      // 一个字身的宽度；低于它就意味着中文必然竖排
+      if (r.w < fs * 1.05 && el.getBoundingClientRect().height > fs * 2.2) {
+        squeezed.push(el.tagName + "." + (el.className || "").toString().split(" ")[0] +
+                     " w=" + Math.round(r.w) + " text=" + el.textContent.trim().slice(0, 12));
+      }
+    }
 
     out.push({
       tab: name,
@@ -121,6 +152,9 @@ MEASURE = r"""
       clashes,
       headClash,
       visibleBlocks,
+      rowCount: sec.querySelectorAll("tbody tr").length,
+      squeezed: squeezed.slice(0, 6),
+      squeezedCount: squeezed.length,
     });
   }
   document.getElementById("probeOut").textContent = JSON.stringify(out, null, 1);
@@ -129,8 +163,15 @@ MEASURE = r"""
 
 
 def main() -> int:
+    # --extreme 换成「长路径 / 中文名 / 多条目」的样本库。
+    # 默认用示例库——它只有 9 个文件、路径都很短，
+    # 「文字被挤成竖排单字」「表格被撑破」这类问题在它上面永远量不出来。
+    extreme = "--extreme" in sys.argv
     work = Path(tempfile.mkdtemp(prefix="dirtidy-layout-")) / "ws"
-    shutil.copytree(ROOT / "tests" / "fixtures" / "sample_workspace", work)
+    if extreme:
+        build_extreme_workspace(work)
+    else:
+        shutil.copytree(ROOT / "tests" / "fixtures" / "sample_workspace", work)
     meta = create_run(work, rules="default", quick=False, apply=False)
 
     # 临时探针页：与 index.html 同目录，静态路径照常解析
@@ -208,11 +249,17 @@ def main() -> int:
                 flag.append(f"页头内部重叠 {row['headClash']}")
             if row["visibleBlocks"] < 3:
                 flag.append(f"首屏几乎空白 visibleBlocks={row['visibleBlocks']}")
+            if row["squeezedCount"]:
+                flag.append(f"文字被挤窄 {row['squeezedCount']} 处 {row['squeezed']}")
+            # 审阅页必须有行：它一行都没有就说明量的是空壳，
+            # 「布局全部通过」是假绿。其它页允许空（隔离区/监视本来就可能是空的）。
+            if row["tab"] == "review" and row["rowCount"] == 0:
+                flag.append("审阅页表格 0 行——量到的是空壳，结论不算数")
             status = "OK  " if not flag else "FAIL"
             print(
                 f"{status} {row['tab']:11s} vw={row['viewport']:5d} "
                 f"secW={row['sectionWidth']:5d} headTop={row['headTop']} "
-                f"vis={row['visibleBlocks']:3d}"
+                f"vis={row['visibleBlocks']:3d} rows={row['rowCount']:3d}"
             )
             if flag:
                 problems.append((label, row["tab"], flag))

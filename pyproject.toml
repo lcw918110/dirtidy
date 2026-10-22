@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dirtidy"
-version = "0.1.0"
+# 版本号的唯一来源是 src/dirtidy/__init__.py 的 __version__（台账 T-13）。
+# 两处各写一份时，改了一处忘了另一处，安装出来的版本号就会撒谎——
+# 而"装完的版本对不上"这类问题只有到发布时才看得见。
+dynamic = ["version"]
 description = "Cross-platform local directory tidy: rule quarantine, hash candidates, AI-assisted review"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -32,6 +35,10 @@ dirtidy = "dirtidy.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+# 版本号从包内读取，避免 pyproject.toml 与 __init__.py 各写一份（台账 T-13）。
+version = {attr = "dirtidy.__version__"}
 
 [tool.setuptools.package-data]
 dirtidy = ["web/static/*", "rules/packs/*.yaml", "configs/*.yaml"]

@@ -251,6 +251,82 @@ def test_ci_lints_the_whole_repo_not_just_src_and_tests() -> None:
         )
 
 
+def test_version_has_a_single_source() -> None:
+    """版本号只能有一处来源：`src/dirtidy/__init__.py` 的 `__version__`（台账 T-13）。
+
+    两处各写一份时，改了一处忘了另一处，装出来的版本号就在撒谎——
+    而"装完的版本对不上"只有到发布时才看得见。`pyproject.toml` 必须声明
+    `dynamic = ["version"]`，任何写死的 `version = "..."` 都要被拦下。
+    """
+    import tomllib
+
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    project = data["project"]
+
+    assert "version" not in project, (
+        f"pyproject.toml 写死了 version={project.get('version')!r}，"
+        "版本号必须只有一个来源——改回 dynamic = [\"version\"]。"
+    )
+    assert "version" in project.get("dynamic", []), (
+        "pyproject.toml 必须声明 dynamic = [\"version\"]，否则打包拿不到版本号"
+    )
+
+    setuptools_cfg = data["tool"]["setuptools"]
+    assert setuptools_cfg.get("dynamic", {}).get("version") == {"attr": "dirtidy.__version__"}, (
+        "[tool.setuptools.dynamic].version 必须指向 dirtidy.__version__"
+    )
+
+    # 唯一来源本身必须真的存在且是字符串
+    init = (REPO_ROOT / "src" / "dirtidy" / "__init__.py").read_text(encoding="utf-8")
+    m = re.search(r'^__version__\s*=\s*"([^"]+)"', init, re.M)
+    assert m, "src/dirtidy/__init__.py 里找不到 __version__ 定义"
+    assert m.group(1).strip(), "__version__ 不能是空串"
+
+
+def test_ci_builds_a_wheel_and_verifies_a_clean_install() -> None:
+    """CI 必须真的构建 wheel 并装进干净 venv 验证（台账 T-14）。
+
+    为什么这条不能省：editable 安装（`pip install -e .`）下，静态资源与规则包
+    是直接从 `src/` 目录读的，**永远不存在「装完报缺文件」**。这个故障模式
+    只在真的打成 wheel、装进一个空环境时才会暴露——也就是用户 pip install
+    之后才炸。
+
+    2026-10-22 本机实测过：当前 wheel 装进干净 venv 后，CLI、24 条内置规则、
+    首页与三个静态资源都正常（HTTP 200）。**风险当前不存在，但缺的是防线。**
+    守住这条的意义是：以后谁改了 package-data 漏了项，CI 会立刻红，而不是
+    等到用户安装时才发现。
+    """
+    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "package:" in ci, "CI 缺少 package job：wheel 打包与干净安装验证没了"
+
+    # 必须真的构建 wheel，而不是只做 editable 安装
+    assert re.search(r"python -m build --wheel", ci), (
+        "package job 必须用 `python -m build --wheel` 产出真正的 wheel。"
+        "editable 安装走 src/ 目录，验证不到 package-data 有没有漏项。"
+    )
+    # 必须装进一个新建的、独立的 venv
+    assert re.search(r"python -m venv", ci), "package job 必须建独立 venv 来装 wheel"
+    assert re.search(r"pip install dist/\*\.whl", ci), "package job 必须安装构建出来的 wheel 本身"
+    # 必须验到实际会用到的资源：规则包与前端静态资源
+    assert "load_rule_pack" in ci, "package job 缺少内置规则包的验证"
+    for asset in ("/static/app.js", "/static/styles.css"):
+        assert asset in ci, f"package job 缺少前端资源 {asset} 的验证"
+
+
+def test_ci_runs_the_end_to_end_smoke_script() -> None:
+    """CI 必须跑端到端冒烟脚本（台账 T-12）。
+
+    单测覆盖的是"每个零件对不对"，冒烟覆盖的是"零件装到一起还走不走得通"：
+    参数能串起来、目录能创建、保护真的拦住了东西、审计真的落了盘。
+    这类"接线错误"单测最容易漏——每个函数都对，但流程串不起来。
+    """
+    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "scripts/smoke_e2e.py" in ci, (
+        "CI 没有跑 scripts/smoke_e2e.py：端到端接线无人验证，"
+        "「每个函数都对但流程串不起来」这类故障只能靠用户撞上"
+    )
+
+
 def test_gitattributes_pins_fixture_bytes() -> None:
     """fixture 必须关掉换行符转换，否则 Windows 上的归档残留用例会失败。
 

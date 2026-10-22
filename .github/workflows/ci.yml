@@ -47,3 +47,84 @@ jobs:
 
       - name: Test (pytest)
         run: pytest -q
+
+  # 打包验证（台账 T-14）：editable 安装掩盖了 package-data 漏项——
+  # 本地 `pip install -e .` 时静态资源与规则包直接从 src/ 读，永远不会缺文件；
+  # 只有真的打成 wheel 装进干净环境，才会暴露「装完报缺文件」。
+  # 因此这一段必须**构建 wheel 并装进新建 venv**，不能用 editable 代替。
+  #
+  # 单独一个 job 而不是并进上面的矩阵：它与平台/版本无关（只需一个 Python），
+  # 并进 6 个矩阵 job 会让每次推送多跑 6 遍同样的事。
+  package:
+    name: package (wheel + clean install)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+          python -m build --wheel --outdir dist .
+
+      - name: Install into a clean venv
+        run: |
+          python -m venv .venv-wheel
+          .venv-wheel/bin/pip install --upgrade pip
+          .venv-wheel/bin/pip install dist/*.whl
+          # TestClient 需要 httpx（fastapi 不强制依赖它）
+          .venv-wheel/bin/pip install httpx
+
+      - name: Verify the installed package
+        run: |
+          # 命令行入口装完就能用
+          .venv-wheel/bin/dirtidy --version
+          .venv-wheel/bin/dirtidy --help
+          # 内置规则包能加载（数量对得上，说明 YAML 真的进了 wheel）
+          .venv-wheel/bin/python -c "
+          from dirtidy.rules import load_rule_pack
+          pack = load_rule_pack('default')
+          rules = pack.get('rules') if isinstance(pack, dict) else getattr(pack, 'rules', [])
+          assert rules, '内置规则包为空：规则 YAML 可能没打进 wheel'
+          print('规则条数:', len(rules))
+          "
+          # 前端静态资源能取到（index.html / app.js / styles.css）
+          .venv-wheel/bin/python -c "
+          from pathlib import Path
+          from dirtidy.web.app import create_app
+          from fastapi.testclient import TestClient
+          client = TestClient(create_app(default_root=Path('/tmp')))
+          for path in ('/', '/static/app.js', '/static/styles.css'):
+              r = client.get(path)
+              assert r.status_code == 200, f'{path} 取不到：静态资源可能没打进 wheel'
+          print('静态资源全部可取')
+          "
+
+  # 端到端冒烟（台账 T-12）：跑通 scan → apply-rules → analyze(--mock) → 审计 全流程。
+  #
+  # 为什么单列一个 job：单测覆盖的是"每个零件对不对"，而这条覆盖的是
+  # **零件装到一起还走不走得通**——参数能串起来、目录能创建、保护真的拦住了东西、
+  # 审计真的落了盘。这类问题单测最容易漏。
+  #
+  # 用 --mock 跑 analyze：不需要任何模型密钥，纯本地可跑，CI 里才有确定性。
+  smoke:
+    name: smoke (end-to-end)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: End-to-end smoke
+        run: python scripts/smoke_e2e.py

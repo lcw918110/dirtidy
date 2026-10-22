@@ -185,12 +185,13 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 当前收集 352 个用例（含参数化）
+pytest -q            # 当前收集 357 个用例（含参数化）
 ruff check .         # 含 scripts/，CI 同此范围
 mypy
 ```
 
-三平台矩阵（ubuntu / macos / windows × Python 3.11、3.12）由 `.github/workflows/ci.yml` 覆盖，推送到 GitHub 后生效。
+三平台矩阵（ubuntu / macos / windows × Python 3.11、3.12，共 6 个 job）由 `.github/workflows/ci.yml` 覆盖，
+另有两个独立 job：`package`（真构建 wheel 并装进干净 venv 验证）与 `smoke`（`scripts/smoke_e2e.py` 端到端）。推到 GitHub 后生效。
 
 ## 许可证
 

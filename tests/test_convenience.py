@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import re
 import shutil
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -23,11 +25,13 @@ from fastapi.testclient import TestClient
 
 from dirtidy import cli
 from dirtidy.advice import ADVICE_HINTS, ADVICE_LABELS, ADVICE_ORDER
+from dirtidy.pipeline import create_run
 from dirtidy.rules.engine import load_rule_pack
 from dirtidy.web.app import _reload_target, create_app
 
 FIXTURE_SRC = Path(__file__).parent / "fixtures" / "sample_workspace"
-STATIC = Path(__file__).resolve().parent.parent / "src" / "dirtidy" / "web" / "static"
+ROOT = Path(__file__).resolve().parent.parent
+STATIC = ROOT / "src" / "dirtidy" / "web" / "static"
 
 
 def _js_function(js: str, name: str) -> str:
@@ -732,4 +736,71 @@ def test_reduced_motion_covers_the_spinner_too() -> None:
     css = (STATIC / "styles.css").read_text(encoding="utf-8")
     block = css[css.index("@media (prefers-reduced-motion: reduce)") :]
     assert 'button[aria-busy="true"]::after' in block, "转圈也要尊重减少动态效果"
+
+
+def test_layout_audit_script_waits_for_real_rows() -> None:
+    """布局审计脚本必须等到表格**真有行**再量。
+
+    背景：这个脚本曾经一直假绿——它量的是页面加载完成前的空壳，
+    表格 0 行，于是无论换什么样本都「全部通过」。踩过两次才定位到：
+    ① 探针里的 `const name` 遮蔽外层 `for (const name of tabs)`，
+       TDZ 报错让整个测量脚本挂掉，输出恒为空；
+    ② 即使脚本不报错，`boot()` 也没把 run 内容加载完，表格仍是空的。
+
+    所以守卫两条：探针必须**等**表格出现行；量完必须**报**出行数，
+    审阅页 0 行直接判失败——宁可报红，也不能给一个空壳开绿灯。
+    """
+    src = (ROOT / "scripts" / "ui_layout_audit.py").read_text(encoding="utf-8")
+    assert "await new Promise" in src, "探针必须异步等待表格渲染完成"
+    assert "tbody tr" in src, "探针必须以表格行作为「已加载」的判据"
+    assert "rowCount" in src, "量完必须报出每个分页的行数"
+    assert "审阅页表格 0 行" in src, "审阅页 0 行必须判失败，不能放行空壳"
+
+
+def test_extreme_sample_actually_fills_the_table() -> None:
+    """极端样本必须真能灌满表格，否则「极端测试」等于没测。
+
+    踩过的坑：① 全放在 `node_modules` 下 → 被一条规则吃掉，只剩 1 条命中；
+    ② 目录名写成 `build1` → `build_dir_candidate` 匹配的是精确名 `build`，
+    一个都匹配不上。两种情况下表格都是空的，测出来的「全部通过」毫无意义。
+
+    守卫分两层：**布局层**（直接看文件系统，绕不过去）与**扫描层**
+    （看真扫出来多少行、多少规则、多长的路径）。
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        from _extreme_workspace import build_extreme_workspace  # type: ignore[import-not-found]
+    finally:
+        sys.path.pop(0)
+
+    with tempfile.TemporaryDirectory() as td:
+        work = Path(td) / "ws"
+        build_extreme_workspace(work)
+
+        # --- 布局层：顶层必须有多个独立条目，且存在精确名为 build 的目录 ---
+        top_dirs = [p.name for p in work.iterdir() if p.is_dir()]
+        assert len(top_dirs) >= 5, f"顶层只有 {top_dirs}，样本没铺开"
+        builds = [p for p in work.rglob("build") if p.is_dir() and "node_modules" not in p.parts]
+        assert builds, "没有名为 build 的目录——build_dir_candidate 匹配的是精确名"
+        assert any(p.parent != work for p in builds), "build 目录全挤在顶层了"
+
+        meta = create_run(work, rules="default", quick=False, apply=False)
+        # 必须在临时目录还在的时候取数据：run 状态就落在 work 下面，
+        # 目录一删就查不到 run 了。
+        app = create_app(default_root=work, default_run_id=meta["run_id"])
+        with TestClient(app) as client:
+            data = client.get(f"/api/runs/{meta['run_id']}").json()
+
+    assert "meta" in data, f"拿不到 run 数据：{data}"
+    assert data["meta"]["auto_hits"] >= 10, (
+        f"极端样本只命中 {data['meta']['auto_hits']} 条，命中表灌不满"
+    )
+    assert data["meta"]["candidates"] >= 20, (
+        f"极端样本只有 {data['meta']['candidates']} 条候选，候选表灌不满"
+    )
+    # 必须覆盖多条不同规则：只命中一条说明整棵树被一条规则吃掉了
+    rule_ids = {c["rule_id"] for c in data["candidates"]}
+    assert len(rule_ids) >= 2, f"候选只来自 {rule_ids}，样本没铺开"
+    longest = max(len(p) for c in data["candidates"] for p in c["paths"])
+    assert longest > 150, f"最长路径只有 {longest} 字符，超长路径没进样本"
 
