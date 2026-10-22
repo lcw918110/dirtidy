@@ -16,7 +16,8 @@ Cursor 把 Agent / Composer 的全部运行时数据塞进一张巨大的键值�
 
 核心判定：blob 是不是孤儿
 ------------------------
-blob 的 key 就是它的 64 位 hex 哈希。它被谁引用，藏在**其他行的 value 的 JSON 里**。
+blob 的 key 就是它的 64 位 hex 哈希（真机取证：key == sha256(value)，内容寻址）。
+它被谁引用，藏在**其他行的 value 的 JSON 里**。
 用 SQL `INSTR` 逐个哈希查等于全表扫（单个哈希实测 7 分钟无结果），不可行；
 正确做法是**顺序读一遍 value，用正则一次性提取所有被引用的哈希**。
 
@@ -28,14 +29,35 @@ blob 的 key 就是它的 64 位 hex 哈希。它被谁引用，藏在**其他�
 **误删仍被引用的 blob**。因此本模块扫描**除 blob 自身以外的全部键前缀**，
 宁可多扫几分钟，也不误删活数据。
 
+⚠️⚠️ 2026-10-22 事故：value 扫描对 tool-result blob 结构性失明（必读）
+--------------------------------------------------------------------
+事故复盘（`docs/cursor-cleanup-integration/事故-20261022-会话无法还原.md`）：
+Cursor 会话 UI 报 `3 missing blobs: 0203ebc74590, 00a8f0e42850, 0120dc7d37b2`，
+整条会话判死。真机取证（`state.vscdb.pre-cleanup` 对照当前库）证明：
+
+1. 这三个 12 位 ID 是三个被删 64 位 blob key 的**前缀**（key 空间对得上）。
+2. blob key == sha256(value)（内容寻址），value 是 agent 工具调用结果
+   （`{"role":"tool","content":[{"type":"tool-result","toolCallId":"call_…",…}]}`）。
+3. 会话气泡通过 key 形态 `bubbleId:<cid>:<uuid>/t:call_<toolCallId>` 引用工具结果；
+   **toolCallId 只出现在气泡 key 里，不出现在任何 value 里**。
+4. 因此「扫全部 value 找 64 位哈希」对这类 blob **一个引用都找不到**——
+   引用协议在 key 里，不在 value 里。扫得再全也救不了。
+5. 三个 blob 在 10/21 预清理库存在、当前库不存在 → 确系清理删除。
+   其中一个的 `/t:` 气泡也已不在库里（子代理/云端需求），**本地无法枚举**。
+
+结论：**「无 64 位引用」证明不了「会话还原不需要它」**。在 Cursor 公开
+还原协议之前，唯一安全的默认是**不删 blob**；要删必须显式高危开关 +
+逐字确认（见 `clean()` 的 `blob_ack` 与 CLI 的 `--delete-blobs`）。
+
 安全设计
 --------
 1. **默认干跑**。不传 `--apply` 只统计不改库——与 dirtidy 其他破坏性命令一致。
 2. **绝不删 `ItemTable`**（用户设置）。
-3. **只删无引用的孤儿 blob**，被引用的一个不动。
+3. **默认不删 blob**（2026-10-22 事故后改为默认关）。删 blob 需显式
+   `--delete-blobs` + 逐字确认，且判定内置 toolCallId 守卫。
 4. **在线模式绝不 VACUUM、绝不替换文件**（会锁死 Cursor）。
 5. 写库用**小批次短事务 + 批间让路 + 锁退避重试**，尽量不影响 Cursor 使用。
-6. 真正清理前强制检测 Cursor 是否在跑，**在跑就拒绝执行**。
+6. 真正清理前强制检测 Cursor 是否在跑，**在跑就拒绝执行**；判断不了也按在跑。
 7. 清理前做冷备份（优先 APFS clonefile），压缩后校验再原子替换。
 
 已知坑（集成时踩过）
@@ -67,6 +89,16 @@ BLOB_PREFIX_LEN = len(BLOB_PREFIX)
 
 #: blob 哈希格式：64 位小写 hex。
 BLOB_HASH_RE = re.compile(r"[0-9a-f]{64}")
+
+#: 工具结果气泡的 key 形态：`bubbleId:<cid>:<uuid>/t:call_<toolCallId>`。
+#: toolCallId 只出现在 key 里、不出现在任何 value 里（2026-10-22 事故取证），
+#: 所以「扫 value 找引用」对这类 blob 结构性失明——见模块头「事故」一节。
+#: 形态刻意放宽（`.+/t:`）：只要气泡 key 带 `/t:call_` 后缀就算，宁可多认。
+TOOL_RESULT_KEY_RE = re.compile(r"^bubbleId:.+/t:(call_[0-9a-z]+)$")
+
+#: `--blob-confirm` 要求用户逐字输入的确认串。选它是因为它**无法被误敲**，
+#: 且语义直白：用户必须承认「旧会话可能打不开」这一具体后果。
+BLOB_CONFIRM_PHRASE = "我接受旧会话可能打不开"
 
 #: 引用来源**不能**扫 blob 自身——那是 75 GB，读它只为找引用没有意义。
 BLOB_SELF_PREFIX = BLOB_PREFIX
@@ -286,6 +318,10 @@ class BlobPlan:
     referenced: int = 0
     orphan: list[str] = field(default_factory=list)
     orphan_bytes: int = 0
+    #: 因 toolCallId 守卫被额外保留下来的 blob 数（2026-10-22 事故回归）。
+    #: 这些 blob 在 value 扫描里是「孤儿」，但它们是 tool-result，会话还原
+    #: 可能仍需要——「无 64 位引用」证明不了「还原不需要」。
+    guarded: int = 0
 
     @property
     def referenced_count(self) -> int:
@@ -297,7 +333,42 @@ class BlobPlan:
             "blob_referenced": self.referenced,
             "blob_orphan": len(self.orphan),
             "blob_orphan_bytes": self.orphan_bytes,
+            "blob_guarded": self.guarded,
         }
+
+
+def collect_tool_result_call_ids(cur: sqlite3.Cursor) -> set[str]:
+    """全库收集工具结果气泡 key 里的 toolCallId（只读 key 列，不读 value）。
+
+    2026-10-22 事故取证：会话通过 `bubbleId:<cid>:<uuid>/t:call_<toolCallId>`
+    引用工具结果 blob；toolCallId 只在 key 里、不在任何 value 里。所以
+    「扫 value 找 64 位哈希」对这类 blob 一个引用都找不到——它们会被判成
+    孤儿删掉，随后会话 UI 报 missing blobs、整条判死。
+
+    这层守卫的语义是**保守保留**：凡 key 能对上 toolCallId 的 blob 都不删，
+    哪怕 value 扫描说它是孤儿。它不是「引用判定」的替代，而是承认
+    「我们证明不了它不被需要」时的 fail-safe。
+    """
+    call_ids: set[str] = set()
+    for (key,) in cur.execute(
+        "SELECT key FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'"
+    ):
+        m = TOOL_RESULT_KEY_RE.match(key)
+        if m:
+            call_ids.add(m.group(1))
+    return call_ids
+
+
+def _blob_is_tool_result(value: bytes | str) -> bool:
+    """blob value 是否是工具调用结果（含 `toolCallId` 的 tool-result JSON）。
+
+    只看头部一小段就够：tool-result 的 JSON 结构里 `toolCallId` 出现在
+    `"content":[{"type":"tool-result",…}]` 附近，不必读完全部 75 GB。
+    """
+    head = value[:2048] if isinstance(value, (bytes, bytearray)) else str(value)[:2048]
+    if isinstance(head, (bytes, bytearray)):
+        head = head.decode("utf-8", "ignore")
+    return '"tool-result"' in head and "toolCallId" in head
 
 
 def plan_blob_cleanup(
@@ -310,17 +381,46 @@ def plan_blob_cleanup(
 
     `measure_bytes` 会额外扫一遍 blob 的 value 算体积——这是 75 GB 的活，
     所以只在用户明确要数字时才做。
+
+    ⚠️ 这里的「孤儿」**只代表「value 扫描找不到 64 位引用」**。对 tool-result
+    blob（引用在 key 协议里、不在 value 里），这个判定是盲的——所以本函数
+    内置 toolCallId 守卫：**只要库里存在任何 `/t:` 工具结果气泡，所有
+    tool-result 形态的孤儿 blob 一律保留**（计入 `guarded`）。blob key 是
+    sha256(value)，与 toolCallId 无哈希关系，无法从 key 反推归属，只能按
+    value 形态归类后整类保留。**调用方不得绕过守卫直接拿 orphan 名单删**。
     """
     all_hashes = collect_blob_hashes(cur)
-    orphans = [h for h in all_hashes if h not in referenced]
+    guarded_call_ids = collect_tool_result_call_ids(cur)
+    orphans: list[str] = []
+    guarded = 0
+    for h in all_hashes:
+        if h in referenced:
+            continue
+        # toolCallId 守卫：库里存在工具结果气泡 + 该孤儿 blob 本身是
+        # tool-result 形态 → 保留。它可能正是某个会话还原要取的 blob
+        # （2026-10-22 事故：3 个这样的 blob 被判孤儿删除，整条会话判死）。
+        if guarded_call_ids and _blob_is_tool_result(_peek_blob_value(cur, h)):
+            guarded += 1
+            continue
+        orphans.append(h)
     plan = BlobPlan(
         total=len(all_hashes),
-        referenced=len(all_hashes) - len(orphans),
+        referenced=len(all_hashes) - len(orphans) - guarded,
         orphan=orphans,
+        guarded=guarded,
     )
     if measure_bytes and orphans:
         plan.orphan_bytes = _sum_blob_bytes(cur, orphans)
     return plan
+
+
+def _peek_blob_value(cur: sqlite3.Cursor, h: str) -> bytes | str:
+    """读单个 blob 的 value 头部（守卫归类用；一次点查，成本可控）。"""
+    row = cur.execute(
+        "SELECT substr(value, 1, 2048) FROM cursorDiskKV WHERE key = ?",
+        (BLOB_PREFIX + h,),
+    ).fetchone()
+    return row[0] if row else b""
 
 
 def _sum_blob_bytes(cur: sqlite3.Cursor, hashes: Sequence[str]) -> int:
@@ -721,10 +821,16 @@ def analyze(
     *,
     days: int = 90,
     include_orphan: bool = True,
-    include_blob: bool = True,
+    include_blob: bool = False,
     measure_blob_bytes: bool = False,
 ) -> CleanupReport:
-    """只统计，不改库。"""
+    """只统计，不改库。
+
+    `include_blob` 默认 False（2026-10-22 事故后）：干跑也默认不算 blob
+    孤儿名单——那要读 75 GB value、几十分钟，而结论又不可信（对 tool-result
+    blob 结构性失明）。要预估就显式加 `--delete-blobs`（干跑时它只表示
+    「我要看 blob 数字」，不动手）。
+    """
     t0 = time.perf_counter()
     if not db.is_file():
         raise CursorCleanupError(f"找不到数据库：{db}")
@@ -768,12 +874,20 @@ def clean(
     *,
     days: int = 90,
     include_orphan: bool = True,
-    include_blob: bool = True,
+    include_blob: bool = False,
     vacuum: bool = True,
     backup_dir: Path | None = None,
     blob_pause: float = 3.0,
+    blob_ack: bool = False,
 ) -> CleanupReport:
-    """真正清理。**调用方必须已确认 Cursor 已退出**（`cursor_running()` 由 CLI 检查）。"""
+    """真正清理。**调用方必须已确认 Cursor 已退出**（`cursor_running()` 由 CLI 检查）。
+
+    `include_blob` 默认 False：**默认不删 blob**（2026-10-22 事故——会话还原
+    依赖的 tool-result blob 在 value 扫描里是「孤儿」，删了旧会话就打不开）。
+    要删必须：`include_blob=True` **且** `blob_ack=True`（用户已逐字确认
+    「我接受旧会话可能打不开」）。只给 `include_blob=True` 不给 ack →
+    本函数**拒绝进入 blob 阶段**并记审计，绝不静默降级。
+    """
     t0 = time.perf_counter()
     if not db.is_file():
         raise CursorCleanupError(f"找不到数据库：{db}")
@@ -805,6 +919,7 @@ def clean(
         days=days,
         include_orphan=include_orphan,
         include_blob=include_blob,
+        blob_ack=blob_ack,
         vacuum=vacuum,
         backup=str(backup),
     )
@@ -848,18 +963,32 @@ def clean(
             )
 
         if include_blob:
-            referenced = collect_referenced_hashes(cur)
-            plan = plan_blob_cleanup(cur, referenced, measure_bytes=True)
-            report.blob = plan.summary()
-            _audit_append(
-                audit,
-                "blob_plan",
-                referenced=plan.referenced,
-                orphan=plan.orphan,
-                orphan_bytes=plan.orphan_bytes,
-            )
-            report.blob = {**report.blob, **delete_orphan_blobs(con, cur, plan.orphan, pause=blob_pause)}
-            _audit_append(audit, "blob_deleted", **report.blob)
+            if not blob_ack:
+                # fail-closed：要删 blob 却没给确认 → 拒绝进入 blob 阶段。
+                # 绝不静默降级成「跳过」——用户以为删了，实际没删，比报错更糟。
+                _audit_append(
+                    audit,
+                    "blob_refused",
+                    reason="missing blob_ack",
+                    hint="CLI 需 --delete-blobs + --blob-confirm 逐字确认",
+                )
+                report.notes.append(
+                    "已拒绝删除 blob：未提供逐字确认（旧会话可能打不开，见 --delete-blobs 帮助）"
+                )
+            else:
+                referenced = collect_referenced_hashes(cur)
+                plan = plan_blob_cleanup(cur, referenced, measure_bytes=True)
+                report.blob = plan.summary()
+                _audit_append(
+                    audit,
+                    "blob_plan",
+                    referenced=plan.referenced,
+                    orphan=plan.orphan,
+                    guarded=plan.guarded,
+                    orphan_bytes=plan.orphan_bytes,
+                )
+                report.blob = {**report.blob, **delete_orphan_blobs(con, cur, plan.orphan, pause=blob_pause)}
+                _audit_append(audit, "blob_deleted", **report.blob)
     except BaseException as exc:
         # 出错也要留一条：用户需要知道「在删到第几阶段时断的」。
         _audit_append(audit, "aborted", stage="clean", error=repr(exc))

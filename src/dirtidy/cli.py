@@ -25,6 +25,11 @@ _TIMEOUT_HELP = (
     "但**不执行隔离**；退出码为 3"
 )
 
+#: 删 blob 的逐字确认语。与 `cursor_cleanup.BLOB_CONFIRM_PHRASE` 同值——
+#: argparse 在 import 时构建，这里必须模块级可取；两处一致性由
+#: `test_blob_confirm_phrase_is_single_sourced` 守卫。
+BLOB_CONFIRM_PHRASE_CLI_HELP = "我接受旧会话可能打不开"
+
 
 def _resolve_root(path: str) -> Path:
     return Path(path).expanduser().resolve()
@@ -315,9 +320,12 @@ def cmd_cursor_cleanup(args: argparse.Namespace) -> int:
     """清理 Cursor 的全局状态库。
 
     默认只统计不改库（与 `scan` / `apply-rules` 的 `--dry-run` 语义一致），
-    真正动手必须显式加 `--apply`。
+    真正动手必须显式加 `--apply`。**blob 默认不删**（2026-10-22 事故）：
+    会话还原依赖的 tool-result blob 在引用扫描里是「孤儿」，删了旧会话
+    就打不开；要删必须 `--delete-blobs` + `--blob-confirm` 逐字确认。
     """
     from dirtidy.cursor_cleanup import (
+        BLOB_CONFIRM_PHRASE,
         DEFAULT_DB,
         CursorCleanupError,
         analyze,
@@ -332,12 +340,22 @@ def cmd_cursor_cleanup(args: argparse.Namespace) -> int:
                 db,
                 days=args.days,
                 include_orphan=not args.no_orphan,
-                include_blob=not args.no_blob,
+                include_blob=args.delete_blobs,
                 measure_blob_bytes=args.measure,
             )
             print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
             print()
-            print("干跑结束（未改动任何东西）。确认无误后加 --apply 真正清理。")
+            if args.delete_blobs:
+                print(
+                    "干跑结束（未改动任何东西）。加 --apply 真正清理；"
+                    "删 blob 还需 --blob-confirm 逐字确认（见 --delete-blobs 帮助）。"
+                )
+            else:
+                print(
+                    "干跑结束（未改动任何东西）。确认无误后加 --apply 真正清理。\n"
+                    "提示：本次默认不统计/不删除 blob（2026-10-22 事故后默认关）；"
+                    "要看 blob 数字请加 --delete-blobs。"
+                )
             return 0
 
         # 写库前先确认 Cursor 已退出：在跑就改库会抢 WAL 锁，
@@ -350,14 +368,24 @@ def cmd_cursor_cleanup(args: argparse.Namespace) -> int:
             )
             return 2
 
+        if args.delete_blobs and args.blob_confirm != BLOB_CONFIRM_PHRASE:
+            print(
+                f"已指定 --delete-blobs，但缺少逐字确认。删 blob 可能让旧会话在 UI 里\n"
+                f"打不开（2026-10-22 事故：3 个 tool-result blob 被判孤儿删除，整条会话判死，\n"
+                f"且无法从备份恢复）。确认请加：--blob-confirm \"{BLOB_CONFIRM_PHRASE}\"",
+                file=sys.stderr,
+            )
+            return 2
+
         report = clean(
             db,
             days=args.days,
             include_orphan=not args.no_orphan,
-            include_blob=not args.no_blob,
+            include_blob=args.delete_blobs,
             vacuum=not args.no_vacuum,
             backup_dir=Path(args.backup_dir).expanduser() if args.backup_dir else None,
             blob_pause=args.blob_pause,
+            blob_ack=args.blob_confirm == BLOB_CONFIRM_PHRASE,
         )
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
         print()
@@ -532,7 +560,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="删 blob 时每批之间的间隔秒数（默认 3；越大越不影响 Cursor，但越慢）",
     )
     s.add_argument("--no-orphan", action="store_true", help="不清理孤儿会话正文")
-    s.add_argument("--no-blob", action="store_true", help="不清理无引用的 agentKv:blob")
+    s.add_argument(
+        "--delete-blobs",
+        action="store_true",
+        help=(
+            "允许清理无引用的 agentKv:blob（默认不清理）。⚠️ 高危：2026-10-22 事故证明"
+            "会话还原依赖的 tool-result blob 会被引用扫描判成孤儿，删了旧会话可能打不开。"
+            "真要删还须 --blob-confirm 逐字确认。干跑时加它只表示「我要看 blob 数字」"
+        ),
+    )
+    s.add_argument(
+        "--blob-confirm",
+        default=None,
+        metavar="确认语",
+        help=f"删 blob 的逐字确认语，必须精确等于「{BLOB_CONFIRM_PHRASE_CLI_HELP}」",
+    )
     s.add_argument("--no-vacuum", action="store_true", help="跳过 VACUUM（删除快，但文件体积暂不缩小）")
     s.add_argument(
         "--measure",

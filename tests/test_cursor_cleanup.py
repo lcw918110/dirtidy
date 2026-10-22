@@ -1,10 +1,14 @@
 """Cursor 状态库清理的守卫。
 
-这些用例守的是三件「错了就毁数据」的事：
+这些用例守的是四件「错了就毁数据」的事：
 1. **只删无引用的 blob**——被会话正文引用的 blob 必须原样留下。
 2. **绝不删 `ItemTable`**（用户设置：插件 / 主题 / 快捷键）。
 3. **引用来源要扫全**——只扫 bubble/checkpoint/composerData 三个前缀会漏掉
    `ofsContent:` 这类同样引用 blob 的键，漏扫即误删活数据（真机实测已复现）。
+4. **默认不删 blob**（2026-10-22 事故）——会话还原依赖的 tool-result blob
+   在 value 扫描里是「孤儿」（引用在气泡 key 的 `/t:call_<toolCallId>` 协议里，
+   不在任何 value 里），删了旧会话就打不开。删 blob 必须显式高危开关 +
+   逐字确认，且判定内置 toolCallId 守卫。
 
 外加一条 CLI 层的守卫：**默认不执行**，必须显式 `--apply` 才改库。
 """
@@ -17,7 +21,9 @@ from pathlib import Path
 
 import pytest
 
+from dirtidy.cli import BLOB_CONFIRM_PHRASE_CLI_HELP
 from dirtidy.cursor_cleanup import (
+    BLOB_CONFIRM_PHRASE,
     BLOB_PREFIX,
     CursorCleanupError,
     analyze,
@@ -240,8 +246,22 @@ def test_item_table_is_never_deleted(mini_db: Path) -> None:
 
 
 def test_clean_removes_orphan_blobs_and_keeps_referenced(mini_db: Path) -> None:
-    """端到端：真正清理后，被引用的 blob 还在，孤儿没了，ItemTable 还在。"""
-    clean(mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=mini_db.parent / "bk2")
+    """端到端：真正清理后，被引用的 blob 还在，孤儿没了，ItemTable 还在。
+
+    注意：这里显式 `include_blob=True, blob_ack=True`——blob 清理自
+    2026-10-22 事故后**默认关闭**，默认路径的守卫由
+    `test_clean_default_never_deletes_blobs` 负责，本条测的是「确认后
+    真删」的那条路径。
+    """
+    clean(
+        mini_db,
+        days=90,
+        vacuum=False,
+        blob_pause=0,
+        backup_dir=mini_db.parent / "bk2",
+        include_blob=True,
+        blob_ack=True,
+    )
 
     remaining = _blob_keys(mini_db)
     assert f"{BLOB_PREFIX}{HASH_REFERENCED}" in remaining, "被引用的 blob 不该被删"
@@ -330,7 +350,10 @@ def test_clean_writes_an_audit_trail_that_survives_a_crash(mini_db: Path, tmp_pa
     用户既不知道删了多少，也无从查证。每阶段追加一行 JSONL，断了也留着记录。
     """
     bk = tmp_path / "bk"
-    clean(mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=bk)
+    clean(
+        mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=bk,
+        include_blob=True, blob_ack=True,
+    )
 
     log = bk / "dirtidy-cursor-cleanup.jsonl"
     assert log.exists(), "没有审计日志"
@@ -354,7 +377,10 @@ def test_clean_audit_records_an_abort_when_a_stage_blows_up(
     monkeypatch.setattr(cc, "collect_referenced_hashes", boom)
     bk = tmp_path / "bk"
     with pytest.raises(RuntimeError, match="模拟磁盘满"):
-        clean(mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=bk)
+        clean(
+            mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=bk,
+            include_blob=True, blob_ack=True,
+        )
 
     log = bk / "dirtidy-cursor-cleanup.jsonl"
     assert log.exists(), "失败时也必须留下审计"
@@ -399,13 +425,21 @@ def test_audit_records_the_replace_window_so_a_broken_vacuum_is_diagnosable(
 
 
 def test_analyze_does_not_touch_the_database(mini_db: Path) -> None:
-    """干跑必须**一字不改**数据库——这是「默认不执行」的地基。"""
+    """干跑必须**一字不改**数据库——这是「默认不执行」的地基。
+
+    blob 统计自 2026-10-22 事故后默认关闭（`include_blob=False`），
+    所以默认干跑的 `blob` 字段是空 dict；要看 blob 数字须显式
+    `include_blob=True`（CLI 的 `--delete-blobs`）。
+    """
     before = mini_db.read_bytes()
     report = analyze(mini_db, days=90)
     assert report.mode == "dry-run"
     assert mini_db.read_bytes() == before, "干跑改动了数据库"
-    assert report.blob["blob_orphan"] == 2
-    assert report.blob["blob_referenced"] == 2
+    assert report.blob == {}, "默认干跑不该统计 blob（那要读 75 GB 且结论不可信）"
+
+    report_blobs = analyze(mini_db, days=90, include_blob=True)
+    assert report_blobs.blob["blob_orphan"] == 2
+    assert report_blobs.blob["blob_referenced"] == 2
 
 
 def test_verify_database_rejects_a_library_without_item_table(tmp_path: Path) -> None:
@@ -457,6 +491,10 @@ def test_cursor_cleanup_cli_requires_apply_to_mutate(
     （取不到进程列表就报「在跑」），而测试环境里 `ps` 可能被沙箱拦掉。
     这条用例要测的是「干跑 vs --apply」，不是「Cursor 在跑时会不会拒绝」——
     后者由 `test_cursor_cleanup_cli_refuses_while_cursor_runs` 负责。
+
+    blob 自 2026-10-22 事故后默认不删：`--apply` 默认只清会话正文；
+    要删 blob 须 `--delete-blobs --blob-confirm <逐字确认>`（由
+    `test_cursor_cleanup_cli_blob_delete_requires_typed_confirmation` 负责）。
     """
     from dirtidy.cli import main
 
@@ -467,14 +505,15 @@ def test_cursor_cleanup_cli_requires_apply_to_mutate(
     out = capsys.readouterr().out
     payload = json.loads(out.split("\n干跑结束")[0])
     assert payload["mode"] == "dry-run"
-    assert payload["blob"]["blob_orphan"] == 2
+    assert payload["blob"] == {}, "默认干跑不该统计 blob"
     assert "干跑结束" in out
 
-    # 加上 --apply 后才动手
+    # 加上 --apply 后才动手（默认不含 blob）
     rc = main(["cursor-cleanup", "--db", str(mini_db), "--apply", "--no-vacuum"])
     assert rc == 0
     remaining = _blob_keys(mini_db)
-    assert f"{BLOB_PREFIX}{HASH_ORPHAN_1}" not in remaining
+    assert f"{BLOB_PREFIX}{HASH_ORPHAN_1}" in remaining, "--apply 默认不该删 blob"
+    assert f"{BLOB_PREFIX}{HASH_ORPHAN_2}" in remaining, "--apply 默认不该删 blob"
     assert f"{BLOB_PREFIX}{HASH_REFERENCED}" in remaining
 
 
@@ -511,3 +550,247 @@ def test_cursor_running_is_fail_closed_when_ps_unavailable(monkeypatch: pytest.M
 
     monkeypatch.setattr(cc.subprocess, "check_output", boom)
     assert cc.cursor_running() is True, "判断不了就要按「在跑」处理，不能放行"
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-22 事故回归：默认不删 blob + toolCallId 守卫 + 逐字确认
+# ---------------------------------------------------------------------------
+
+
+def test_clean_default_never_deletes_blobs(mini_db: Path) -> None:
+    """**事故核心回归**：`clean()` 默认一个 blob 都不删。
+
+    2026-10-22 事故：办公仓脚本删了 5413 个「无引用」blob，其中 3 个
+    tool-result blob 是会话还原要取的（引用在气泡 key 的 `/t:call_<toolCallId>`
+    协议里、不在任何 value 里），整条会话 UI 判死且无法恢复。
+    自此 blob 清理默认关闭——「无 64 位引用」证明不了「会话还原不需要」。
+    """
+    before = _blob_keys(mini_db)
+    clean(mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=mini_db.parent / "bk-def")
+    assert _blob_keys(mini_db) == before, "默认清理删了 blob"
+
+
+def test_clean_refuses_blob_deletion_without_typed_ack(mini_db: Path) -> None:
+    """要删 blob 却没给逐字确认 → 拒绝进入 blob 阶段，绝不静默降级。
+
+    静默降级成「跳过」比报错更糟：用户以为删了，实际没删，下次还困惑
+    「怎么没缩盘」。这里必须**显式拒绝**并留审计。
+    """
+    bk = mini_db.parent / "bk-ack"
+    report = clean(
+        mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=bk,
+        include_blob=True, blob_ack=False,
+    )
+    assert _blob_keys(mini_db) == _blob_keys(mini_db) or True  # 上面已断言默认不删
+    remaining = _blob_keys(mini_db)
+    assert f"{BLOB_PREFIX}{HASH_ORPHAN_1}" in remaining, "没给 ack 却删了 blob"
+    assert f"{BLOB_PREFIX}{HASH_ORPHAN_2}" in remaining, "没给 ack 却删了 blob"
+    # 审计里必须有拒绝记录
+    log = bk / "dirtidy-cursor-cleanup.jsonl"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    events = [json.loads(line)["event"] for line in lines]
+    assert "blob_refused" in events, f"拒绝没留审计：{events}"
+    assert "blob_deleted" not in events
+    assert any("拒绝" in n for n in report.notes), f"报告里没说明拒绝原因：{report.notes}"
+
+
+def test_clean_deletes_blobs_only_with_full_ack(mini_db: Path) -> None:
+    """`include_blob=True` + `blob_ack=True` 才真正进入 blob 阶段。"""
+    clean(
+        mini_db, days=90, vacuum=False, blob_pause=0,
+        backup_dir=mini_db.parent / "bk-ack-ok",
+        include_blob=True, blob_ack=True,
+    )
+    remaining = _blob_keys(mini_db)
+    assert f"{BLOB_PREFIX}{HASH_ORPHAN_1}" not in remaining
+    assert f"{BLOB_PREFIX}{HASH_ORPHAN_2}" not in remaining
+    assert f"{BLOB_PREFIX}{HASH_REFERENCED}" in remaining
+
+
+def test_blob_confirm_phrase_is_single_sourced() -> None:
+    """确认语只此一处：CLI 帮助文案与 `cursor_cleanup` 判定用同一个常量。
+
+    两处各写一份迟早漂移——漂移的那份就是「用户照着帮助敲了确认语却被拒」
+    或者更糟「确认语校验被绕过」。
+    """
+    assert BLOB_CONFIRM_PHRASE_CLI_HELP == BLOB_CONFIRM_PHRASE
+
+
+def test_cursor_cleanup_cli_blob_delete_requires_typed_confirmation(
+    mini_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """CLI 层：`--delete-blobs` 没带正确确认语 → 拒绝执行（退出码 2）。"""
+    from dirtidy.cli import main
+
+    monkeypatch.setattr("dirtidy.cursor_cleanup.cursor_running", lambda: False)
+    before = _blob_keys(mini_db)
+
+    # 错误的确认语
+    rc = main(["cursor-cleanup", "--db", str(mini_db), "--apply", "--no-vacuum",
+               "--delete-blobs", "--blob-confirm", "yes"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "逐字确认" in err
+    assert _blob_keys(mini_db) == before, "确认语错误却动了库"
+
+    # 缺确认语
+    rc = main(["cursor-cleanup", "--db", str(mini_db), "--apply", "--no-vacuum",
+               "--delete-blobs"])
+    assert rc == 2
+    assert _blob_keys(mini_db) == before
+
+    # 正确的确认语才放行
+    rc = main(["cursor-cleanup", "--db", str(mini_db), "--apply", "--no-vacuum",
+               "--delete-blobs", "--blob-confirm", BLOB_CONFIRM_PHRASE])
+    assert rc == 0
+    remaining = _blob_keys(mini_db)
+    assert f"{BLOB_PREFIX}{HASH_ORPHAN_1}" not in remaining
+    assert f"{BLOB_PREFIX}{HASH_REFERENCED}" in remaining
+
+
+def test_tool_result_blobs_are_guarded_even_when_unreferenced(tmp_path: Path) -> None:
+    """**事故核心回归**：tool-result 形态的孤儿 blob 必须被守卫保留。
+
+    复刻 2026-10-22 事故结构：
+    - 一个 blob，value 是 tool-result JSON（含 toolCallId）；
+    - 会话气泡 key 带 `/t:call_<同一 toolCallId>`，但 value 里**没有**
+      任何 64 位哈希（真机取证：toolCallId 只在 key 里）；
+    - 旧判定（扫 value 找 64 位哈希）会把这个 blob 判成孤儿。
+
+    守卫要求：即使显式确认删 blob（ack 全给），这个 blob 也**不进孤儿名单**。
+    """
+    import hashlib
+
+    # 构造事故形态的 blob：value 是 tool-result，key = sha256(value)
+    tool_result = (
+        b'{"role":"tool","content":[{"type":"tool-result",'
+        b'"toolCallId":"call_iiqiugnjzpx5oeluicabqrt7","toolName":"Read",'
+        b'"result":"file content..."}]}'
+    )
+    blob_hash = hashlib.sha256(tool_result).hexdigest()
+
+    db = tmp_path / "state.vscdb"
+    con = sqlite3.connect(str(db))
+    cur = con.cursor()
+    cur.execute("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)")
+    cur.execute("CREATE TABLE composerHeaders (composerId TEXT, recency INTEGER)")
+    cur.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB)")
+
+    cur.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (f"{BLOB_PREFIX}{blob_hash}", tool_result))
+    # 工具结果气泡：key 带 /t:call_<toolCallId>，value 无 64 位哈希
+    cur.execute(
+        "INSERT INTO cursorDiskKV VALUES (?, ?)",
+        (
+            "bubbleId:c86e8b80-a181-4c6e-ab44-575551342b16:"
+            "2efba5d4-94e2-4d79-b4b4-5beccd128725/t:call_iiqiugnjzpx5oeluicabqrt7",
+            json.dumps({"_v": 3, "type": 2, "text": "tool result bubble"}).encode(),
+        ),
+    )
+    # 一个普通孤儿 blob（非 tool-result）作对照：它应该照常进孤儿名单
+    plain = b'{"some":"unreferenced snapshot"}'
+    plain_hash = hashlib.sha256(plain).hexdigest()
+    cur.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (f"{BLOB_PREFIX}{plain_hash}", plain))
+
+    cur.execute(
+        "INSERT INTO composerHeaders VALUES (?, ?)",
+        ("c86e8b80-a181-4c6e-ab44-575551342b16", 2_000_000_000_000),
+    )
+    cur.execute("INSERT INTO ItemTable VALUES (?, ?)", ("theme", b"dark"))
+    con.commit()
+    con.close()
+
+    # 判定：tool-result blob 被守卫保留，普通孤儿照常是孤儿
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        cur = con.cursor()
+        refs = collect_referenced_hashes(cur)
+        plan = plan_blob_cleanup(cur, refs)
+        assert blob_hash not in plan.orphan, "tool-result blob 进了孤儿名单——事故重演"
+        assert plan.guarded == 1
+        assert plain_hash in plan.orphan
+    finally:
+        con.close()
+
+    # 端到端：即使全确认删 blob，tool-result blob 也必须还在
+    clean(db, days=90, vacuum=False, blob_pause=0,
+          backup_dir=tmp_path / "bk-guard", include_blob=True, blob_ack=True)
+    remaining = _blob_keys(db)
+    assert f"{BLOB_PREFIX}{blob_hash}" in remaining, "确认删除后 tool-result blob 还是没了——事故重演"
+    assert f"{BLOB_PREFIX}{plain_hash}" not in remaining
+
+
+def test_recent_sessions_are_fully_preserved(tmp_path: Path) -> None:
+    """近 N 天会话：header、composerData、气泡、checkpoint 一个不删。
+
+    事故文档硬约束第 6 条：不得因「孤儿扫描」删掉仍在 header 里的
+    近 N 天会话正文。`--days` 的语义就是「保留最近 N 天」，这条用例
+    守住它不被任何清理阶段悄悄突破。
+    """
+    db = tmp_path / "state.vscdb"
+    con = sqlite3.connect(str(db))
+    cur = con.cursor()
+    cur.execute("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)")
+    cur.execute("CREATE TABLE composerHeaders (composerId TEXT, recency INTEGER)")
+    cur.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB)")
+
+    # 近期会话（recency = now）
+    import time as _time
+
+    now_ms = int(_time.time() * 1000)
+    old_ms = now_ms - 400 * 86400 * 1000  # 400 天前，远超 90 天保留窗
+    cur.execute("INSERT INTO composerHeaders VALUES (?, ?)", ("recent-cid", now_ms))
+    cur.execute("INSERT INTO cursorDiskKV VALUES (?, ?)",
+                ("composerData:recent-cid", json.dumps({"createdAt": now_ms}).encode()))
+    cur.execute("INSERT INTO cursorDiskKV VALUES (?, ?)",
+                ("bubbleId:recent-cid:bid1", json.dumps({"text": "recent"}).encode()))
+    cur.execute("INSERT INTO cursorDiskKV VALUES (?, ?)",
+                ("checkpointId:recent-cid:cp1", b"checkpoint"))
+    # 远期会话（recency = 400 天前）
+    cur.execute("INSERT INTO composerHeaders VALUES (?, ?)", ("old-cid", old_ms))
+    cur.execute("INSERT INTO cursorDiskKV VALUES (?, ?)",
+                ("bubbleId:old-cid:bid1", json.dumps({"text": "old"}).encode()))
+    cur.execute("INSERT INTO ItemTable VALUES (?, ?)", ("theme", b"dark"))
+    con.commit()
+    con.close()
+
+    clean(db, days=90, vacuum=False, blob_pause=0, backup_dir=tmp_path / "bk-recent")
+
+    con = sqlite3.connect(str(db))
+    try:
+        keys = {r[0] for r in con.execute("SELECT key FROM cursorDiskKV")}
+        headers = {r[0] for r in con.execute("SELECT composerId FROM composerHeaders")}
+    finally:
+        con.close()
+    assert "recent-cid" in headers
+    assert "composerData:recent-cid" in keys
+    assert "bubbleId:recent-cid:bid1" in keys
+    assert "checkpointId:recent-cid:cp1" in keys
+    assert "old-cid" not in headers
+    assert "bubbleId:old-cid:bid1" not in keys
+
+
+def test_forbidden_paths_are_never_referenced_in_source() -> None:
+    """事故文档硬约束第 5 条：清理范围只许是 `state.vscdb` 及其伴生文件。
+
+    源码层面守卫：`cursor_cleanup.py` 里不许出现对 `agent-transcripts`、
+    `chats`、`blob_storage`、`IndexedDB` 的任何路径拼接或字符串引用。
+    这些是 Cursor 的会话逐字稿与浏览器存储，碰了就丢用户数据。
+    """
+    import re as _re
+
+    src = Path(__file__).resolve().parent.parent / "src" / "dirtidy" / "cursor_cleanup.py"
+    text = src.read_text(encoding="utf-8")
+    # 模块头「事故」一节会提到这些词（作为文档），所以只查**代码行**：
+    # 排除注释与 docstring 的粗略办法是查 Path 拼接/字符串字面量形态。
+    for forbidden in ("agent-transcripts", "blob_storage", "IndexedDB", "chats"):
+        # 出现在非注释代码行（不以 # 开头、不在 docstring 里的字符串字面量）
+        for m in _re.finditer(rf'["\']([^\n]*{forbidden}[^\n]*)["\']', text):
+            line_no = text[: m.start()].count("\n") + 1
+            line = text.splitlines()[line_no - 1]
+            stripped = line.strip()
+            # 允许：纯注释行（# 开头）——文档性提及
+            if stripped.startswith("#"):
+                continue
+            pytest.fail(f"cursor_cleanup.py:{line_no} 引用了禁止路径 {forbidden!r}：{line}")
