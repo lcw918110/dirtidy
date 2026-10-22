@@ -24,13 +24,15 @@ This conversation's data is missing and can't be restored. Start a new chat to c
 ## 二、背景：state.vscdb 里到底装了什么
 
 Cursor 把 Agent / Composer 的全部运行时数据塞进一张巨大的键值表
-`cursorDiskKV`（本机实测 845 万行 / 72 GB）：
+`cursorDiskKV`——清理前实测 838 万行、库文件 75 GB；事故取证时
+（清理后 Cursor 又用了一天）已涨到 845 万行、value 内容合计约 72 GB
+（库文件 76 GB）。下文体积占比均按 value 字节口径实测：
 
 | 键形态 | 内容 | 体积占比（实测） |
 |---|---|---|
 | `bubbleId:<cid>:<uuid>` | 会话气泡（对话正文） | **67.9%** ← 真正的大头 |
 | `agentKv:blob:<64位hex>` | agent 运行时大对象（工具结果/附件/快照） | 29.1% |
-| `checkpointId:` / `composerData:` | 检查点与会话元数据 | 极小 |
+| `checkpointId:` / `composerData:` 等 | 检查点与会话元数据 | 3.0% |
 | `ItemTable`（独立表） | 用户设置（插件/主题/快捷键） | 永不删 |
 
 清理逻辑看起来无懈可击：**顺序扫一遍所有非 blob 行的 value，用正则提取
@@ -48,7 +50,8 @@ Cursor 把 Agent / Composer 的全部运行时数据塞进一张巨大的键值�
 ### 第一步：12 位 ID 是不是 64 位 key 的前缀？
 
 用 10/21 清理前的冷备份 `state.vscdb.pre-cleanup`（75 GB）做只读查询。
-坑：对 845 万行的表跑 `LIKE 'agentKv:blob:0203%'` 会全表扫描，直接超时被杀。
+坑：对 845 万行的表跑 `LIKE 'agentKv:blob:0203%'` 会全表扫描，直接超时被杀
+（pre-cleanup 库 838 万行，当前库 845 万行，量级相同）。
 改用 `GLOB` 点查（key 是主键，走索引）：
 
 ```sql
@@ -83,10 +86,11 @@ toolCallId、会话 ID 都没有哈希关系——**你无法从 key 反推它�
 ```json
 {"role":"tool","content":[{"type":"tool-result",
   "toolCallId":"call_iiqiugnjzpx5oeluicabqrt7","toolName":"Read",
-  "result":"package com.ada.jykjcloudx.admin.bus.service;..."}]}
+  "result":"package com.example.demo.service;..."}]}
 ```
 
-是 agent 工具调用的结果。三个 blob 的 value 里各有一个 `toolCallId`。
+是 agent 工具调用的结果（value 内容已脱敏，实际是某次 `Read` 工具读到的源码片段）。
+三个 blob 的 value 里各有一个 `toolCallId`。
 
 ### 第四步：会话怎么引用这些 blob？（关键一步）
 
@@ -120,7 +124,7 @@ blob 的 value 里也没有 64 位哈希。
    误删活 blob（真机对照实验证实）。
 3. **把「value 里扫不到引用」当成「删了不影响」**：本次事故根因。
    引用在 key 协议里，value 扫描结构性失明。
-4. **`LIKE` 前缀查询在 845 万行上全表扫**：取证脚本被 SIGTERM 杀掉，
+4. **`LIKE` 前缀查询在 800 多万行上全表扫**：取证脚本被 SIGTERM 杀掉，
    换 `GLOB` 点查（主键索引）秒出。
 5. **SQLite `LENGTH()` 对 TEXT 返回字符数不是字节数**：中文内容体积
    被严重低估，量化分析必须 `CAST(value AS BLOB)`。
@@ -149,19 +153,19 @@ blob 的 value 里也没有 64 位哈希。
 4. **近 N 天会话完整保留**：header、composerData、气泡、checkpoint 一个不删。
 5. **范围硬边界**：只碰 `state.vscdb` 及其伴生文件；`agent-transcripts/`、
    `chats/`、Chromium `blob_storage` / IndexedDB 一律不碰（源码层守卫测试）。
-6. **真红验证**：9 条事故回归用例，三组注入回退（默认改回删 blob、守卫置空、
+6. **真红验证**：8 条事故回归用例，三组注入回退（默认改回删 blob、守卫置空、
    CLI 确认检查短路）分别精确报红 → 字节级还原 → 全绿。**没证明会红的
    守卫等于没写。**
 
 ## 六、「不删 blob，库会不会越来越大越来越慢？」
 
-实测回答（72 GB 库，字节口径）：
+实测回答（当前库 value 合计约 72 GB，字节口径）：
 
 - **库增长的大头是会话气泡（67.9% / 48.9 GB），不是 blob（29.1%）**；
 - 气泡高度集中：全库仅 2 个会话气泡数 >10 万，合计 44.89 GB；一个会话
   独占 42.88 GB / 694 万条气泡（工具调用反复重放所致）；
 - 按 `--days` 清过期会话（安全、无需确认）才是主要回收杠杆；
-- 性能上 SQLite 按 key 点查对 845 万行仍是 O(log n)，「慢」主要来自磁盘
+- 性能上 SQLite 按 key 点查对 800 多万行仍是 O(log n)，「慢」主要来自磁盘
   压力与 WAL checkpoint 停顿，不是查询退化。
 
 **回收路径按收益排序**：删历史备份（如 `state.vscdb.pre-cleanup`，75 GB，
@@ -179,4 +183,4 @@ blob 的 value 里也没有 64 位哈希。
 ---
 
 *取证方法、量化数据与修复代码均来自真实事故处理过程（dirtidy 项目
-`cursor-cleanup` 模块，9 条事故回归用例已入库）。本文只写查证过的事实。*
+`cursor-cleanup` 模块，8 条事故回归用例已入库）。本文只写查证过的事实。*
