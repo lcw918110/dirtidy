@@ -96,11 +96,14 @@ dirtidy desktop /path/to/root
 # 定时监视：定期扫描并报告新增/消失的命中项 —— 只扫描，绝不执行隔离
 dirtidy watch /path/to/root --interval 30
 
-# 清理 Cursor 状态库 state.vscdb（约 75 GB，99% 体积是无人引用的 agentKv:blob）。
-# 默认只统计、不改库；确认后加 --apply 真正清理。
+# Cursor 状态库专项清理（独立 CLI，不走通用目录隔离流程）。
+# 默认只读预览；--days 90 仅选择有时间证据且超过 90 天的会话，近期或时间未知的保留。
+# 删除选中的历史会话会丢失对应历史；blob 删除已禁用，确认口令也不能放行。
 # ★ 请先完全退出 Cursor：边跑边改状态库会抢 WAL 锁，可能让 Cursor 起不来。
-dirtidy cursor-cleanup
-dirtidy cursor-cleanup --apply --days 90
+dirtidy cursor-cleanup --days 90 --measure
+dirtidy cursor-cleanup --days 90 --apply
+# --measure 是候选行字节估算，不保证最终磁盘释放量；备份和数据库校验不证明业务完整。
+# 可选 --schedule-hours 24 是定时轮询，检测到 Cursor 未运行才清理，不监听退出事件。
 # 备份默认落在库旁边：<库所在目录>/CursorStateBackup-<时间戳>/
 # 清理过程同时写 <备份目录>/dirtidy-cursor-cleanup.jsonl（每阶段一行，中途被杀也留痕）。
 # 想放到别处用 --backup-dir；放在同一卷上才能走 clonefile，跨卷会退化成全量拷贝。

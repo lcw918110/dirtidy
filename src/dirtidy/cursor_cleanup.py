@@ -46,15 +46,15 @@ Cursor 会话 UI 报 `3 missing blobs: 0203ebc74590, 00a8f0e42850, 0120dc7d37b2`
    其中一个的 `/t:` 气泡也已不在库里（子代理/云端需求），**本地无法枚举**。
 
 结论：**「无 64 位引用」证明不了「会话还原不需要它」**。在 Cursor 公开
-还原协议之前，唯一安全的默认是**不删 blob**；要删必须显式高危开关 +
-逐字确认（见 `clean()` 的 `blob_ack` 与 CLI 的 `--delete-blobs`）。
+还原协议之前，无法证明 blob 的年龄与完整归属，**执行路径不删除共享 blob**。
+旧确认参数仅保留兼容，不再构成授权；候选扫描仅作只读诊断。
 
 安全设计
 --------
 1. **默认干跑**。不传 `--apply` 只统计不改库——与 dirtidy 其他破坏性命令一致。
 2. **绝不删 `ItemTable`**（用户设置）。
-3. **默认不删 blob**（2026-10-22 事故后改为默认关）。删 blob 需显式
-   `--delete-blobs` + 逐字确认，且判定内置 toolCallId 守卫。
+3. **执行路径不删共享 blob**：年龄与完整归属未知，确认语不能代替证明。
+   只读候选统计仍保留 toolCallId 守卫，不等于可安全删除集合。
 4. **在线模式绝不 VACUUM、绝不替换文件**（会锁死 Cursor）。
 5. 写库用**小批次短事务 + 批间让路 + 锁退避重试**，尽量不影响 Cursor 使用。
 6. 真正清理前强制检测 Cursor 是否在跑，**在跑就拒绝执行**；判断不了也按在跑。
@@ -466,13 +466,28 @@ def _sql_extract_cid_exprs() -> tuple[str, str, str]:
 
 def list_old_composer_ids(cur: sqlite3.Cursor, cutoff_ms: int) -> list[str]:
     """`composerHeaders` 里最后活跃早于 cutoff 的会话 id。"""
-    return [
-        r[0]
-        for r in cur.execute(
-            "SELECT composerId FROM composerHeaders WHERE recency IS NOT NULL AND recency < ?",
-            (cutoff_ms,),
-        )
-    ]
+    candidates = cur.execute(
+        "SELECT composerId, recency FROM composerHeaders"
+    ).fetchall()
+    old: list[str] = []
+    for cid, recency in candidates:
+        ms = _parse_time_to_ms(recency)
+        if ms is None or ms <= 0 or ms >= cutoff_ms:
+            continue
+        # 索引可能滞后：正文中存在近期活动即保留，不能只相信旧 header。
+        prefix = f"bubbleId:{cid}:"
+        recent = False
+        for (value,) in cur.execute(
+            "SELECT value FROM cursorDiskKV WHERE key = ? OR (key >= ? AND key < ?)",
+            (f"composerData:{cid}", prefix, prefix + "\uffff"),
+        ):
+            activity = _latest_from_json_blob(value)
+            if activity is not None and activity >= cutoff_ms:
+                recent = True
+                break
+        if not recent:
+            old.append(cid)
+    return old
 
 
 def list_orphan_composer_ids(cur: sqlite3.Cursor, keep: set[str]) -> list[str]:
@@ -539,16 +554,23 @@ def _latest_from_json_blob(val: object) -> int | None:
 
 
 def orphan_latest_activity_ms(cur: sqlite3.Cursor, cid: str) -> int | None:
-    """优先读 composerData（1 行）；否则只抽 1 条气泡（避免每孤儿 30 次 JSON）。"""
-    row = cur.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (f"composerData:{cid}",)).fetchone()
-    if row:
-        ms = _latest_from_json_blob(row[0])
-        if ms is not None:
-            return ms
-    row = cur.execute("SELECT value FROM cursorDiskKV WHERE key LIKE ? LIMIT 1", (f"bubbleId:{cid}:%",)).fetchone()
-    if row:
-        return _latest_from_json_blob(row[0])
-    return None
+    """检查该会话全部正文时间；未知时间不能作为过期证据。
+
+    用精确 key 或前缀范围匹配，cid 内的 SQL 通配符不能扩大作用域。
+    任一正文时间未知则保守保留，避免用一条旧气泡代表整个会话。
+    """
+    latest: int | None = None
+    bubble_prefix = f"bubbleId:{cid}:"
+    rows = cur.execute(
+        "SELECT value FROM cursorDiskKV WHERE key = ? OR (key >= ? AND key < ?)",
+        (f"composerData:{cid}", bubble_prefix, bubble_prefix + "\uffff"),
+    )
+    for (value,) in rows:
+        ms = _latest_from_json_blob(value)
+        if ms is None:
+            return None
+        latest = max(latest or ms, ms)
+    return latest
 
 
 def filter_stale_orphans(
@@ -560,10 +582,10 @@ def filter_stale_orphans(
     total = len(orphan_ids)
     for i, cid in enumerate(orphan_ids, 1):
         latest = orphan_latest_activity_ms(cur, cid)
-        if latest is not None and latest >= cutoff_ms:
-            skipped_recent += 1
-        else:
+        if latest is not None and latest < cutoff_ms:
             stale.append(cid)
+        else:
+            skipped_recent += 1
         if total >= 50 and (i % 100 == 0 or i == total):
             print(f"  [孤儿年龄] {i}/{total}", flush=True)
     return stale, skipped_recent
@@ -883,6 +905,8 @@ def analyze(
     「我要看 blob 数字」，不动手）。
     """
     t0 = time.perf_counter()
+    if days < 1:
+        raise CursorCleanupError("--days 必须 >= 1")
     if not db.is_file():
         raise CursorCleanupError(f"找不到数据库：{db}")
 
@@ -934,13 +958,15 @@ def clean(
 ) -> CleanupReport:
     """真正清理。**调用方必须已确认 Cursor 已退出**（`cursor_running()` 由 CLI 检查）。
 
-    `include_blob` 默认 False：**默认不删 blob**（2026-10-22 事故——会话还原
-    依赖的 tool-result blob 在 value 扫描里是「孤儿」，删了旧会话就打不开）。
-    要删必须：`include_blob=True` **且** `blob_ack=True`（用户已逐字确认
-    「我接受旧会话可能打不开」）。只给 `include_blob=True` 不给 ack →
-    本函数**拒绝进入 blob 阶段**并记审计，绝不静默降级。
+    仅删除明确超过 days 保留窗的会话；未知年龄的孤儿保留。
+    共享 blob 无可靠年龄及完整引用协议，include_blob=True 一律写入前拒绝。
+    blob_ack/blob_pause 仅为旧调用兼容参数，不再授权共享 blob 删除。
     """
     t0 = time.perf_counter()
+    # 共享 blob 没有可靠的年龄与完整归属协议，确认口令不能证明其在 days 范围内。
+    # 必须在备份、审计及任何写库之前拒绝，不能先删会话再报告 blob 不支持。
+    if include_blob:
+        raise CursorCleanupError("拒绝删除共享 blob：无法证明其年龄和完整引用归属；--days 只支持会话级清理")
     if not db.is_file():
         raise CursorCleanupError(f"找不到数据库：{db}")
     if days < 1:
@@ -1022,33 +1048,7 @@ def clean(
                 stats=report.orphan_stats,
             )
 
-        if include_blob:
-            if not blob_ack:
-                # fail-closed：要删 blob 却没给确认 → 拒绝进入 blob 阶段。
-                # 绝不静默降级成「跳过」——用户以为删了，实际没删，比报错更糟。
-                _audit_append(
-                    audit,
-                    "blob_refused",
-                    reason="missing blob_ack",
-                    hint="CLI 需 --delete-blobs + --blob-confirm 逐字确认",
-                )
-                report.notes.append(
-                    "已拒绝删除 blob：未提供逐字确认（旧会话可能打不开，见 --delete-blobs 帮助）"
-                )
-            else:
-                referenced = collect_referenced_hashes(cur)
-                plan = plan_blob_cleanup(cur, referenced, measure_bytes=True)
-                report.blob = plan.summary()
-                _audit_append(
-                    audit,
-                    "blob_plan",
-                    referenced=plan.referenced,
-                    orphan=plan.orphan,
-                    guarded=plan.guarded,
-                    orphan_bytes=plan.orphan_bytes,
-                )
-                report.blob = {**report.blob, **delete_orphan_blobs(con, cur, plan.orphan, pause=blob_pause)}
-                _audit_append(audit, "blob_deleted", **report.blob)
+        # 共享 blob 全部保留；include_blob 在任何写入前已被拒绝。
     except BaseException as exc:
         # 出错也要留一条：用户需要知道「在删到第几阶段时断的」。
         _audit_append(audit, "aborted", stage="clean", error=repr(exc))

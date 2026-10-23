@@ -322,7 +322,7 @@ def cmd_cursor_cleanup(args: argparse.Namespace) -> int:
     默认只统计不改库（与 `scan` / `apply-rules` 的 `--dry-run` 语义一致），
     真正动手必须显式加 `--apply`。**blob 默认不删**（2026-10-22 事故）：
     会话还原依赖的 tool-result blob 在引用扫描里是「孤儿」，删了旧会话
-    就打不开；要删必须 `--delete-blobs` + `--blob-confirm` 逐字确认。
+    就打不开；现已拒绝执行共享 blob 删除，旧确认语不能绕过。
     """
     from dirtidy.cursor_cleanup import (
         BLOB_CONFIRM_PHRASE,
@@ -343,7 +343,7 @@ def cmd_cursor_cleanup(args: argparse.Namespace) -> int:
             if args.delete_blobs:
                 print(
                     "定期模式（--schedule-hours）不允许传 --delete-blobs：无人值守场景下"
-                    "高危删除必须不可达。要删 blob 请手动一次性执行并逐字确认。",
+                    "共享 blob 无法证明年龄和完整归属，执行删除已停用。",
                     file=sys.stderr,
                 )
                 return 2
@@ -369,8 +369,8 @@ def cmd_cursor_cleanup(args: argparse.Namespace) -> int:
             print()
             if args.delete_blobs:
                 print(
-                    "干跑结束（未改动任何东西）。加 --apply 真正清理；"
-                    "删 blob 还需 --blob-confirm 逐字确认（见 --delete-blobs 帮助）。"
+                    "干跑结束（未改动任何东西）。blob 仅为未发现显式引用的候选统计，"
+                    "不是可安全释放空间；执行模式不允许删除共享 blob。"
                 )
             else:
                 print(
@@ -390,11 +390,10 @@ def cmd_cursor_cleanup(args: argparse.Namespace) -> int:
             )
             return 2
 
-        if args.delete_blobs and args.blob_confirm != BLOB_CONFIRM_PHRASE:
+        if args.delete_blobs:
             print(
-                f"已指定 --delete-blobs，但缺少逐字确认。删 blob 可能让旧会话在 UI 里\n"
-                f"打不开（2026-10-22 事故：3 个 tool-result blob 被判孤儿删除，整条会话判死，\n"
-                f"且无法从备份恢复）。确认请加：--blob-confirm \"{BLOB_CONFIRM_PHRASE}\"",
+                "拒绝删除共享 blob：无法证明其年龄和完整引用归属；"
+                "--days 只支持会话级清理，逐字确认也不能绕过。",
                 file=sys.stderr,
             )
             return 2
@@ -587,16 +586,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--delete-blobs",
         action="store_true",
         help=(
-            "允许清理无引用的 agentKv:blob（默认不清理）。⚠️ 高危：2026-10-22 事故证明"
-            "会话还原依赖的 tool-result blob 会被引用扫描判成孤儿，删了旧会话可能打不开。"
-            "真要删还须 --blob-confirm 逐字确认。干跑时加它只表示「我要看 blob 数字」"
+            "兼容旧参数：仅干跑时统计共享 blob 候选（不代表可安全删除）。"
+            "执行模式一律拒绝，因无法证明其年龄与完整引用归属"
         ),
     )
     s.add_argument(
         "--blob-confirm",
         default=None,
         metavar="确认语",
-        help=f"删 blob 的逐字确认语，必须精确等于「{BLOB_CONFIRM_PHRASE_CLI_HELP}」",
+        help=f"兼容旧参数（旧确认语「{BLOB_CONFIRM_PHRASE_CLI_HELP}」）；不再授权删除共享 blob",
     )
     s.add_argument("--no-vacuum", action="store_true", help="跳过 VACUUM（删除快，但文件体积暂不缩小）")
     s.add_argument(

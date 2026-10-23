@@ -7,8 +7,8 @@
    `ofsContent:` 这类同样引用 blob 的键，漏扫即误删活数据（真机实测已复现）。
 4. **默认不删 blob**（2026-10-22 事故）——会话还原依赖的 tool-result blob
    在 value 扫描里是「孤儿」（引用在气泡 key 的 `/t:call_<toolCallId>` 协议里，
-   不在任何 value 里），删了旧会话就打不开。删 blob 必须显式高危开关 +
-   逐字确认，且判定内置 toolCallId 守卫。
+  不在任何 value 里），删了旧会话就打不开。blob 无法证明年龄与完整归属，
+  clean 即使收到逐字确认也必须在写入前拒绝；只读分析保留 toolCallId 守卫。
 
 外加一条 CLI 层的守卫：**默认不执行**，必须显式 `--apply` 才改库。
 """
@@ -109,6 +109,17 @@ def _blob_keys(db: Path) -> set[str]:
     con = sqlite3.connect(str(db))
     try:
         return {r[0] for r in con.execute("SELECT key FROM cursorDiskKV WHERE key LIKE ?", (f"{BLOB_PREFIX}%",))}
+    finally:
+        con.close()
+
+
+def _database_rows(db: Path) -> dict[str, list[tuple]]:
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        return {
+            table: con.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            for table in ("cursorDiskKV", "composerHeaders", "ItemTable")
+        }
     finally:
         con.close()
 
@@ -246,29 +257,24 @@ def test_item_table_is_never_deleted(mini_db: Path) -> None:
 
 
 def test_clean_removes_orphan_blobs_and_keeps_referenced(mini_db: Path) -> None:
-    """端到端：真正清理后，被引用的 blob 还在，孤儿没了，ItemTable 还在。
+    """保留历史用例名：blob 年龄与归属不可证，确认后也须在任何写入前拒绝。"""
+    before = mini_db.read_bytes()
+    rows = _database_rows(mini_db)
+    bk = mini_db.parent / "bk2"
+    with pytest.raises(CursorCleanupError, match="blob"):
+        clean(
+            mini_db,
+            days=90,
+            vacuum=False,
+            blob_pause=0,
+            backup_dir=bk,
+            include_blob=True,
+            blob_ack=True,
+        )
 
-    注意：这里显式 `include_blob=True, blob_ack=True`——blob 清理自
-    2026-10-22 事故后**默认关闭**，默认路径的守卫由
-    `test_clean_default_never_deletes_blobs` 负责，本条测的是「确认后
-    真删」的那条路径。
-    """
-    clean(
-        mini_db,
-        days=90,
-        vacuum=False,
-        blob_pause=0,
-        backup_dir=mini_db.parent / "bk2",
-        include_blob=True,
-        blob_ack=True,
-    )
-
-    remaining = _blob_keys(mini_db)
-    assert f"{BLOB_PREFIX}{HASH_REFERENCED}" in remaining, "被引用的 blob 不该被删"
-    assert f"{BLOB_PREFIX}{HASH_OFSCONTENT}" in remaining, "ofsContent 引用的 blob 不该被删"
-    assert f"{BLOB_PREFIX}{HASH_ORPHAN_1}" not in remaining
-    assert f"{BLOB_PREFIX}{HASH_ORPHAN_2}" not in remaining
-    assert _item_table_count(mini_db) == 1
+    assert mini_db.read_bytes() == before, "拒绝 blob 清理时改了数据库字节"
+    assert _database_rows(mini_db) == rows, "拒绝 blob 清理时改了数据库行"
+    assert not bk.exists(), "拒绝前不应创建备份或审计目录"
 
 
 def test_default_backup_dir_follows_the_database_not_home(mini_db: Path) -> None:
@@ -345,14 +351,13 @@ def test_default_db_path_is_not_macos_only(monkeypatch: pytest.MonkeyPatch) -> N
 def test_clean_writes_an_audit_trail_that_survives_a_crash(mini_db: Path, tmp_path: Path) -> None:
     """清理过程要**边做边记**，不能只在跑完时写一份报告。
 
-    真实库删 blob 是分批做的（每批 500 行、批间暂停），全程几十分钟。中途被
-    Ctrl-C / 被杀掉时，内存里的结果直接蒸发——而这是**不可恢复**的删除，
+    会话清理中途被 Ctrl-C / 被杀掉时，内存里的结果直接蒸发——
+    而这是**不可恢复**的删除，
     用户既不知道删了多少，也无从查证。每阶段追加一行 JSONL，断了也留着记录。
     """
     bk = tmp_path / "bk"
     clean(
         mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=bk,
-        include_blob=True, blob_ack=True,
     )
 
     log = bk / "dirtidy-cursor-cleanup.jsonl"
@@ -361,7 +366,7 @@ def test_clean_writes_an_audit_trail_that_survives_a_crash(mini_db: Path, tmp_pa
     # 顺序即执行顺序，最后一笔必须是 done——中途断了就不会有它
     assert events[0] == "start"
     assert events[-1] == "done"
-    for must in ("backup", "old_sessions", "orphan_sessions", "blob_plan", "blob_deleted"):
+    for must in ("backup", "old_sessions", "orphan_sessions"):
         assert must in events, f"审计缺阶段 {must}：{events}"
 
 
@@ -374,12 +379,11 @@ def test_clean_audit_records_an_abort_when_a_stage_blows_up(
     def boom(*args, **kwargs):
         raise RuntimeError("模拟磁盘满")
 
-    monkeypatch.setattr(cc, "collect_referenced_hashes", boom)
+    monkeypatch.setattr(cc, "filter_stale_orphans", boom)
     bk = tmp_path / "bk"
     with pytest.raises(RuntimeError, match="模拟磁盘满"):
         clean(
             mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=bk,
-            include_blob=True, blob_ack=True,
         )
 
     log = bk / "dirtidy-cursor-cleanup.jsonl"
@@ -389,7 +393,7 @@ def test_clean_audit_records_an_abort_when_a_stage_blows_up(
     assert aborted, f"缺 aborted 记录：{[r['event'] for r in recs]}"
     assert "模拟磁盘满" in aborted[0]["error"]
     # 断点之前已完成的阶段仍然有据可查
-    assert any(r["event"] == "orphan_sessions" for r in recs), "断点前的阶段记录丢了"
+    assert any(r["event"] == "old_sessions" for r in recs), "断点前的阶段记录丢了"
 
 
 def test_audit_records_the_replace_window_so_a_broken_vacuum_is_diagnosable(
@@ -440,6 +444,7 @@ def test_analyze_does_not_touch_the_database(mini_db: Path) -> None:
     report_blobs = analyze(mini_db, days=90, include_blob=True)
     assert report_blobs.blob["blob_orphan"] == 2
     assert report_blobs.blob["blob_referenced"] == 2
+    assert mini_db.read_bytes() == before, "含 blob 统计的干跑改动了数据库"
 
 
 def test_verify_database_rejects_a_library_without_item_table(tmp_path: Path) -> None:
@@ -493,7 +498,7 @@ def test_cursor_cleanup_cli_requires_apply_to_mutate(
     后者由 `test_cursor_cleanup_cli_refuses_while_cursor_runs` 负责。
 
     blob 自 2026-10-22 事故后默认不删：`--apply` 默认只清会话正文；
-    要删 blob 须 `--delete-blobs --blob-confirm <逐字确认>`（由
+    `--delete-blobs` 即使给出逐字确认也会拒绝（由
     `test_cursor_cleanup_cli_blob_delete_requires_typed_confirmation` 负责）。
     """
     from dirtidy.cli import main
@@ -571,39 +576,33 @@ def test_clean_default_never_deletes_blobs(mini_db: Path) -> None:
 
 
 def test_clean_refuses_blob_deletion_without_typed_ack(mini_db: Path) -> None:
-    """要删 blob 却没给逐字确认 → 拒绝进入 blob 阶段，绝不静默降级。
-
-    静默降级成「跳过」比报错更糟：用户以为删了，实际没删，下次还困惑
-    「怎么没缩盘」。这里必须**显式拒绝**并留审计。
-    """
+    """未确认的 blob 清理必须整体拒绝，不能先清会话或写备份、审计。"""
+    before = mini_db.read_bytes()
+    rows = _database_rows(mini_db)
     bk = mini_db.parent / "bk-ack"
-    report = clean(
-        mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=bk,
-        include_blob=True, blob_ack=False,
-    )
-    remaining = _blob_keys(mini_db)
-    assert f"{BLOB_PREFIX}{HASH_ORPHAN_1}" in remaining, "没给 ack 却删了 blob"
-    assert f"{BLOB_PREFIX}{HASH_ORPHAN_2}" in remaining, "没给 ack 却删了 blob"
-    # 审计里必须有拒绝记录
-    log = bk / "dirtidy-cursor-cleanup.jsonl"
-    lines = log.read_text(encoding="utf-8").splitlines()
-    events = [json.loads(line)["event"] for line in lines]
-    assert "blob_refused" in events, f"拒绝没留审计：{events}"
-    assert "blob_deleted" not in events
-    assert any("拒绝" in n for n in report.notes), f"报告里没说明拒绝原因：{report.notes}"
+    with pytest.raises(CursorCleanupError, match="blob"):
+        clean(
+            mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=bk,
+            include_blob=True, blob_ack=False,
+        )
+    assert mini_db.read_bytes() == before
+    assert _database_rows(mini_db) == rows
+    assert not bk.exists(), "拒绝前不应创建备份或审计目录"
 
 
 def test_clean_deletes_blobs_only_with_full_ack(mini_db: Path) -> None:
-    """`include_blob=True` + `blob_ack=True` 才真正进入 blob 阶段。"""
-    clean(
-        mini_db, days=90, vacuum=False, blob_pause=0,
-        backup_dir=mini_db.parent / "bk-ack-ok",
-        include_blob=True, blob_ack=True,
-    )
-    remaining = _blob_keys(mini_db)
-    assert f"{BLOB_PREFIX}{HASH_ORPHAN_1}" not in remaining
-    assert f"{BLOB_PREFIX}{HASH_ORPHAN_2}" not in remaining
-    assert f"{BLOB_PREFIX}{HASH_REFERENCED}" in remaining
+    """保留历史用例名：完整确认也不能证明 blob 属于 days 范围，必须拒绝。"""
+    before = mini_db.read_bytes()
+    rows = _database_rows(mini_db)
+    bk = mini_db.parent / "bk-ack-ok"
+    with pytest.raises(CursorCleanupError, match="blob"):
+        clean(
+            mini_db, days=90, vacuum=False, blob_pause=0, backup_dir=bk,
+            include_blob=True, blob_ack=True,
+        )
+    assert mini_db.read_bytes() == before
+    assert _database_rows(mini_db) == rows
+    assert not bk.exists(), "完整确认也不能触发备份或审计写入"
 
 
 def test_blob_confirm_phrase_is_single_sourced() -> None:
@@ -620,11 +619,12 @@ def test_cursor_cleanup_cli_blob_delete_requires_typed_confirmation(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """CLI 层：`--delete-blobs` 没带正确确认语 → 拒绝执行（退出码 2）。"""
+    """CLI 层：错误、缺失或完整确认都不能放行 blob 删除（退出码 2）。"""
     from dirtidy.cli import main
 
     monkeypatch.setattr("dirtidy.cursor_cleanup.cursor_running", lambda: False)
-    before = _blob_keys(mini_db)
+    before = mini_db.read_bytes()
+    rows = _database_rows(mini_db)
 
     # 错误的确认语
     rc = main(["cursor-cleanup", "--db", str(mini_db), "--apply", "--no-vacuum",
@@ -632,21 +632,25 @@ def test_cursor_cleanup_cli_blob_delete_requires_typed_confirmation(
     assert rc == 2
     err = capsys.readouterr().err
     assert "逐字确认" in err
-    assert _blob_keys(mini_db) == before, "确认语错误却动了库"
+    assert mini_db.read_bytes() == before, "确认语错误却动了库"
+    assert _database_rows(mini_db) == rows
 
     # 缺确认语
     rc = main(["cursor-cleanup", "--db", str(mini_db), "--apply", "--no-vacuum",
                "--delete-blobs"])
     assert rc == 2
-    assert _blob_keys(mini_db) == before
+    assert mini_db.read_bytes() == before
+    assert _database_rows(mini_db) == rows
+    capsys.readouterr()
 
-    # 正确的确认语才放行
+    # 正确的确认语也不能证明 blob 年龄与归属，仍须拒绝
     rc = main(["cursor-cleanup", "--db", str(mini_db), "--apply", "--no-vacuum",
                "--delete-blobs", "--blob-confirm", BLOB_CONFIRM_PHRASE])
-    assert rc == 0
-    remaining = _blob_keys(mini_db)
-    assert f"{BLOB_PREFIX}{HASH_ORPHAN_1}" not in remaining
-    assert f"{BLOB_PREFIX}{HASH_REFERENCED}" in remaining
+    assert rc == 2
+    assert "blob" in capsys.readouterr().err
+    assert mini_db.read_bytes() == before
+    assert _database_rows(mini_db) == rows
+    assert not list(mini_db.parent.glob("CursorStateBackup-*"))
 
 
 def test_tool_result_blobs_are_guarded_even_when_unreferenced(tmp_path: Path) -> None:
@@ -658,7 +662,7 @@ def test_tool_result_blobs_are_guarded_even_when_unreferenced(tmp_path: Path) ->
       任何 64 位哈希（真机取证：toolCallId 只在 key 里）；
     - 旧判定（扫 value 找 64 位哈希）会把这个 blob 判成孤儿。
 
-    守卫要求：即使显式确认删 blob（ack 全给），这个 blob 也**不进孤儿名单**。
+    守卫要求：只读 planner 不将其列入孤儿名单，默认会话清理保留所有 blob。
     """
     import hashlib
 
@@ -712,62 +716,112 @@ def test_tool_result_blobs_are_guarded_even_when_unreferenced(tmp_path: Path) ->
     finally:
         con.close()
 
-    # 端到端：即使全确认删 blob，tool-result blob 也必须还在
+    # 端到端：默认会话清理不删除任何 blob，包括 planner 中的普通孤儿
     clean(db, days=90, vacuum=False, blob_pause=0,
-          backup_dir=tmp_path / "bk-guard", include_blob=True, blob_ack=True)
+          backup_dir=tmp_path / "bk-guard")
     remaining = _blob_keys(db)
-    assert f"{BLOB_PREFIX}{blob_hash}" in remaining, "确认删除后 tool-result blob 还是没了——事故重演"
-    assert f"{BLOB_PREFIX}{plain_hash}" not in remaining
+    assert f"{BLOB_PREFIX}{blob_hash}" in remaining, "默认清理删了 tool-result blob——事故重演"
+    assert f"{BLOB_PREFIX}{plain_hash}" in remaining
 
 
-def test_recent_sessions_are_fully_preserved(tmp_path: Path) -> None:
-    """近 N 天会话：header、composerData、气泡、checkpoint 一个不删。
+def test_recent_sessions_are_fully_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """90 天边界、未知孤儿与正文近期的会话逐行逐字节保留，只有确证过期才删。"""
+    import dirtidy.cursor_cleanup as cc
 
-    事故文档硬约束第 6 条：不得因「孤儿扫描」删掉仍在 header 里的
-    近 N 天会话正文。`--days` 的语义就是「保留最近 N 天」，这条用例
-    守住它不被任何清理阶段悄悄突破。
-    """
+    now_s = 1_800_000_000
+    monkeypatch.setattr(cc.time, "time", lambda: now_s)
+    now_ms = now_s * 1000
+    day_ms = 86400 * 1000
+    cutoff_ms = now_ms - 90 * day_ms
+    old_ms = now_ms - 91 * day_ms
+    recent_ms = now_ms - 89 * day_ms
+
     db = tmp_path / "state.vscdb"
     con = sqlite3.connect(str(db))
     cur = con.cursor()
     cur.execute("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)")
     cur.execute("CREATE TABLE composerHeaders (composerId TEXT, recency INTEGER)")
     cur.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB)")
-
-    # 近期会话（recency = now）
-    import time as _time
-
-    now_ms = int(_time.time() * 1000)
-    old_ms = now_ms - 400 * 86400 * 1000  # 400 天前，远超 90 天保留窗
-    cur.execute("INSERT INTO composerHeaders VALUES (?, ?)", ("recent-cid", now_ms))
-    cur.execute("INSERT INTO cursorDiskKV VALUES (?, ?)",
-                ("composerData:recent-cid", json.dumps({"createdAt": now_ms}).encode()))
-    cur.execute("INSERT INTO cursorDiskKV VALUES (?, ?)",
-                ("bubbleId:recent-cid:bid1", json.dumps({"text": "recent"}).encode()))
-    cur.execute("INSERT INTO cursorDiskKV VALUES (?, ?)",
-                ("checkpointId:recent-cid:cp1", b"checkpoint"))
-    # 远期会话（recency = 400 天前）
-    cur.execute("INSERT INTO composerHeaders VALUES (?, ?)", ("old-cid", old_ms))
-    cur.execute("INSERT INTO cursorDiskKV VALUES (?, ?)",
-                ("bubbleId:old-cid:bid1", json.dumps({"text": "old"}).encode()))
-    cur.execute("INSERT INTO ItemTable VALUES (?, ?)", ("theme", b"dark"))
+    headers = {
+        "recent-cid": now_ms,
+        "boundary-cid": cutoff_ms,
+        "89-day-cid": recent_ms,
+        "91-day-cid": old_ms,
+        "stale-header-cid": old_ms,
+    }
+    cur.executemany("INSERT INTO composerHeaders VALUES (?, ?)", headers.items())
+    # 同样覆盖有索引和缺索引会话，边界恰好等于 cutoff 必须保留。
+    activity = {
+        "recent-cid": now_ms,
+        "boundary-cid": cutoff_ms,
+        "89-day-cid": recent_ms,
+        "91-day-cid": old_ms,
+        "stale-header-cid": recent_ms,
+        "orphan-boundary-cid": cutoff_ms,
+        "orphan-89-day-cid": recent_ms,
+        "orphan-91-day-cid": old_ms,
+        "unknown-orphan-cid": None,
+        "mixed-orphan-cid": old_ms,
+    }
+    for cid, timestamp in activity.items():
+        value = {"text": cid}
+        if timestamp is not None:
+            value["createdAt"] = timestamp
+        raw = json.dumps(value, ensure_ascii=False, indent=2).encode()
+        cur.executemany(
+            "INSERT INTO cursorDiskKV VALUES (?, ?)",
+            [
+                (f"composerData:{cid}", raw),
+                (f"bubbleId:{cid}:bid1", raw),
+                (f"checkpointId:{cid}:cp1", b"checkpoint\x00\xff"),
+            ],
+        )
+    # 首条正文过期不能代表整个孤儿：最后一条气泡仍在保留窗内。
+    cur.execute(
+        "INSERT INTO cursorDiskKV VALUES (?, ?)",
+        ("bubbleId:mixed-orphan-cid:bid2", json.dumps({"timestamp": recent_ms}).encode()),
+    )
+    cur.executemany(
+        "INSERT INTO ItemTable VALUES (?, ?)",
+        [("theme", b"dark\x00\xff"), ("settings", b'{ "keep": true }\n')],
+    )
     con.commit()
     con.close()
 
-    clean(db, days=90, vacuum=False, blob_pause=0, backup_dir=tmp_path / "bk-recent")
+    before_bytes = db.read_bytes()
+    before = _database_rows(db)
+    preview = analyze(db, days=90)
+    assert db.read_bytes() == before_bytes, "干跑改了数据库"
+    assert _database_rows(db) == before
+    assert preview.old_sessions == 1
+    assert preview.orphan_sessions == 1
+    assert preview.orphan_skipped == 4
 
-    con = sqlite3.connect(str(db))
-    try:
-        keys = {r[0] for r in con.execute("SELECT key FROM cursorDiskKV")}
-        headers = {r[0] for r in con.execute("SELECT composerId FROM composerHeaders")}
-    finally:
-        con.close()
-    assert "recent-cid" in headers
-    assert "composerData:recent-cid" in keys
-    assert "bubbleId:recent-cid:bid1" in keys
-    assert "checkpointId:recent-cid:cp1" in keys
-    assert "old-cid" not in headers
-    assert "bubbleId:old-cid:bid1" not in keys
+    report = clean(
+        db, days=90, vacuum=False, blob_pause=0, backup_dir=tmp_path / "bk-recent"
+    )
+    assert report.old_sessions == preview.old_sessions
+    assert report.orphan_sessions == preview.orphan_sessions
+    assert report.orphan_skipped == preview.orphan_skipped
+    assert report.old_stats == {"bubble": 1, "checkpoint": 1, "composerData": 1, "headers": 1}
+    assert report.orphan_stats == {"bubble": 1, "checkpoint": 1, "composerData": 1, "headers": 0}
+
+    deleted_cids = {"91-day-cid", "orphan-91-day-cid"}
+    expected = {
+        "cursorDiskKV": [
+            row for row in before["cursorDiskKV"]
+            if not any(
+                row[0] == f"composerData:{cid}"
+                or row[0].startswith((f"bubbleId:{cid}:", f"checkpointId:{cid}:"))
+                for cid in deleted_cids
+            )
+        ],
+        "composerHeaders": [row for row in before["composerHeaders"] if row[0] not in deleted_cids],
+        "ItemTable": before["ItemTable"],
+    }
+    assert _database_rows(db) == expected, "保留对象的完整行或原始 value 字节被改动"
 
 
 def test_forbidden_paths_are_never_referenced_in_source() -> None:
