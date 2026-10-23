@@ -181,51 +181,54 @@ Value: {"_v":3,"type":2,...}   <-- 标准气泡 JSON，里面完全不包含那�
 
 Cursor 运行时持续持有 `state.vscdb-wal` 的写锁与共享内存索引（`-shm`）。第三方进程一旦介入写库，哪怕事务再短，也会与 Electron 主进程争抢 WAL 锁，轻则抛 `database table is locked`，重则触发 Cursor 自身的一致性保护，直接弹窗 `storage file corrupted/moved/permission` 拒绝工作。更关键的是，如果不做 `VACUUM`，SQLite 删掉的行只会变成文件内部的 free pages，**磁盘上的 `.vscdb` 文件一字节都不会缩小**；而 `VACUUM INTO` + 原子替换原库，必须在没有任何进程打开该库的前提下才能安全完成。
 
-因此，可靠的清理器必须遵守四条工程铁律：
+因此，可靠的清理器必须遵守五条工程铁律：
 
 1. **进程检测 Fail-Closed（闭锁失败）**：清理前先查系统进程表，只要发现 Cursor 正在运行就拒绝加 `--apply`；如果连进程表都读不到（例如在缺乏 `ps` 命令的受限环境或 Windows 特殊环境），也一律按“正在运行”拒绝，绝不盲目放行。
-2. **同卷冷备份 + 校验后原子替换**：动手删数据前，先在数据库同级目录用 APFS `cp -c`（Copy-on-Write 克隆，75 GB 瞬间完成且不额外占空间）生成冷备份；清理结束后执行 `VACUUM INTO state.vscdb.vacuumed`，对新库跑完整性校验并确认 `ItemTable` 完好，最后用 `os.replace` 原子替换原库。
-3. **崩溃留痕的 JSONL 审计流**：几十 GB 的库做扫描和 `VACUUM` 耗时较长，如果中途被系统或用户中断，内存里的报告会瞬间蒸发。尤其在 `os.replace(db, old_path)` 与 `os.replace(vacuumed_path, db)` 之间存在极短的替换窗口。清理器在每个阶段（包括进入替换窗口前）都会向磁盘追加一行 `audit.jsonl`，即便中途断电也能一眼查清当前库停留在哪一步。
-4. **严格的作用域红线**：清理器只允许操作 `state.vscdb` 及其伴生文件，源码级测试守卫禁止出现 `agent-transcripts`、`chats`、`blob_storage`、`IndexedDB` 等路径——确保万一 UI 会话出问题，用户的 `.jsonl` 纯文本逐字稿永远在原地兜底。
+2. **同卷冷备份 + 校验后原子替换 + 旧备份自动回收**：动手删数据前，先在数据库同级目录用 APFS `cp -c`（Copy-on-Write 克隆，75 GB 瞬间完成且不额外占空间）生成冷备份 `CursorStateBackup-YYYYmmdd-HHMMSS/`；清理结束后执行 `VACUUM INTO state.vscdb.vacuumed`，对新库跑完整性校验并确认 `ItemTable` 完好，再用两步 `os.replace` 原子替换原库。**关键在于收尾闭环**：替换一经完成，立即回收中转旧库 `state.vscdb.pre-cleanup`（避免同一轮留下两份 75 GB 备份），并按 `--keep-backups N`（默认保留最新 1 份）自动清理更早的 `CursorStateBackup-*` 目录，从根源上杜绝“越清磁盘越满”。
+3. **后台退出窗口自动调度（无需人工惦记）**：既然不能在 Cursor 运行时在线写库，也不可能指望用户每月定闹钟手动退出 Cursor 跑命令，根治之道是把清理器挂在后台按周期轮询（`--schedule-hours 24`）：Cursor 正在运行时静默跳过；一旦检测到用户关闭了 Cursor，自动抓住退出窗口完成过期会话清理、`VACUUM` 压缩与旧备份滚动回收，并通过系统通知汇报释放的空间。**在代码层面，定期无人值守模式硬编码强制 `include_blob=False`（且 CLI 拒绝与 `--delete-blobs` 混用）**，确保后台自动任务永远只做 100% 安全的过期会话回收。
+4. **崩溃留痕的 JSONL 审计流**：几十 GB 的库做扫描和 `VACUUM` 耗时较长，如果中途被系统或用户中断，内存里的报告会瞬间蒸发。尤其在 `os.replace(db, old_path)` 与 `os.replace(vacuumed_path, db)` 之间存在极短的替换窗口。清理器在每个阶段（包括进入替换窗口前、回收中转库、裁剪旧冷备份）都会向磁盘追加一行 `audit.jsonl`，即便中途断电也能一眼查清当前库停留在哪一步。
+5. **严格的作用域红线**：清理器只允许操作 `state.vscdb` 及其伴生文件，源码级测试守卫禁止出现 `agent-transcripts`、`chats`、`blob_storage`、`IndexedDB` 等路径——确保万一 UI 会话出问题，用户的 `.jsonl` 纯文本逐字稿永远在原地兜底。
 
 ---
 
 ## 五、实操指南：一套可定期执行的维护闭环
 
-把上面的分析落到实处，如果你现在正面对一个几十甚至上百 GB 的 Cursor 目录，按以下三步建立定期维护习惯，就能彻底告别磁盘告警：
+把上面的分析落到实处，如果你现在正面对一个几十甚至上百 GB 的 Cursor 目录，按以下三步建立自动维护闭环，就能彻底告别磁盘告警：
 
-### 第一步：清理陈旧备份与外围缓存（零风险，立竿见影）
+### 第一步：清理历史遗留的旧备份与外围缓存（零风险，立竿见影）
 
-检查 `globalStorage` 下是否有历史清理留下的 `state.vscdb.pre-cleanup` 或 `state.vscdb.backup`，以及同级的 `CursorStateBackup-*` 目录。只要当前的 Cursor 已经正常使用了几天，这些动辄几十 GB 的历史快照就可以安全移除；顺手清空 `CachedData`（V8 编译缓存）和过期 `logs`：
+如果你之前跑过早期版本的清理脚本，先检查 `globalStorage` 下是否有遗留的 `state.vscdb.pre-cleanup`、`state.vscdb.backup`，以及同级的 `CursorStateBackup-*` 目录。只要当前的 Cursor 已经正常使用了几天，这些动辄几十 GB 的历史快照就可以安全移除（新版 `dirtidy` 已改为在替换成功后自动回收 `.pre-cleanup` 并按 `--keep-backups 1` 自动滚动清理旧冷备份）：
 
 ```bash
-# 1. 查看 globalStorage 下所有状态库与备份体积
+# 1. 查看 globalStorage 下所有状态库与历史遗留备份体积
 ls -lh ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb*
 
-# 2. 确认当前 Cursor 正常使用几天后，删除上一次遗留的旧库快照（本机直接释放 75 GB）
+# 2. 确认当前 Cursor 正常使用几天后，清理早期脚本遗留的中转快照（本机直接释放 75 GB）
 rm -f ~/Library/Application\ Support/Cursor/User/globalStorage/state.vscdb.pre-cleanup*
 ```
 
-### 第二步：每月一次会话级定期瘦身（主力手段，默认安全）
+### 第二步：启用定期自动瘦身（主力手段，默认安全且不翻倍占盘）
 
-每月找一个休息间隙，**完全退出 Cursor（`Cmd + Q`）**，用默认安全模式清理超过 30 天的非活跃会话并压缩数据库。这一步只清过期会话正文与检查点，不碰 `ItemTable` 设置，也不碰 `agentKv:blob`：
+你可以选择**手动单次执行**，或者直接挂起**无人值守定期守护**。两种方式都只清超过 30 天的非活跃会话与检查点，不碰 `ItemTable` 设置，也不碰 `agentKv:blob`，并且会自动回收 `.pre-cleanup` 中转库、只保留最新 1 份冷备份：
 
 ```bash
-# 1. 先干跑预览（默认只读，不改任何数据，加上 --measure 估算可释放空间）
+# 方式 A：先干跑预览（默认只读，不改任何数据，加上 --measure 估算可释放空间）
 dirtidy cursor-cleanup --days 30 --measure
 
-# 2. 确认无误后，完全退出 Cursor，执行清理与 VACUUM 压缩（默认不删 blob）
-dirtidy cursor-cleanup --days 30 --apply
+# 确认无误后，完全退出 Cursor（Cmd + Q），单次执行清理 + VACUUM + 旧备份自动回收
+dirtidy cursor-cleanup --days 30 --apply --keep-backups 1
 
-# 3. 重新打开 Cursor 正常使用一两天后，删掉本次生成的冷备份（CursorStateBackup-* 与 .pre-cleanup）完成空间回收
+# 方式 B（根治推荐）：后台定期守护——每 24 小时检查一次，Cursor 运行时静默跳过，
+# 等你下班关闭 Cursor 时自动抓住退出窗口完成清理与压缩，全程禁止删 blob
+dirtidy cursor-cleanup --days 30 --schedule-hours 24 --keep-backups 1
 ```
 
-### 第三步：低频深度回收孤儿 blob（按需可选）
+### 第三步：低频深度回收孤儿 blob（按需可选，仅限人工单次执行）
 
-如果清理完过期会话后体积仍然很大，且你明确接受“极少数依赖特殊子代理协议的旧会话可能打不开 UI（但 `.jsonl` 逐字稿仍在）”，再启用双闸开关清理非 `tool-result` 的孤儿 blob：
+如果清理完过期会话后体积仍然很大，且你明确接受“极少数依赖特殊子代理协议的旧会话可能打不开 UI（但 `.jsonl` 逐字稿仍在）”，可以在退出 Cursor 后人工单次启用双闸开关，清理非 `tool-result` 的孤儿 blob（注：该操作被严禁用于 `--schedule-hours` 自动模式）：
 
 ```bash
-# 完全退出 Cursor 后执行；内置守卫会自动保留占 4.3% 的 tool-result 形态 blob，只清其余 25.4% 孤儿
+# 完全退出 Cursor 后人工执行；内置守卫会自动保留占 4.3% 的 tool-result 形态 blob，只清其余 25.4% 孤儿
 dirtidy cursor-cleanup --days 30 --apply \
   --delete-blobs \
   --blob-confirm "我接受旧会话可能打不开"
@@ -235,8 +238,8 @@ dirtidy cursor-cleanup --days 30 --apply \
 
 ## 小结
 
-回看从 167 GB 磁盘告警到删库事故、再到系统性治理的全过程，核心脉络其实非常清楚：
+回看从 167 GB 磁盘告警到删库事故、再到系统性根治的全过程，核心脉络其实非常清楚：
 
 1. **看清全貌再动手**：Cursor 98% 的膨胀集中在 `state.vscdb`（及其历史备份），而库内 67.9% 的体积是对话气泡（尤以不关窗口的超长会话为甚），外围日志与缓存只占不到 2%。
-2. **管住源头而非盲目全删**：阻止无限膨胀的正道，是“日常及时新开对话窗口 + 定期按 `--days` 清理过期会话并 `VACUUM` + 验证后回收旧备份”，而不是在线硬删正在使用的库。
-3. **对未知的内部协议保持敬畏**：清理工具本质上是在替用户做不可逆的删除决策。像 `/t:call_` 这样藏在 `key` 里的隐式引用协议证明了，凡是没用真机数据证明过“100% 等价安全”的清理动作，都必须默认关闭，并用显式确认与形态守卫兜底。
+2. **用“退出窗口自动调度 + 备份滚动回收”根治无限膨胀**：既不在 Cursor 运行时硬抢 WAL 锁，也不靠人工定闹钟或留双份 75 GB 备份占满磁盘——日常及时新开对话窗口，后台用 `--schedule-hours 24 --keep-backups 1` 在关闭 Cursor 时自动清理过期会话、执行 `VACUUM` 并滚动回收旧备份，才是可持续的工程闭环。
+3. **对未知的内部协议保持敬畏**：清理工具本质上是在替用户做不可逆的删除决策。像 `/t:call_` 这样藏在 `key` 里的隐式引用协议证明了，凡是没用真机数据证明过“100% 等价安全”的清理动作，都必须默认关闭、严禁进入无人值守自动任务，并用显式确认与形态守卫兜底。

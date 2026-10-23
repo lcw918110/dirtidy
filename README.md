@@ -186,7 +186,7 @@ python scripts/smoke_e2e.py                  # 真实目录跑通 scan → apply
 ## 测试
 
 ```bash
-pytest -q            # 当前收集 367 个用例（含参数化）
+pytest -q            # 当前收集 372 个用例（含参数化）
 ruff check .         # 含 scripts/，CI 同此范围
 mypy
 ```

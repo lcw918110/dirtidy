@@ -734,10 +734,61 @@ def backup_database(db: Path, backup_dir: Path) -> Path:
     backup_dir.mkdir(parents=True, exist_ok=True)
     fast_copy(db, backup_dir / db.name)
     for side in (db.name + "-wal", db.name + "-shm"):
-        p = db.with_name(side)
-        if p.exists() and p.stat().st_size > 0:
-            fast_copy(p, backup_dir / side)
+        side_path = db.with_name(side)
+        if side_path.exists() and side_path.stat().st_size > 0:
+            fast_copy(side_path, backup_dir / side)
     return backup_dir
+
+
+def prune_backups(
+    backup_root: Path,
+    keep: int = 1,
+    *,
+    current: Path | None = None,
+) -> list[Path]:
+    """回收旧备份目录，只留最近 `keep` 份（默认 1）。
+
+    这是「定期清理」闭环里**最容易被忽略却最贵的一环**：每次 `clean()` 都在库旁
+    留一份几十 GB 的全量备份，如果只做不收，磁盘占用每轮翻倍——本机实测曾同时
+    躺着 pre-cleanup（75 GB）+ backup（2.9 GB）+ 冷备份目录三份。回收发生在
+    **本次备份已生成之后**，所以最坏情况也始终保有一份可回滚的完整备份。
+
+    `current` 是本次刚建好的备份目录，永远跳过（绝不能被自己回收自己）。
+
+    判新旧只看目录名的时间戳（`CursorStateBackup-YYYYmmdd-HHMMSS`），不查 mtime：
+    clonefile 会保留源文件的时间戳，mtime 不可靠。名字不合规范的目录**不动**——
+    那可能是用户手工放的东西，清理器没有权限替人做决定。
+    """
+    removed: list[Path] = []
+    if not backup_root.is_dir():
+        return removed
+    dirs: list[tuple[str, Path]] = []
+    for child in backup_root.iterdir():
+        if not child.is_dir():
+            continue
+        m = re.fullmatch(r"CursorStateBackup-(\d{8}-\d{6})", child.name)
+        if m:
+            dirs.append((m.group(1), child))
+    dirs.sort(key=lambda t: t[0], reverse=True)  # 名字时间戳降序：最新在前
+
+    current_name = current.name if current is not None else None
+    survivors: list[str] = []
+    if current_name is not None:
+        survivors.append(current_name)
+    for _stamp, path in dirs:
+        if len(survivors) >= max(keep, 0) + (1 if current_name else 0):
+            break
+        survivors.append(path.name)
+
+    for _stamp, path in dirs:
+        if path.name in survivors:
+            continue
+        try:
+            shutil.rmtree(path)
+            removed.append(path)
+        except OSError:
+            pass  # 回收失败不阻断主流程：多留一份备份不是灾难，删错才是。
+    return removed
 
 
 def verify_database(path: Path) -> None:
@@ -879,6 +930,7 @@ def clean(
     backup_dir: Path | None = None,
     blob_pause: float = 3.0,
     blob_ack: bool = False,
+    keep_backups: int = 1,
 ) -> CleanupReport:
     """真正清理。**调用方必须已确认 Cursor 已退出**（`cursor_running()` 由 CLI 检查）。
 
@@ -928,6 +980,14 @@ def clean(
     backup_database(db, backup)
     report.notes.append(f"冷备份完成：{backup}")
     _audit_append(audit, "backup", backup=str(backup))
+    # 备份只做不收，磁盘每轮翻倍（本机曾三份 75 GB 并存）。冷备份落定后立刻
+    # 回收超出配额的旧备份目录；`keep_backups` 计入本次刚建的一份。
+    pruned = prune_backups(backup.parent, keep=keep_backups, current=backup)
+    if pruned:
+        report.notes.append(f"已回收 {len(pruned)} 个旧备份目录（保留最近 {keep_backups} 份）")
+        _audit_append(
+            audit, "backups_pruned", kept=keep_backups, removed=[str(p) for p in pruned]
+        )
 
     cutoff_ms = int((time.time() - days * 86400) * 1000)
     con = sqlite3.connect(str(db))
@@ -1028,7 +1088,16 @@ def clean(
             if p.exists():
                 p.unlink()
         report.vacuumed = True
-        report.notes.append(f"压缩后原库另存：{old_path}")
+        # `old_path` 只是两步原子替换之间的中转安全垫。新库已校验通过并成功就位，
+        # 完整原库就在冷备份 `CursorStateBackup-*/` 里——再留着它就是无意义的
+        # 双份 75 GB（本机事故后同时躺着 pre-cleanup 75 GB + 冷备份 75 GB 的由来）。
+        # 此时点删除：万一用户想回滚，从冷备份恢复即可，字节级等价。
+        if old_path.exists():
+            old_path.unlink()
+            _audit_append(audit, "old_path_reclaimed", old=str(old_path))
+            report.notes.append("替换成功，中转旧库已回收（完整原库在冷备份里）")
+        else:
+            report.notes.append(f"压缩后原库另存：{old_path}")
         _audit_append(audit, "replaced", old=str(old_path), new=str(db))
     else:
         report.notes.append("已跳过 VACUUM（文件体积暂不缩小）")
@@ -1047,3 +1116,91 @@ def iter_table_names(db: Path) -> Iterator[str]:
             yield name
     finally:
         con.close()
+
+
+def run_cursor_cleanup_schedule(
+    db: Path,
+    *,
+    interval_hours: float = 24.0,
+    days: int = 90,
+    include_orphan: bool = True,
+    vacuum: bool = True,
+    keep_backups: int = 1,
+    max_rounds: int | None = None,
+    notify_enabled: bool = True,
+    stop_event: Any | None = None,
+    _sleep: Any = time.sleep,
+) -> int:
+    """无人值守的定期清理循环——「根治」的落点。
+
+    定期治理的核心难题是：清理必须**离线**做（Cursor 在跑就拒绝），但没人愿意
+    每月记得手动退出 Cursor 再敲命令。本循环把这件事自动化：
+
+    - 每 `interval_hours` 小时醒一次；
+    - Cursor 在跑 → **静默等待下一轮**（绝不催用户退出，更绝不在线写库）；
+    - Cursor 恰好退出 → 执行 `clean()`（默认不删 blob，`include_blob` 在本函数里
+      硬编码为 False，**不接受参数传入**——无人值守场景下高危动作必须不可达，
+      这不是靠约定，是靠签名里没有这个口子）；
+    - 清理完成后发一条系统通知报成果。
+
+    返回执行的轮数（0 表示一次都没轮到 Cursor 退出）。
+    """
+    from dirtidy.watch import notify  # 局部导入避免模块级环依赖
+
+    rounds = 0
+    executed = 0
+    print(
+        f"开始定期清理 {db}：每 {interval_hours:g} 小时检查一次，"
+        f"保留近 {days} 天会话，保留最近 {keep_backups} 份冷备份。"
+    )
+    print("仅当 Cursor 完全退出时才执行；blob 永不自动删除。按 Ctrl-C 停止。\n")
+
+    def _wait(seconds: float) -> None:
+        if stop_event is not None:
+            stop_event.wait(seconds)
+        else:
+            _sleep(seconds)
+
+    try:
+        while max_rounds is None or rounds < max_rounds:
+            if stop_event is not None and stop_event.is_set():
+                break
+            rounds += 1
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            if cursor_running():
+                print(f"[{stamp}] 第 {rounds} 轮：Cursor 正在运行，本轮跳过（继续等）。", flush=True)
+                _wait(interval_hours * 3600)
+                continue
+            print(f"[{stamp}] 第 {rounds} 轮：Cursor 已退出，开始清理……", flush=True)
+            try:
+                report = clean(
+                    db,
+                    days=days,
+                    include_orphan=include_orphan,
+                    include_blob=False,  # 硬编码：无人值守永不删 blob
+                    vacuum=vacuum,
+                    keep_backups=keep_backups,
+                )
+            except CursorCleanupError as e:
+                print(f"[{stamp}] 清理失败：{e}", flush=True)
+                if notify_enabled:
+                    notify("dirtidy 定期清理失败", str(e))
+                _wait(interval_hours * 3600)
+                continue
+            executed += 1
+            after_bytes = db.stat().st_size
+            freed = max(report.db_bytes - after_bytes, 0)
+            summary = (
+                f"清理过期会话 {report.old_sessions} 条"
+                f"（孤儿 {report.orphan_sessions} 条），"
+                + (f"释放约 {human_bytes(freed)}" if freed > 0 else "体积无明显变化")
+            )
+            print(f"[{stamp}] {summary}", flush=True)
+            if notify_enabled:
+                notify("dirtidy 定期清理完成", summary)
+            if max_rounds is not None and rounds >= max_rounds:
+                break
+            _wait(interval_hours * 3600)
+    except KeyboardInterrupt:
+        print("\n已停止定期清理。")
+    return executed

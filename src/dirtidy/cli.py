@@ -331,10 +331,32 @@ def cmd_cursor_cleanup(args: argparse.Namespace) -> int:
         analyze,
         clean,
         cursor_running,
+        run_cursor_cleanup_schedule,
     )
 
     db = Path(args.db).expanduser() if args.db else DEFAULT_DB
     try:
+        if args.schedule_hours is not None:
+            if args.schedule_hours <= 0:
+                print("--schedule-hours 必须 > 0。", file=sys.stderr)
+                return 2
+            if args.delete_blobs:
+                print(
+                    "定期模式（--schedule-hours）不允许传 --delete-blobs：无人值守场景下"
+                    "高危删除必须不可达。要删 blob 请手动一次性执行并逐字确认。",
+                    file=sys.stderr,
+                )
+                return 2
+            run_cursor_cleanup_schedule(
+                db,
+                interval_hours=args.schedule_hours,
+                days=args.days,
+                include_orphan=not args.no_orphan,
+                vacuum=not args.no_vacuum,
+                keep_backups=args.keep_backups,
+            )
+            return 0
+
         if not args.apply:
             report = analyze(
                 db,
@@ -386,6 +408,7 @@ def cmd_cursor_cleanup(args: argparse.Namespace) -> int:
             backup_dir=Path(args.backup_dir).expanduser() if args.backup_dir else None,
             blob_pause=args.blob_pause,
             blob_ack=args.blob_confirm == BLOB_CONFIRM_PHRASE,
+            keep_backups=args.keep_backups,
         )
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
         print()
@@ -580,6 +603,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--measure",
         action="store_true",
         help="干跑时额外估算将腾出多少空间（较慢：要读 blob 内容算体积）",
+    )
+    s.add_argument(
+        "--keep-backups",
+        type=int,
+        default=1,
+        metavar="N",
+        help="清理后保留最近 N 份冷备份目录（默认 1；旧份自动回收，防止磁盘翻倍）",
+    )
+    s.add_argument(
+        "--schedule-hours",
+        type=float,
+        default=None,
+        metavar="H",
+        help=(
+            "无人值守定期模式：每 H 小时检查一次，Cursor 已退出才真正清理"
+            "（在跑就静默等下一轮）。此模式永不删除 blob——这是硬编码，不是默认值"
+        ),
     )
     s.set_defaults(func=cmd_cursor_cleanup)
 

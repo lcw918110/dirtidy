@@ -793,3 +793,114 @@ def test_forbidden_paths_are_never_referenced_in_source() -> None:
             if stripped.startswith("#"):
                 continue
             pytest.fail(f"cursor_cleanup.py:{line_no} 引用了禁止路径 {forbidden!r}：{line}")
+
+
+# ---------------------------------------------------------------------------
+# 根治：定期清理的闭环（备份不回收 = 磁盘翻倍；没人记得手动跑 = 永远涨）
+# ---------------------------------------------------------------------------
+
+
+def test_prune_backups_keeps_only_the_newest(tmp_path: Path) -> None:
+    """旧备份必须按名字时间戳回收，且本次刚建的那份永远保留。
+
+    回归背景：每次 `clean()` 都留一份几十 GB 的全量备份，只做不收就会让磁盘
+    每轮翻倍（本机曾同时躺着 pre-cleanup 75 GB + backup 2.9 GB + 冷备份三份）。
+    """
+    from dirtidy.cursor_cleanup import prune_backups
+
+    root = tmp_path / "gs"
+    root.mkdir()
+    old1 = root / "CursorStateBackup-20261001-090000"
+    old2 = root / "CursorStateBackup-20261015-090000"
+    current = root / "CursorStateBackup-20261023-090000"
+    for d in (old1, old2, current):
+        d.mkdir()
+        (d / "state.vscdb").write_bytes(b"x")
+    # 名字不合规范的目录（用户手工放的）必须原样留下
+    handmade = root / "my-notes"
+    handmade.mkdir()
+
+    removed = prune_backups(root, keep=1, current=current)
+    assert {p.name for p in removed} == {old1.name, old2.name}, f"回收错了：{removed}"
+    assert current.exists(), "本次备份被自己回收了"
+    assert handmade.exists(), "名字不合规范的目录被误删了"
+
+
+def test_clean_reclaims_the_replaced_old_library(mini_db: Path, tmp_path: Path) -> None:
+    """VACUUM 替换成功后，中转旧库 `pre-cleanup` 必须被回收。
+
+    它只是两步 `os.replace` 之间的崩溃安全垫；新库校验通过并就位后，完整原库
+    已在冷备份目录里，再留着它就是无意义的双份（本机 75 GB × 2 的由来）。
+    """
+    bk = tmp_path / "bk"
+    report = clean(mini_db, days=90, vacuum=True, blob_pause=0, backup_dir=bk)
+    assert report.vacuumed, "VACUUM 没执行"
+    old_path = mini_db.with_name("state.vscdb.pre-cleanup")
+    assert not old_path.exists(), "替换成功后中转旧库仍在，磁盘双倍占用"
+    # 冷备份里必须有完整原库——这是回收中转旧库的前提
+    assert (bk / mini_db.name).exists(), "冷备份里没有原库，却把中转旧库删了"
+
+
+def test_schedule_never_deletes_blobs(
+    mini_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """定期调度器**签名里就没有删 blob 的口子**——无人值守场景高危动作必须不可达。
+
+    这不是靠默认值约定（默认值能被传参覆盖），是靠 `run_cursor_cleanup_schedule`
+    内部硬编码 `include_blob=False` 调 `clean()`。
+    """
+    import dirtidy.cursor_cleanup as cc
+
+    seen: dict[str, object] = {}
+
+    def fake_clean(db, **kwargs):
+        seen.update(kwargs)
+        return cc.CleanupReport(mode="clean", db=str(db))
+
+    monkeypatch.setattr(cc, "cursor_running", lambda: False)
+    monkeypatch.setattr(cc, "clean", fake_clean)
+    n = cc.run_cursor_cleanup_schedule(
+        mini_db, interval_hours=0.0001, max_rounds=1, notify_enabled=False, _sleep=lambda _s: None
+    )
+    assert n == 1, "Cursor 退出时应该执行清理"
+    assert seen.get("include_blob") is False, f"调度器传了 include_blob={seen.get('include_blob')}"
+
+
+def test_schedule_skips_while_cursor_runs(
+    mini_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cursor 在跑时定期清理必须整轮跳过，绝不写库。"""
+    import dirtidy.cursor_cleanup as cc
+
+    called = {"n": 0}
+
+    def boom(*_a, **_k):
+        called["n"] += 1
+        raise AssertionError("Cursor 在跑时不该调用 clean()")
+
+    monkeypatch.setattr(cc, "cursor_running", lambda: True)
+    monkeypatch.setattr(cc, "clean", boom)
+    n = cc.run_cursor_cleanup_schedule(
+        mini_db, interval_hours=0.0001, max_rounds=2, notify_enabled=False, _sleep=lambda _s: None
+    )
+    assert n == 0, "Cursor 在跑时不该有任何一轮执行"
+    assert called["n"] == 0
+
+
+def test_cli_schedule_refuses_delete_blobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLI 定期模式混用 --delete-blobs 必须直接拒绝（退出码 2），且不碰库。"""
+    import dirtidy.cursor_cleanup as cc
+    from dirtidy.cli import main
+
+    monkeypatch.setattr(cc, "cursor_running", lambda: False)
+    db = tmp_path / "state.vscdb"
+    _make_db(db)
+    rc = main(
+        [
+            "cursor-cleanup",
+            "--db", str(db),
+            "--schedule-hours", "24",
+            "--delete-blobs",
+        ]
+    )
+    assert rc == 2, f"定期模式允许了 --delete-blobs（rc={rc}）"
