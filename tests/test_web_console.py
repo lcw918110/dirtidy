@@ -225,6 +225,41 @@ def test_web_analyze_mock_writes_suggestions(client: TestClient, workspace: Path
     assert (run_dir(workspace, run_id) / "ai_suggestions.json").exists()
 
 
+def test_analyze_scope_sends_only_leftover_candidates(
+    client: TestClient, workspace: Path
+) -> None:
+    """模型分析默认只送「规则处理完仍未表态」的候选。
+
+    已表态（decisions.json 有记录）与已隔离的路径不再外发：那些是用户或规则已经
+    处理完的部分，再发出去既浪费外发额度，也会诱导用户推翻自己的判断。
+    """
+    run_id = client.post("/api/scan", json={"quick": True}).json()["run_id"]
+    rdir = run_dir(workspace, run_id)
+    candidates = {p for c in read_json(rdir / "candidates.json") for p in c.get("paths") or []}
+    assert candidates, "夹具应产出候选"
+
+    preview = client.get(f"/api/runs/{run_id}/analyze/preview").json()
+    assert preview["leftover"] == len(candidates)
+    assert preview["decided"] == 0
+    assert preview["will_analyze"] <= preview["max_targets"]
+
+    decided = sorted(candidates)[0]
+    client.put(
+        f"/api/runs/{run_id}/decisions",
+        json={"decisions": [{"path": decided, "action": "keep"}]},
+    )
+    after = client.get(f"/api/runs/{run_id}/analyze/preview").json()
+    assert after["decided"] == 1
+    assert after["leftover"] == len(candidates) - 1
+
+    resp = client.post(f"/api/runs/{run_id}/analyze", json={"mock": True})
+    assert resp.status_code == 200
+    assert resp.json()["scope"] == "paths"
+    sent = {s["path"] for s in read_json(rdir / "ai_suggestions.json")}
+    assert decided not in sent
+    assert sent and sent <= candidates
+
+
 # -------------------------------- 隔离区 --------------------------------
 
 
@@ -577,6 +612,38 @@ def test_web_decisions_preview_uses_body_without_saving(
     assert not (workspace / "archive").exists()
 
 
+def test_decisions_api_rejects_unknown_action_and_extra_fields(
+    client: TestClient, workspace: Path
+) -> None:
+    """决策输入写错时给 422，不是 500，也不能静默存进去。
+
+    以前 `Decision(**d)` 对未知动作不校验（照样存盘，执行时从 if 链里掉出去、
+    静默消失），对多余字段抛 TypeError（FastAPI 包成 500）。两种都让用户拿不到
+    可读的错——批量提交时尤其难发现是哪一条不对。
+    """
+    run_id = client.post("/api/scan", json={"quick": True}).json()["run_id"]
+    url = f"/api/runs/{run_id}/decisions"
+
+    bad_action = client.put(url, json={"decisions": [{"path": "zero.txt", "action": "quarantin"}]})
+    assert bad_action.status_code == 422, bad_action.text
+
+    extra_field = client.put(
+        url, json={"decisions": [{"path": "zero.txt", "action": "keep", "target": "x"}]}
+    )
+    assert extra_field.status_code == 422, extra_field.text
+
+    preview = client.post(
+        f"/api/runs/{run_id}/apply-decisions",
+        json={"dry_run": True, "decisions": [{"path": "zero.txt", "action": "delete"}]},
+    )
+    assert preview.status_code == 422, preview.text
+
+    ok = client.put(url, json={"decisions": [{"path": "zero.txt", "action": "keep"}]})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["saved"] == 1
+    assert (run_dir(workspace, run_id) / "decisions.json").exists()
+
+
 def test_quarantine_planning_requires_explicit_protection_guard(workspace: Path) -> None:
     from dirtidy.quarantine.store import plan_quarantine
 
@@ -727,7 +794,7 @@ def test_review_does_not_prefill_decision_from_ai_suggestion() -> None:
 
     现在默认恒为 `keep`，采纳建议走显式的「采纳全部建议」按钮。
     """
-    body = _js_function("renderReview")
+    body = _js_function("renderCandidates")
     assert "sel.value = d.action;" in body, "决策下拉必须只认 decisions（默认 keep）"
     assert '? "quarantine" : "keep"' not in body, "渲染时不得按模型建议预填决策"
     assert "sug.suggested_path" not in body, "渲染时不得按模型建议预填归档路径"

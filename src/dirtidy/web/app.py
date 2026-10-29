@@ -12,15 +12,15 @@ from __future__ import annotations
 import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from dirtidy.advice import ADVICE_HINTS, ADVICE_LABELS, ADVICE_ORDER, describe
-from dirtidy.ai.providers import analyze_run
+from dirtidy.ai.providers import analyze_run, leftover_targets
 from dirtidy.decision.store import apply_decisions, save_decisions
 from dirtidy.explain import explain_path
 from dirtidy.models import (
@@ -58,8 +58,37 @@ from dirtidy.settings import (
 from dirtidy.watch import WATCH_DEFAULT_TIMEOUT, run_watch
 
 
+class DecisionBody(BaseModel):
+    """单条决策。字段与 `Decision` 一一对应，动作限定在白名单内。
+
+    多余字段直接 422：`Decision(**d)` 对未知字段抛 TypeError，会被 FastAPI 包成
+    500 —— 用户看到「服务器错误」，其实只是多传了个字段。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1)
+    action: Literal["keep", "quarantine", "archive"]
+    target_relpath: str | None = None
+    note: str = ""
+
+
+def _as_decisions(items: list[DecisionBody] | None) -> list[Decision] | None:
+    if items is None:
+        return None
+    return [
+        Decision(
+            path=d.path,
+            action=d.action,
+            target_relpath=d.target_relpath,
+            note=d.note,
+        )
+        for d in items
+    ]
+
+
 class DecisionsBody(BaseModel):
-    decisions: list[dict] = Field(default_factory=list)
+    decisions: list[DecisionBody] = Field(default_factory=list)
 
 
 class ApplyRulesBody(BaseModel):
@@ -85,7 +114,7 @@ class ApplyDecisionsBody(BaseModel):
     `dry_run=True` 只校验并报告，不移动任何文件。
     """
 
-    decisions: list[dict] | None = None
+    decisions: list[DecisionBody] | None = None
     dry_run: bool = False
 
 
@@ -105,9 +134,13 @@ class EntryIdsBody(BaseModel):
 
 
 class AnalyzeBody(BaseModel):
-    """模型分析。mock 只用于离线演示/排查，界面上不暴露给终端用户。"""
+    """模型分析。mock 只用于离线演示/排查，界面上不暴露给终端用户。
+
+    `scope`：`leftover`（默认，只分析规则处理完剩下的候选）/ `all`（旧的全量口径）。
+    """
 
     mock: bool = False
+    scope: str = "leftover"
 
 
 class SettingsBody(BaseModel):
@@ -209,11 +242,11 @@ MAX_SIZE_ENTRIES = 300
 BUILTIN_CANDIDATE_META: dict[str, dict[str, str]] = {
     "duplicate_content": {
         "label": "重复文件",
-        "recover": "保留任意一份即可，其余删掉不影响",
+        "recover": "内容相同不代表用途相同；先确认要保留的路径和引用，再决定是否隔离其他副本",
     },
     "archive_hash_match": {
         "label": "已解压的压缩包",
-        "recover": "磁盘文件与压缩包里的成员逐字节相同，压缩包留着就行",
+        "recover": "匹配不代表可替代正在使用的路径；先核对压缩包内容与使用情况",
     },
 }
 
@@ -224,6 +257,7 @@ def _attach_advice(
     root: Path,
     rules: dict[str, dict[str, Any]],
     purge_ids: set[str],
+    size_cache: dict[str, int] | None = None,
 ) -> None:
     """给命中项 / 候选补上「这是什么、建议怎么办、动了会怎样、删了怎么恢复」。
 
@@ -240,6 +274,8 @@ def _attach_advice(
     条目太多时不算（`-1`），避免一个几千项的 run 把页面拖死。
     """
     too_many = len(entries) > MAX_SIZE_ENTRIES
+    if size_cache is None:
+        size_cache = {}
     for e in entries:
         if not isinstance(e, dict):
             continue
@@ -266,7 +302,7 @@ def _attach_advice(
         if too_many:
             e["size_bytes"] = -1
         else:
-            sizes = _entry_sizes(root, e)
+            sizes = _entry_sizes(root, e, size_cache)
             e["size_bytes"] = sum(sizes.values())
             # 重复组（候选带 paths 列表）额外给出逐份大小：界面要说清
             # 「保留一份、其余可释放多少」，光有合计只能靠猜。
@@ -288,7 +324,7 @@ def _attach_rule_label(entries: list[Any], rules: dict[str, dict[str, Any]]) -> 
         e["rule_label"] = str(rule.get("label") or "")
 
 
-def _entry_sizes(root: Path, entry: dict[str, Any]) -> dict[str, int]:
+def _entry_sizes(root: Path, entry: dict[str, Any], cache: dict[str, int] | None = None) -> dict[str, int]:
     """每条路径各占多少字节（目录算整棵子树）。
 
     返回逐路径的映射而不是一个总数：重复组要回答「保留一份，其余能释放多少」，
@@ -301,6 +337,9 @@ def _entry_sizes(root: Path, entry: dict[str, Any]) -> dict[str, int]:
         rels.append(str(p))
     out: dict[str, int] = {}
     for rel in rels:
+        if cache is not None and rel in cache:
+            out[rel] = cache[rel]
+            continue
         try:
             target = root / rel
             if target.exists():
@@ -308,6 +347,8 @@ def _entry_sizes(root: Path, entry: dict[str, Any]) -> dict[str, int]:
         except OSError:
             # 没权限 / 读一半消失：算 0，不让一条坏路径拖垮整个列表。
             out[rel] = 0
+        if cache is not None and rel in out:
+            cache[rel] = out[rel]
     return out
 
 
@@ -527,10 +568,13 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
         raw_meta = out.get("meta")
         meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
         rules, purge_ids = _rule_context(str(meta.get("rules") or "default"), default_root)
+        # 请求内复用相同路径的统计，下一次请求仍重新计算，避免长期缓存过期。
+        size_cache: dict[str, int] = {}
         for key in ("pending_auto_hits", "candidates"):
             if isinstance(out.get(key), list):
                 _attach_advice(
-                    out[key], root=default_root, rules=rules, purge_ids=purge_ids
+                    out[key], root=default_root, rules=rules, purge_ids=purge_ids,
+                    size_cache=size_cache,
                 )
         for key in ("quarantine_manifest", "purged_directly"):
             if isinstance(out.get(key), list):
@@ -541,7 +585,7 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
     @app.put("/api/runs/{run_id}/decisions")
     def put_decisions(run_id: str, body: DecisionsBody) -> dict:
         rdir = _run_path(run_id)
-        decisions = [Decision(**d) for d in body.decisions]
+        decisions = _as_decisions(body.decisions) or []
         save_decisions(rdir, decisions)
         return {"saved": len(decisions)}
 
@@ -559,7 +603,7 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
         opts = body or ApplyDecisionsBody()
         return apply_decisions(
             default_root, run_id, rdir, qdir, dry_run=opts.dry_run,
-            decisions=None if opts.decisions is None else [Decision(**d) for d in opts.decisions],
+            decisions=_as_decisions(opts.decisions),
         )
 
     @app.post("/api/runs/{run_id}/apply-rules")
@@ -667,15 +711,51 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
                     running=False, phase="", done=0, total=0, started_at=""
                 )
 
+    @app.get("/api/runs/{run_id}/analyze/preview")
+    def get_analyze_preview(run_id: str) -> dict:
+        """模型分析之前，先说清「要分析哪些、多少项、会不会截断」。
+
+        模型是规则处理完之后的补充手段：默认只分析**本轮候选里还没表态、文件还在**
+        的遗留项。扫描到的整棵树、已决定保留或已搬走的路径都不再送出去。
+        """
+        rdir = _run_path(run_id)
+        info = leftover_targets(rdir)
+        max_targets = int(DEFAULT_SUMMARY["max_targets"])
+        try:
+            summary = (load_model_settings(default_root) or {}).get("summary") or {}
+            max_targets = int(summary.get("max_targets") or max_targets)
+        except Exception:  # noqa: BLE001 - 配置坏了就退回默认上限，不因此让预览 500
+            max_targets = int(DEFAULT_SUMMARY["max_targets"])
+        leftover = len(info["paths"])
+        configured = model_settings_path(default_root)
+        return {
+            "enabled": load_use_model(default_root),
+            "configured": configured.exists(),
+            "candidates": info["candidates"],
+            "leftover": leftover,
+            "decided": info["decided"],
+            "removed": info["removed"],
+            "max_targets": max_targets,
+            "will_analyze": min(leftover, max_targets),
+            "truncated": leftover > max_targets,
+            "sample": info["paths"][:10],
+        }
+
     @app.post("/api/runs/{run_id}/analyze")
     def post_analyze(run_id: str, body: AnalyzeBody | None = None) -> dict:
         """对某次 run 跑模型分析。
 
         界面上不暴露 mock（它是固定占位值的桩，输出等于「全都交人工」）；
         这里保留 `mock` 参数只是为了脚本化演示与排查管道。
+
+        `scope` 默认 `leftover`：只分析 `leftover_targets` 那批遗留项。
+        `all` 保留旧的全量口径，只给脚本化排查用，界面上不提供。
         """
         rdir = _run_path(run_id)
         use_mock = bool(body and body.mock)
+        scope = (body.scope if body else "") or "leftover"
+        if scope not in {"leftover", "all"}:
+            raise HTTPException(400, f"未知的分析范围：{scope}")
         cfg_path: Path | None = None
         if not use_mock:
             if not load_use_model(default_root):
@@ -686,8 +766,19 @@ def create_app(*, default_root: Path, default_run_id: str | None = None) -> Fast
             if not configured.exists():
                 raise HTTPException(400, f"未配置模型：请先在「设置」页保存配置（{configured}）")
             cfg_path = configured
+        targets: list[str] | None = None
+        if scope == "leftover":
+            targets = leftover_targets(rdir)["paths"]
+            if not targets:
+                raise HTTPException(
+                    400,
+                    "本轮没有遗留项可分析：候选都已表态，或已被隔离/直删。"
+                    "如需重新判断，先清掉对应决策再试。",
+                )
         try:
-            results = analyze_run(default_root, rdir, config_path=cfg_path, mock=use_mock)
+            results = analyze_run(
+                default_root, rdir, config_path=cfg_path, mock=use_mock, paths=targets
+            )
         except (RuntimeError, FileNotFoundError) as e:
             raise HTTPException(400, str(e)) from e
         except Exception as e:  # noqa: BLE001 - 网络/模型侧异常统一转成可读的 502

@@ -241,8 +241,13 @@ def test_apply_decisions_dry_run_reports_protected_block(tmp_path: Path) -> None
     assert (root / ".env").exists()
 
 
-def test_apply_decisions_archive_still_allowed_for_protected(tmp_path: Path) -> None:
-    """`archive` 不拦：它是显式指定目标的归类，文件仍在根内可找回，与「清理」语义不冲突。"""
+def test_apply_decisions_archive_is_blocked_for_protected(tmp_path: Path) -> None:
+    """`archive` 同样受保护清单约束（2026-10-29 变更，[T-18](../../docs/06-已知缺口与后续.md)）。
+
+    归档不删数据，但同样让文件离开原位：`.env` 被挪进 `archive/` 后应用读不到配置，
+    `.git` 被挪走后版本历史「不见了」。人工 quarantine 一直有复核，归档却放行，
+    等于留下一条绕过口——重复组里就可能混进受保护文件，一次「批量归档」就带走。
+    """
     root, _ = _ws(tmp_path)
     (root / "README.md").write_text("docs", encoding="utf-8")
     meta = create_run(root, rules="default", quick=True, apply=False)
@@ -253,9 +258,11 @@ def test_apply_decisions_archive_still_allowed_for_protected(tmp_path: Path) -> 
     )
     res = apply_decisions(root, meta["run_id"], rdir, quarantine_root(root, meta["run_id"]))
 
-    assert res["archived"] == 1
-    assert res["blocked_by_protect"] == 0
-    assert (root / "docs" / "README.md").exists()
+    assert res["archived"] == 0
+    assert res["blocked_by_protect"] == 1
+    assert (root / "README.md").exists()
+    assert not (root / "docs" / "README.md").exists()
+    assert any(s["path"] == "README.md" for s in res["skipped"])
 
 
 def test_empty_files_are_not_duplicate_group(tmp_path: Path) -> None:

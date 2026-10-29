@@ -1,0 +1,339 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>dirtidy 使用手册</title><style>body{margin:0;background:#f5f6f8;color:#242b36;font:16px/1.85 -apple-system,BlinkMacSystemFont,Arial,sans-serif}main{max-width:880px;margin:32px auto;background:white;padding:36px 52px;border:1px solid #e3e6eb;border-radius:12px}h1{font-size:30px}h2{font-size:24px;margin-top:48px;border-bottom:1px solid #e6e8ed;padding-bottom:10px}h3{font-size:19px;margin-top:30px}a{color:#245da8}pre{background:#f2f4f7;padding:16px 20px;border-radius:7px;overflow:auto;line-height:1.6}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88em}table{border-collapse:collapse;width:100%;font-size:14px;display:block;overflow:auto}th,td{padding:10px 12px;border:1px solid #dfe3e9;text-align:left;vertical-align:top}th{background:#f2f4f7}strong{font-weight:650}li{margin:6px 0}@media(max-width:700px){main{margin:0;padding:20px;border:0;border-radius:0}h1{font-size:26px}}@media print{body{background:white}main{border:0;margin:0;padding:0;max-width:none}pre,table{break-inside:avoid}}</style></head><body><main><h1>dirtidy 使用手册</h1>
+<p>先用一个可恢复的测试目录走完「扫描 → 审阅 → 执行 → 还原」，确认符合预期后，再处理实际目录。首次使用读第 1 节即可；Cursor 状态库清理单独见第 2.4 节，完整参数放在第 3 节供查阅。</p>
+<h2>1. 第一次使用：扫描、确认、还原</h2>
+<p>dirtidy 是单机、单用户的目录整理工具。规则找出可隔离项，模型可辅助分析剩余候选，最后由你决定是否执行。不接模型也能完成整个目录整理流程。</p>
+<h3>1.1 安装并检查</h3>
+<p>在仓库目录打开终端，需要 Python 3.11 或更高版本：</p>
+<pre><code class="language-bash">python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+source .venv/bin/activate
+dirtidy --version
+</code></pre>
+<p>能看到版本号后再继续。以下命令都假设虚拟环境已激活；否则将 <code>dirtidy</code> 换为 <code>.venv/bin/dirtidy</code>。Windows 的激活命令为 <code>.venv\Scripts\Activate.ps1</code>，可执行文件为 <code>.venv\Scripts\dirtidy.exe</code>。</p>
+<h3>1.2 打开测试目录</h3>
+<p>把 <code>/path/to/root</code> 换成你的测试目录绝对路径，路径含空格时加双引号。</p>
+<pre><code class="language-bash">dirtidy start /path/to/root
+</code></pre>
+<p>首次运行会扫描目录并打开本地网页，<strong>不会搬动待整理文件</strong>。扫描记录写入目标目录的 <code>.dirtidy/</code>。已有扫描结果时直接打开网页；要重扫可运行：</p>
+<pre><code class="language-bash">dirtidy start /path/to/root --rescan
+</code></pre>
+<p>网页打开后，先核对目标目录是否正确，再查看本轮扫描结果。一次扫描称为一个 <strong>run</strong>；页面上显示的完整 <code>run_id</code> 用于后面的命令行操作。</p>
+<h3>1.3 审阅：确定哪些不动</h3>
+<p>进入「审阅」页，按下面顺序看：</p>
+<ol>
+<li><strong>待自动隔离</strong>：这些是规则选中的项目，还没有搬走。看路径、占用和「删了怎么办」，不想动的勾选「保留」。</li>
+<li><strong>候选 / 建议</strong>：重复文件、归档残留和其他待判断项。默认保留不动；你可以逐条选择保留、隔离或归档。模型建议不会自行生效。</li>
+<li><strong>受保护清单</strong>：检查需要保留的凭据、版本控制目录等是否在列。对某条不理解，点路径旁的「为什么？」。</li>
+</ol>
+<p><strong>筛选和分页只影响显示，不缩小执行范围。</strong> 待自动隔离列表每页最多显示 100 项，执行仍按全部命中计算；不处理的项目必须明确设为保留。待自动隔离的全选保留作用于全部命中；候选表的全选只选择当前页，跨页已选项目会保留。批量勾选和采纳建议只改变选择，不搬文件。</p>
+<h3>1.4 执行：先预览，再确认</h3>
+<p>进入「执行」页，核对规则隔离与候选决策各自的清单，先点预览，再确认执行。预览中应能看到实际将搬移、保留或被保护拦下的项目。</p>
+<table>
+<thead>
+<tr>
+<th>选择</th>
+<th>执行后的位置</th>
+<th>能否在工具内还原</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>保留</td>
+<td>原位置</td>
+<td>无需还原</td>
+</tr>
+<tr>
+<td>隔离</td>
+<td><code>.dirtidy/quarantine/&lt;run_id&gt;/</code></td>
+<td>可以，前提是隔离副本仍在</td>
+</tr>
+<tr>
+<td>归档</td>
+<td>你指定的根目录内相对路径</td>
+<td>不通过隔离区还原；到归档位置找回</td>
+</tr>
+<tr>
+<td>彻底删除 / 已开启的直删规则</td>
+<td>文件物理删除</td>
+<td>不可以</td>
+</tr>
+</tbody>
+</table>
+<p>首次验证请保持「规则」页的直删开关关闭。默认没有开启直删；若以前开过，后续网页和命令行执行都会沿用该设置。</p>
+<p>执行后检查：原位置的目标已移走，「隔离区」出现对应记录；勾选保留的项目仍在原处。隔离只是换位置，<strong>不会释放这份文件占用的空间</strong>。</p>
+<h3>1.5 还原：验证能回到原位</h3>
+<p>进入「隔离区」，选一条刚隔离的记录点「还原」，核对文件回到原路径且内容可打开。原路径已存在同名文件时，程序跳过，不覆盖。</p>
+<p>手动验证到这里就可以结束。只有确定隔离副本不再需要时，才使用「彻底删除」释放空间；不要把它当成验证流程的必做步骤。</p>
+<p>关闭服务：在启动它的终端按 <code>Ctrl-C</code>；启用了托盘时也可从托盘退出。只关闭浏览器页面不会停止服务。</p>
+<h2>2. 按需要完成其他任务</h2>
+<h3>2.1 不开网页，直接用命令行</h3>
+<p>下面每一步单独执行。<code>&lt;run_id&gt;</code> 要替换为扫描输出的实际值，不能原样输入尖括号占位符。</p>
+<p>先扫描，再解释某个相对路径：</p>
+<pre><code class="language-bash">dirtidy scan /path/to/root
+dirtidy explain /path/to/root node_modules
+</code></pre>
+<p>扫描会生成 run 记录，不移动待整理文件。解释命令显示保护、规则及条件的判定。额外保护路径可在扫描时指定，例如 <code>--protect keep</code>；切换规则包时，解释也要使用同一个 <code>--rules</code>。</p>
+<p>预览规则隔离，并保留指定项目：</p>
+<pre><code class="language-bash">dirtidy apply-rules /path/to/root &lt;run_id&gt; --dry-run --keep logs/keep-me.log
+</code></pre>
+<p>确认清单后，去掉 <code>--dry-run</code>，保留相同的 <code>--keep</code> 参数：</p>
+<pre><code class="language-bash">dirtidy apply-rules /path/to/root &lt;run_id&gt; --keep logs/keep-me.log
+</code></pre>
+<p><code>apply-rules</code> 不加 <code>--dry-run</code> 就会执行，不需要另加 <code>--apply</code>。它也会读取此前开启的直删设置，执行前应在网页「规则」页核对。</p>
+<p>候选决策可以在网页保存，也可准备一个 JSON 数组文件，例如：</p>
+<pre><code class="language-json">[
+  {&quot;path&quot;: &quot;notes.txt&quot;, &quot;action&quot;: &quot;keep&quot;},
+  {&quot;path&quot;: &quot;old-copy.txt&quot;, &quot;action&quot;: &quot;quarantine&quot;},
+  {&quot;path&quot;: &quot;report.pdf&quot;, &quot;action&quot;: &quot;archive&quot;, &quot;target_relpath&quot;: &quot;archive/report.pdf&quot;}
+]
+</code></pre>
+<p>将文件路径传给保存命令，再预览、执行：</p>
+<pre><code class="language-bash">dirtidy save-decisions /path/to/root &lt;run_id&gt; decisions.json
+dirtidy apply-decisions /path/to/root &lt;run_id&gt; --dry-run
+dirtidy apply-decisions /path/to/root &lt;run_id&gt;
+</code></pre>
+<p>还原本轮全部隔离项：</p>
+<pre><code class="language-bash">dirtidy quarantine-restore /path/to/root &lt;run_id&gt; --all
+</code></pre>
+<p>不可恢复的操作单独列在这里：下面命令会彻底删除<strong>指定 run</strong> 的隔离副本，确认不再需要后才使用。</p>
+<pre><code class="language-bash">dirtidy purge-quarantine /path/to/root &lt;run_id&gt; --yes
+</code></pre>
+<h3>2.2 让模型辅助判断候选</h3>
+<p>模型分析可选，输出只是建议。网页「设置」页开启模型分析，填入 provider、地址、模型与密钥环境变量名，再到「审阅」页运行分析。</p>
+<p>密钥建议放在环境变量中。若直接在网页密钥框填入密钥，它会以明文保存到状态目录的 <code>models.yaml</code>；密钥框留空表示保持已有值。</p>
+<p>命令行使用时，从仓库示例复制配置并填写：</p>
+<pre><code class="language-bash">cp src/dirtidy/configs/models.example.yaml models.yaml
+dirtidy analyze /path/to/root &lt;run_id&gt; --config models.yaml
+</code></pre>
+<p>真实调用需要有效的模型配置和相应密钥。默认不发送文件正文，但摘要中的路径等信息仍可能外发；处理敏感内容前检查配置。正文发送由 <code>allow_external_content</code> 或 <code>allow_ollama_full_content</code> 显式开启。</p>
+<p>没有模型时，可以只验证分析流程：</p>
+<pre><code class="language-bash">dirtidy analyze /path/to/root &lt;run_id&gt; --mock
+</code></pre>
+<p><code>--mock</code> 不读模型配置、不联网，返回固定的待人工判断建议，<strong>不能用来评价模型效果或决定删除</strong>。</p>
+<h3>2.3 定时查看新增命中</h3>
+<pre><code class="language-bash">dirtidy watch /path/to/root --interval 30
+</code></pre>
+<p>每隔 30 分钟扫描并报告变化，<strong>不执行隔离</strong>。默认跳过内容 hash，每轮最多运行 1800 秒；超时跳过本轮，下一轮继续。按 <code>Ctrl-C</code> 停止，也可在网页「监视」页启停。</p>
+<h3>2.4 清理 Cursor 的旧会话</h3>
+<p>这是独立的数据库清理命令，<strong>不走目录隔离区</strong>，也不需要先运行 <code>scan</code>。它删除选中的历史会话，删除后相应历史会丢失。首次验证建议通过 <code>--db</code> 指向独立的测试库副本。</p>
+<p>先完全退出 Cursor，再预览超过 90 天的会话候选：</p>
+<pre><code class="language-bash">dirtidy cursor-cleanup --days 90 --measure
+</code></pre>
+<p>检查输出的数据库路径、候选数量与时间窗口。<code>--measure</code> 估算的是候选行字节数，不等于最终释放空间。</p>
+<p>决定删除这些历史后才执行：</p>
+<pre><code class="language-bash">dirtidy cursor-cleanup --days 90 --apply
+</code></pre>
+<p>需要记住的边界：</p>
+<ul>
+<li><code>--days 90</code> 仅选择有时间证据且明确超过 90 天的会话。header 旧但正文近期的保留；孤儿会话的时间未知或近期的保留。</li>
+<li>共享 blob 全部保留。<code>--delete-blobs</code> 只用于兼容的只读候选统计，执行模式一律拒绝，确认口令不能放行。</li>
+<li>不清理用户设置表 <code>ItemTable</code>，不碰 <code>agent-transcripts</code>、<code>chats</code>、Chromium <code>blob_storage</code> 或 IndexedDB。</li>
+<li>Cursor 正在运行，或无法判断其是否运行时，拒绝执行。</li>
+</ul>
+<p>执行前会冷备份，默认位于库旁的 <code>CursorStateBackup-&lt;时间戳&gt;/</code>。默认压缩数据库并校验，成功后按 <code>--keep-backups</code> 保留最近的冷备份（默认 1 份），旧备份可能被回收。请预留备份和压缩所需空间，当前没有磁盘空间预检。</p>
+<p>完成后重新打开 Cursor，手动核对近期会话能否打开、设置是否正常。这项检查不能由数据库结构校验代替；自动化测试也不等于在你当前 Cursor 版本上完成了真实恢复验证。</p>
+<p><code>--schedule-hours H</code> 是可选的定时轮询模式：不需要另加 <code>--apply</code>，检测到 Cursor 未运行时会实际清理。首次验证不要开启它。</p>
+<h2>3. 按需查阅</h2>
+<h3>3.1 常见问题</h3>
+<table>
+<thead>
+<tr>
+<th>遇到的情况</th>
+<th>怎么处理</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dirtidy: command not found</code></td>
+<td>激活虚拟环境，或用 <code>.venv/bin/dirtidy</code></td>
+</tr>
+<tr>
+<td>网页没有打开</td>
+<td>查看终端给出的地址；确认服务仍运行。<code>serve</code> 只起服务，不自动打开浏览器</td>
+</tr>
+<tr>
+<td>界面仍是上一次的结果</td>
+<td>确认所选 run；在扫描页新建扫描，或用 <code>start --rescan</code></td>
+</tr>
+<tr>
+<td>扫描超时</td>
+<td>本轮结果不完整且未执行隔离；调大 <code>--timeout</code> 或设为 0 后重扫</td>
+</tr>
+<tr>
+<td>想动的目录被保护拦下</td>
+<td>点「为什么？」或用 <code>explain</code> 检查原因；内置保护不能关闭，<code>--protect</code> 只能增加保护</td>
+</tr>
+<tr>
+<td>还原后没有覆盖原文件</td>
+<td>原位置已有同名文件时会跳过；先检查原文件与隔离副本，不要直接覆盖</td>
+</tr>
+<tr>
+<td>隔离后可用空间没增加</td>
+<td>隔离副本仍占空间，确认不需要后彻底删除才释放</td>
+</tr>
+<tr>
+<td>模型调用失败</td>
+<td>核对配置、密钥环境变量与网络；<code>--mock</code> 只能检查管道是否可运行</td>
+</tr>
+<tr>
+<td>Cursor 清理被拒绝</td>
+<td>完全退出 Cursor；不要绕过进程检查，也不要尝试用旧口令授权 blob 删除</td>
+</tr>
+</tbody>
+</table>
+<p>同一目标目录不要同时运行多个 dirtidy 进程。当前没有根目录级单实例锁；强制杀进程或内存耗尽时，最后搬移的记录可能来不及写入清单。其他限制见 <a href="../docs/06-已知缺口与后续.md">已知缺口</a>。</p>
+<h3>3.2 命令一览</h3>
+<p>表中列出完整选项，按需使用，不必逐条执行。方括号表示可省略的位置参数；默认 root 是当前目录。</p>
+<table>
+<thead>
+<tr>
+<th>命令</th>
+<th>用途</th>
+<th>选项与默认值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>start [root]</code></td>
+<td>必要时扫描，再起服务并打开网页</td>
+<td><code>--rules</code>（default）<code>--quick</code> <code>--workers</code>（4）<code>--rescan</code> <code>--timeout</code>（0 秒，不限）<code>--protect</code> <code>--host</code>（127.0.0.1）<code>--port</code>（8765）<code>--no-browser</code> <code>--no-tray</code></td>
+</tr>
+<tr>
+<td><code>scan &lt;root&gt;</code></td>
+<td>扫描并保存 run；默认不搬文件</td>
+<td><code>--rules</code>（default）<code>--quick</code> <code>--apply</code>（扫描后立即执行，跳过审阅）<code>--workers</code>（4）<code>--timeout</code>（0 秒）<code>--protect</code> <code>--dry-run</code></td>
+</tr>
+<tr>
+<td><code>explain &lt;root&gt; &lt;path&gt;</code></td>
+<td>解释相对路径的判定</td>
+<td><code>--rules</code>（default）<code>--protect</code> <code>--json</code></td>
+</tr>
+<tr>
+<td><code>apply-rules &lt;root&gt; &lt;run_id&gt;</code></td>
+<td>执行规则隔离</td>
+<td><code>--dry-run</code>（只预览）<code>--keep</code>（可重复）</td>
+</tr>
+<tr>
+<td><code>analyze &lt;root&gt; &lt;run_id&gt;</code></td>
+<td>生成模型建议</td>
+<td><code>--config</code> <code>--mock</code></td>
+</tr>
+<tr>
+<td><code>save-decisions &lt;root&gt; &lt;run_id&gt; &lt;file&gt;</code></td>
+<td>保存 JSON 决策数组</td>
+<td>无</td>
+</tr>
+<tr>
+<td><code>apply-decisions &lt;root&gt; &lt;run_id&gt;</code></td>
+<td>执行已保存的候选决策</td>
+<td><code>--dry-run</code></td>
+</tr>
+<tr>
+<td><code>quarantine-restore &lt;root&gt; &lt;run_id&gt;</code></td>
+<td>还原隔离项</td>
+<td><code>--all</code> <code>--id</code>（可重复）</td>
+</tr>
+<tr>
+<td><code>purge-quarantine &lt;root&gt; &lt;run_id&gt;</code></td>
+<td>彻底删除该轮隔离副本</td>
+<td><code>--yes</code>（必需）</td>
+</tr>
+<tr>
+<td><code>serve</code></td>
+<td>起本地服务，不自动开网页</td>
+<td><code>--root</code>（.）<code>--run-id</code> <code>--host</code>（127.0.0.1）<code>--port</code>（8765）<code>--reload</code>（仅开发用）</td>
+</tr>
+<tr>
+<td><code>desktop [root]</code></td>
+<td>起服务并开网页，不主动扫描</td>
+<td><code>--host</code>（127.0.0.1）<code>--port</code>（8765）<code>--no-browser</code> <code>--no-tray</code></td>
+</tr>
+<tr>
+<td><code>watch [root]</code></td>
+<td>定时扫描，不搬文件</td>
+<td><code>--rules</code>（default）<code>--interval</code>（30 分钟）<code>--full</code> <code>--rounds</code>（无限）<code>--timeout</code>（1800 秒）<code>--no-notify</code> <code>--protect</code></td>
+</tr>
+<tr>
+<td><code>cursor-cleanup</code></td>
+<td>清理 Cursor 旧会话，默认只统计</td>
+<td><code>--days</code>（90）<code>--apply</code> <code>--db</code> <code>--backup-dir</code> <code>--no-orphan</code> <code>--no-vacuum</code> <code>--measure</code> <code>--keep-backups</code>（1）<code>--schedule-hours</code>（默认关闭）<code>--delete-blobs</code>（仅只读统计，执行拒绝）<code>--blob-confirm</code>（兼容，不授权删除）<code>--blob-pause</code>（兼容，3 秒）</td>
+</tr>
+</tbody>
+</table>
+<p><code>scan --dry-run</code> 不搬文件，但当前实现仍创建扫描记录；不要将它理解为整个磁盘零写入。<code>--quick</code> 跳过内容 hash 和归档对照，因而不会提供完整的重复文件与解压残留识别。</p>
+<h3>3.3 记录和配置放在哪里</h3>
+<p>默认状态目录是 <code>&lt;root&gt;/.dirtidy/</code>：</p>
+<table>
+<thead>
+<tr>
+<th>位置</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>runs/&lt;run_id&gt;/audit.md</code></td>
+<td>阅读本轮审计报告</td>
+</tr>
+<tr>
+<td><code>runs/&lt;run_id&gt;/meta.json</code></td>
+<td>根目录、时间、规则与运行状态</td>
+</tr>
+<tr>
+<td><code>runs/&lt;run_id&gt;/candidates.json</code></td>
+<td>待人工判断的候选</td>
+</tr>
+<tr>
+<td><code>runs/&lt;run_id&gt;/pending_auto_hits.json</code></td>
+<td>待执行的规则命中</td>
+</tr>
+<tr>
+<td><code>runs/&lt;run_id&gt;/quarantine_manifest.json</code></td>
+<td>隔离与还原清单</td>
+</tr>
+<tr>
+<td><code>runs/&lt;run_id&gt;/protection.json</code></td>
+<td>保护拦截和人工保留记录</td>
+</tr>
+<tr>
+<td><code>runs/&lt;run_id&gt;/errors.json</code></td>
+<td>扫描中的权限、归档等错误</td>
+</tr>
+<tr>
+<td><code>runs/&lt;run_id&gt;/decisions.json</code></td>
+<td>已保存的人工决策</td>
+</tr>
+<tr>
+<td><code>runs/&lt;run_id&gt;/ai_suggestions.json</code></td>
+<td>模型建议（运行分析后）</td>
+</tr>
+<tr>
+<td><code>runs/&lt;run_id&gt;/purged_directly.json</code></td>
+<td>已直删项目的留痕</td>
+</tr>
+<tr>
+<td><code>quarantine/&lt;run_id&gt;/</code></td>
+<td>仍可还原的隔离副本</td>
+</tr>
+<tr>
+<td><code>settings.json</code> / <code>models.yaml</code></td>
+<td>跨 run 的直删开关、模型开关与接入配置</td>
+</tr>
+<tr>
+<td><code>hash_cache.sqlite</code></td>
+<td>内容 hash 缓存</td>
+</tr>
+</tbody>
+</table>
+<p>只读介质或不希望在目标目录写状态时，用 <code>DIRTIDY_STATE_DIR</code> 指向外部可写目录；之后所有命令及服务要沿用相同设置。</p>
+<p>模型配置可由 <code>--config</code> 显式指定；CLI 未指定时按 <code>DIRTIDY_CONFIG</code>、当前目录 <code>models.yaml</code>、<code>~/.config/dirtidy/models.yaml</code> 查找。网页保存的配置位于状态目录，要在 CLI 明确使用它，可传 <code>--config /path/to/root/.dirtidy/models.yaml</code>。</p>
+<p>本地网页没有鉴权，默认监听 <code>127.0.0.1</code>，不要暴露到公网。</p>
+<h3>3.4 继续查阅</h3>
+<ul>
+<li>调整规则：<a href="../docs/04-规则包说明.md">规则包说明</a>。</li>
+<li>了解实现：<a href="../docs/03-架构设计.md">架构设计</a>。</li>
+<li>看测试覆盖与验收依据：<a href="../docs/05-测试与验收.md">测试与验收</a>。</li>
+<li>查看限制与待办：<a href="../docs/06-已知缺口与后续.md">已知缺口</a>。</li>
+<li>查 Cursor 事故证据：<a href="../docs/cursor-cleanup-integration/事故-20261022-会话无法还原.md">会话无法还原事故记录</a>。</li>
+</ul>
+<p>本手册只描述当前用法。开发经过、事故取证与测试登记分别留在对应文档，历史修改可从 Git 记录查阅。</p></main></body></html>

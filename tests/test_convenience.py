@@ -307,6 +307,37 @@ def test_sort_and_group_are_display_only() -> None:
     body = _js_function(js, "renderPending")
     assert "schedulePlanRefresh()" in body, "执行条数必须经后端全量 dry-run 核对"
     assert "currentPendingCount = all.length" not in body, "命中数不是实际执行数"
+    # 分页必须约束实际渲染循环，而不是只计算切片后仍绘制全量。
+    assert "hits.slice((pendingPage - 1) * REVIEW_PAGE_SIZE" in body
+    assert "for (const h of pageHits)" in body
+    assert "pageHits.filter(" in body
+    assert "for (const h of hits)" not in body
+    # 候选表单独渲染（翻页/勾选不该重建待隔离表，也不该重发规则 dry-run），
+    # 但分页必须真正约束渲染循环，而不是算完切片仍画全量。
+    review = _js_function(js, "renderCandidates")
+    assert "for (const path of pagePaths)" in review
+    assert "currentCandShown = pagePaths" in review
+    assert "currentCandMatching = shownPaths" in review
+    for key in ("candFilter.q", "candFilter.rule", "candFilter.ai", "candFilter.decision"):
+        assert key in review
+    for button in ("candSelectMatching", "candClearPicked", "candAdoptSelected"):
+        handler = js.split(f'getElementById("{button}").onclick = () => {{', 1)[1].split("\n};", 1)[0]
+        assert "api(" not in handler and "fetch(" not in handler
+    assert "decisions.has(path)" in js.split('getElementById("candAdoptSelected").onclick')[1].split("\n};", 1)[0]
+    assert "for (const h of all)" in js.split('getElementById("pendingAll").onchange')[1].split("};")[0]
+
+    # 重复组「其余标记隔离」只改决策：不能再 loadRun——那会从服务端重建 decisions，
+    # 把用户尚未保存的勾选（以及刚写入的这组选择）一起清掉。
+    dup = _js_function(js, "dupGroupBox")
+    assert "loadRun(" not in dup
+    assert "renderCandidates(currentRunData)" in dup
+
+    # 执行页的清单与计数必须按「候选 + 重复组 + 模型建议」的并集算。
+    # 只统计普通候选时，重复组的决策会显示成 0 项，执行按钮仍是禁用的。
+    assert "movingDecisions(data)" in _js_function(js, "renderExecute")
+    moving = _js_function(js, "movingDecisions")
+    assert "reviewedPaths(data)" in moving
+    assert "kind === \"duplicate_group\"" not in moving
 
 
 # ---------------------------- 批量勾选「保留」 ----------------------------
@@ -471,7 +502,7 @@ def test_dup_group_box_states_what_can_be_freed() -> None:
     assert "api(" not in body and "fetch(" not in body
     assert "apply-decisions" not in body
     assert "其余标记隔离" in body
-    assert "dupGroupBox(c)" in _js_function(js, "renderReview")
+    assert "dupGroupBox(c)" in _js_function(js, "renderCandidates")
 
 
 def test_dup_state_distinguishes_undecided_from_keep() -> None:

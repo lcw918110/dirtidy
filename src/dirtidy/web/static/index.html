@@ -176,6 +176,11 @@
       </thead>
       <tbody id="pendingRows"></tbody>
     </table>
+    <div class="toolbar">
+      <button id="pendingPrev" type="button" disabled>上一页</button>
+      <span id="pendingPageInfo" class="hint">第 1 / 1 页</span>
+      <button id="pendingNextPage" type="button" disabled>下一页</button>
+    </div>
     <div class="toolbar nextbar">
       <span class="hint" id="pendingNext"></span>
       <button id="gotoExecuteBtn" type="button">下一步：去执行 →</button>
@@ -190,6 +195,9 @@
     <div class="toolbar">
       <button id="adoptBtn" type="button">采纳全部建议</button>
       <input id="candSearch" type="search" placeholder="按路径筛选候选…" />
+      <label>规则类型 <select id="candRule"><option value="">全部</option></select></label>
+      <label>模型建议 <select id="candAi"><option value="">全部</option><option value="none">无模型建议</option><option value="keep">保留</option><option value="quarantine">隔离</option><option value="archive">归档</option></select></label>
+      <label>当前决策 <select id="candDecision"><option value="">全部</option><option value="keep">保留</option><option value="quarantine">隔离</option><option value="archive">归档</option></select></label>
       <span class="hint" id="candCount"></span>
       <span class="hint" id="adoptHint"></span>
     </div>
@@ -198,8 +206,10 @@
     <div class="toolbar">
       <label class="inline">
         <input id="candAll" type="checkbox" />
-        全选（当前显示）
+        全选（当前页）
       </label>
+      <button id="candSelectMatching" type="button">选择全部筛选结果（跨页）</button>
+      <button id="candClearPicked" type="button">清空已选</button>
       <span class="hint" id="candPicked">已选 0 项</span>
       <label>批量设为
         <select id="candBulkAction">
@@ -209,6 +219,7 @@
         </select>
       </label>
       <button id="candBulkBtn" type="button">应用到选中的</button>
+      <button id="candAdoptSelected" type="button">对已选项采纳模型建议</button>
       <span class="hint">只改决策，不碰文件。</span>
     </div>
     <table>
@@ -225,6 +236,11 @@
       </thead>
       <tbody id="rows"></tbody>
     </table>
+    <div class="toolbar">
+      <button id="candPrev" type="button" disabled>上一页</button>
+      <span id="candPageInfo" class="hint">第 1 / 1 页</span>
+      <button id="candNextPage" type="button" disabled>下一页</button>
+    </div>
     <div class="toolbar nextbar">
       <span class="hint" id="candNext"></span>
       <button id="gotoExecuteBtn2" type="button">下一步：去执行 →</button>
@@ -242,6 +258,11 @@
       <button id="analyzeBtn" type="button">运行模型分析</button>
       <span class="hint">模型是可选增强；需先在「设置」页启用并保存配置。</span>
     </div>
+    <p class="hint">
+      只在规则这一轮处理完之后用：默认<strong>只分析还没表态的遗留候选</strong>，
+      已保留 / 已隔离 / 已删除的项不再发送。点按钮会先给出范围（几项、是否超上限），确认后才调用模型；
+      结果只作参考，不会自动搬动或删除文件。
+    </p>
     <p class="hint" id="aiHint">未运行模型分析。</p>
     <div id="aiBox"></div>
   </section>

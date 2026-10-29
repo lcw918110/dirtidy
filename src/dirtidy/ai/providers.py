@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -282,19 +283,76 @@ def get_provider(cfg: dict[str, Any], *, mock: bool = False) -> ModelProvider:
     return OpenAICompatibleProvider(cfg.get("openai_compatible") or {})
 
 
+def leftover_targets(run_path: Path) -> dict[str, Any]:
+    """规则这一轮处理完之后，还剩哪些项值得交给模型辅助判断。
+
+    口径只有一条：**本轮候选里、用户还没表态、文件也还在的路径**。
+
+    - 已在 decisions.json 里有记录的不再送模型：用户已经做过决定（保留或搬走），
+      再补一句建议只会被当成噪音，也可能诱导用户推翻自己的判断。
+    - 已隔离 / 已直删的路径上没有文件，分析它没有意义。
+
+    模型是「规则处理完之后的补充手段」，不是扫描后把整棵树都发出去。
+    """
+    candidate_paths: list[str] = []
+    seen: set[str] = set()
+    cand_file = run_path / "candidates.json"
+    if cand_file.exists():
+        for c in read_json(cand_file):
+            if not isinstance(c, dict):
+                continue
+            for p in c.get("paths") or []:
+                p = str(p)
+                if p in seen:
+                    continue
+                seen.add(p)
+                candidate_paths.append(p)
+
+    decided: set[str] = set()
+    dec_file = run_path / "decisions.json"
+    if dec_file.exists():
+        for d in read_json(dec_file):
+            if isinstance(d, dict) and d.get("path"):
+                decided.add(str(d["path"]))
+
+    removed: set[str] = set()
+    for name in ("quarantine_manifest.json", "purged_directly.json"):
+        path = run_path / name
+        if not path.exists():
+            continue
+        for e in read_json(path):
+            if isinstance(e, dict) and e.get("original_path"):
+                removed.add(str(e["original_path"]))
+
+    leftover = [p for p in candidate_paths if p not in decided and p not in removed]
+    return {
+        "paths": leftover,
+        "candidates": len(candidate_paths),
+        "decided": sum(1 for p in candidate_paths if p in decided),
+        "removed": sum(1 for p in candidate_paths if p in removed),
+    }
+
+
 def analyze_run(
     root: Path,
     run_path: Path,
     *,
     config_path: Path | None = None,
     mock: bool = False,
+    paths: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """对某次 run 的残留/候选文件跑模型，写入 ai_suggestions.json。"""
+    """对某次 run 的残留/候选文件跑模型，写入 ai_suggestions.json。
+
+    `paths` 给出时只分析这些路径（Web 端「遗留项」的范围由
+    `leftover_targets` 决定）；为 None 时保持旧行为：候选 + 浅层文件。
+    """
     cfg: dict[str, Any] = (
         load_model_config(config_path) if not mock else {"provider": "mock", "summary": {}}
     )
     summary_cfg = cfg.get("summary") or {}
     provider = get_provider(cfg, mock=mock)
+
+    only: set[str] | None = {str(p) for p in paths} if paths is not None else None
 
     candidates_paths: set[str] = set()
     if (run_path / "candidates.json").exists():
@@ -321,6 +379,8 @@ def analyze_run(
             if item.get("is_dir"):
                 continue
             path = item["path"]
+            if only is not None and path not in only:
+                continue
             if path in quarantined:
                 continue
             if path not in candidates_paths and path.count("/") > max_depth:
@@ -361,6 +421,11 @@ def analyze_run(
             "max_targets": max_targets,
             "truncated": truncated,
             "max_depth": max_depth,
+            "scope": "paths" if only is not None else "all",
+            "requested": len(only) if only is not None else None,
+            # 指定了路径却没进 targets 的：目录、已消失、或已被隔离。
+            # 报出来，避免「预览说 30 项、实际只发了 22 项」看起来像丢数据。
+            "unsent": (len(only) - len(targets)) if only is not None else 0,
         },
     )
     if truncated:

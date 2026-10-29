@@ -33,6 +33,10 @@ let watchTimer = null;
    否则得再请求一次接口——而重渲染只是把 DOM 按已有状态重画，不必联网。 */
 let currentRunData = null;
 let currentCandShown = [];
+let currentCandMatching = [];
+const REVIEW_PAGE_SIZE = 100;
+let pendingPage = 1;
+let candPage = 1;
 let scanPollTimer = null;
 
 async function api(path, opts) {
@@ -684,7 +688,7 @@ function scanGroup(g) {
    会触发重渲染，这些选择必须跟着留住，否则用户筛完、排好、分完组，
    点一下又全回到默认，等于白做。 */
 const pendingFilter = { advice: "", q: "" };
-const candFilter = { q: "" };
+const candFilter = { q: "", rule: "", ai: "", decision: "" };
 /* 默认按占用降序：用户第一眼要看的是「谁最占地方」，不是「谁字母序靠前」。
    Windows 磁盘清理、CleanMyMac、dupeGuru 都是这个排法。 */
 const pendingSort = { key: "size", dir: -1 };
@@ -705,7 +709,9 @@ function adviceRank(h) {
 }
 
 function matchesPendingFilter(h) {
-  if (pendingFilter.advice && h.advice !== pendingFilter.advice) return false;
+  // 用 adviceKind 兜底：未知档位在分组里算「需要你判断」，筛选时也得算进去，
+  // 否则同一行会「分组里看得到、按那一档筛却筛不出来」。
+  if (pendingFilter.advice && adviceKind(h) !== pendingFilter.advice) return false;
   if (pendingFilter.q && !String(h.path || "").toLowerCase().includes(pendingFilter.q)) {
     return false;
   }
@@ -755,20 +761,34 @@ function renderPending(data) {
   // 命中目录会覆盖其内的文件命中（执行时只搬父目录）。这里把它标出来——
   // 否则页面写着「N 项」而实际只搬走更少，用户按数字核对会以为漏了。
   // 用全量而不是筛后结果：筛掉父目录不该让子项的标记凭空消失。
-  const dirPrefixes = all.filter((h) => h.is_dir).map((h) => `${h.path}/`);
-  const coveredByParent = (p) => dirPrefixes.some((d) => p.startsWith(d));
+  const dirPaths = new Set(all.filter((h) => h.is_dir).map((h) => `${h.path}/`));
+  const coveredByParent = (p) => {
+    let slash = p.lastIndexOf("/");
+    while (slash >= 0) {
+      if (dirPaths.has(p.slice(0, slash + 1))) return true;
+      if (slash === 0) break;
+      slash = p.lastIndexOf("/", slash - 1);
+    }
+    return false;
+  };
+  const pageCount = Math.max(1, Math.ceil(hits.length / REVIEW_PAGE_SIZE));
+  pendingPage = Math.min(pendingPage, pageCount);
+  const pageHits = hits.slice((pendingPage - 1) * REVIEW_PAGE_SIZE, pendingPage * REVIEW_PAGE_SIZE);
+  document.getElementById("pendingPageInfo").textContent = `第 ${pendingPage} / ${pageCount} 页`;
+  document.getElementById("pendingPrev").disabled = pendingPage <= 1;
+  document.getElementById("pendingNextPage").disabled = pendingPage >= pageCount;
 
-  if (pendingGrouped && hits.length) {
+  if (pendingGrouped && pageHits.length) {
     // 分节显示：三档各一段。并排三栏会把每栏压到 500px 左右、路径都显示不全，
     // 分节横条既不牺牲列宽，又能一次看清「哪档有几项、共占多少」。
     for (const kind of ADVICE_KINDS) {
-      const group = hits.filter((h) => adviceKind(h) === kind);
+      const group = pageHits.filter((h) => adviceKind(h) === kind);
       if (!group.length) continue;
       tbody.appendChild(pendingGroupRow(group));
       for (const h of group) tbody.appendChild(pendingRow(h, coveredByParent));
     }
   } else {
-    for (const h of hits) tbody.appendChild(pendingRow(h, coveredByParent));
+    for (const h of pageHits) tbody.appendChild(pendingRow(h, coveredByParent));
   }
 
   markSortHeaders();
@@ -786,7 +806,7 @@ function renderPending(data) {
   const cnt = document.getElementById("pendingCount");
   if (cnt) {
     cnt.textContent = all.length
-      ? `显示 ${hits.length} / 共 ${all.length} 项（筛选只影响显示，执行仍按全部命中处理）`
+      ? `本页 ${pageHits.length} 项 / 筛选匹配 ${hits.length} 项 / 共 ${all.length} 项（筛选只影响显示，分页也不改变执行范围；执行仍按全部命中处理）`
       : "";
   }
   // 「保留」勾选会影响执行页的清单与数字，改完就地重画那一页，别等用户切过去才发现是旧的。
@@ -803,7 +823,7 @@ function pendingGroupRow(group) {
   td.setAttribute("colspan", "6");
   td.appendChild(adviceTag(group[0]));
   const size = group.reduce((s, h) => s + Math.max(0, Number(h.size_bytes) || 0), 0);
-  const bits = [`${group.length} 项`];
+  const bits = [`本页 ${group.length} 项`];
   if (size > 0) bits.push(`合计 ${humanSize(size)}`);
   td.appendChild(el("span", { cls: "group-meta", text: bits.join(" · ") }));
   tr.appendChild(td);
@@ -1014,10 +1034,11 @@ function renderAi(data) {
   const suggestions = data.ai_suggestions || [];
   const meta = data.meta || {};
   if (!suggestions.length) {
-    hint.textContent = "未运行模型分析。模型是可选增强：不用它，规则引擎与人工终审一样完整。";
+    hint.textContent =
+      "未运行模型分析。模型是可选增强：规则处理完仍有遗留项时再跑，只分析还没表态的候选。";
     return;
   }
-  hint.textContent = `本次共 ${suggestions.length} 条建议。模型输出只是参考，最终仍以你的决策为准。`;
+  hint.textContent = `本次共 ${suggestions.length} 条建议（只分析规则处理完剩下的遗留项）。模型输出只是参考，最终仍以你的决策为准。`;
   const table = el("table");
   const thead = el("thead");
   const hr = el("tr");
@@ -1046,45 +1067,95 @@ function renderReview(data) {
   renderPending(data);
   renderProtection(data);
   renderAi(data);
+  renderCandidates(data);
+  renderExecute(data);
+}
 
+/* 同一条路径可能有多条候选：一个压缩包既可能被规则判为「可能存着唯一副本」，
+   又可能被内容比对判为「已解压」。原先用 path → 单条候选，后写的会把先写的
+   盖掉，风险提示就此消失。这里保留成数组，全部展示。 */
+function candsByPathOf(data) {
+  const map = new Map();
+  for (const c of data.candidates || []) {
+    if (c.kind === "duplicate_group") continue;
+    for (const p of c.paths || []) {
+      if (!map.has(p)) map.set(p, []);
+      map.get(p).push(c);
+    }
+  }
+  return map;
+}
+
+/* 多条候选 → 最保守的那一档。这里只按后端给的档位顺序挑选，
+   不在前端重新判定；挑不出来就交人工。 */
+function mostCautious(cands) {
+  let best = null;
+  for (const c of cands) {
+    if (!ADVICE_KINDS.includes(c.advice)) continue;
+    if (!best || ADVICE_KINDS.indexOf(c.advice) > ADVICE_KINDS.indexOf(best.advice)) best = c;
+  }
+  return best || { advice: "review" };
+}
+
+/* 候选表。翻页、勾选、改决策只重画这张表和执行页，不重建待自动隔离表，
+   也不重新请求规则 dry-run（那会让执行按钮无谓地回到「等待预览核对」）。 */
+function renderCandidates(data) {
   const rows = document.getElementById("rows");
   clear(rows);
   const suggestions = {};
   for (const s of data.ai_suggestions || []) suggestions[s.path] = s;
   currentSuggestions = suggestions;
 
-  // 非重复组的候选 + AI 建议路径并集。
-  // 同时建一份 path → 候选，因为「为什么它在列表里」这句中文在候选对象上，
-  // 摊平成路径列表后就丢了——原先那一列只能显示 `candidate` 这个内部词。
-  const candByPath = new Map();
-  const paths = new Set();
-  for (const c of data.candidates || []) {
-    if (c.kind === "duplicate_group") continue;
-    for (const p of c.paths || []) {
-      paths.add(p);
-      candByPath.set(p, c);
-    }
-  }
+  const candByPath = candsByPathOf(data);
+  const paths = new Set(candByPath.keys());
   for (const p of Object.keys(suggestions)) paths.add(p);
 
   const allPaths = [...paths];
-  const shownPaths = allPaths.filter(
-    (p) => !candFilter.q || p.toLowerCase().includes(candFilter.q),
-  );
+  const ruleSelect = document.getElementById("candRule");
+  const ruleOptions = new Map();
+  for (const cands of candByPath.values()) {
+    for (const cand of cands) {
+      if (cand.rule_id) ruleOptions.set(cand.rule_id, ruleLabel(cand));
+    }
+  }
+  clear(ruleSelect);
+  ruleSelect.appendChild(el("option", { text: "全部", attrs: { value: "" } }));
+  for (const [id, label] of [...ruleOptions].sort((a, b) => a[1].localeCompare(b[1]))) {
+    ruleSelect.appendChild(el("option", { text: label, attrs: { value: id } }));
+  }
+  if (candFilter.rule && !ruleOptions.has(candFilter.rule)) candFilter.rule = "";
+  ruleSelect.value = candFilter.rule;
+  const shownPaths = allPaths.filter((p) => {
+    const list = candByPath.get(p) || [];
+    const ai = suggestions[p] ? suggestions[p].action : "none";
+    return (!candFilter.q || p.toLowerCase().includes(candFilter.q)) &&
+      (!candFilter.rule || list.some((c) => c.rule_id === candFilter.rule)) &&
+      (!candFilter.ai || ai === candFilter.ai) &&
+      (!candFilter.decision || decisionFor(p).action === candFilter.decision);
+  });
+  currentCandMatching = shownPaths;
   if (!allPaths.length) {
     emptyRow(rows, 7, "本轮没有候选文件。用完整扫描（不勾「跳过内容 hash」）才会产出候选与重复组。");
   } else if (!shownPaths.length) {
-    emptyRow(rows, 7, "当前搜索没有匹配的候选。清空搜索框看全部。");
+    emptyRow(rows, 7, "当前筛选没有匹配的候选。把筛选条件清掉看全部。");
   }
+  // 同一路径的多条候选共用同一份文件，取其中最大的已算值即可（同样的答案，不重复相加）。
+  const sizeOf = (p) => {
+    let n = 0;
+    for (const c of candByPath.get(p) || []) n = Math.max(n, Number(c.size_bytes) || 0);
+    return n;
+  };
   // 按占用降序，与「待自动隔离」表一致：先看大的。
-  const sortedPaths = shownPaths.sort((a, b) => {
-    const sa = Number((candByPath.get(a) || {}).size_bytes) || 0;
-    const sb = Number((candByPath.get(b) || {}).size_bytes) || 0;
-    return sb - sa;
-  });
-  for (const path of sortedPaths) {
+  const sortedPaths = shownPaths.sort((a, b) => sizeOf(b) - sizeOf(a));
+  const pageCount = Math.max(1, Math.ceil(sortedPaths.length / REVIEW_PAGE_SIZE));
+  candPage = Math.min(candPage, pageCount);
+  const pagePaths = sortedPaths.slice((candPage - 1) * REVIEW_PAGE_SIZE, candPage * REVIEW_PAGE_SIZE);
+  document.getElementById("candPageInfo").textContent = `第 ${candPage} / ${pageCount} 页`;
+  document.getElementById("candPrev").disabled = candPage <= 1;
+  document.getElementById("candNextPage").disabled = candPage >= pageCount;
+  for (const path of pagePaths) {
     const sug = suggestions[path];
-    const cand = candByPath.get(path) || {};
+    const cands = candByPath.get(path) || [];
     // 唯一真相是 decisions（默认 keep）。这里**刻意不按建议预填**：
     // 预填只写 DOM、不进 decisions，用户看着预填内容点「执行」会以为已采纳，
     // 实际什么都不发生。要采纳就点「采纳全部建议」，那是显式的。
@@ -1112,7 +1183,8 @@ function renderReview(data) {
     tdPath.appendChild(whyButton(path));
     tr.appendChild(tdPath);
 
-    // 为什么在列表里：谁把它挑出来的 + 中文原因
+    // 为什么在列表里：每条候选各给一行原因，不合并、不覆盖——
+    // 同一个压缩包可能既有「可能存着唯一副本」又有「内容已解压」，两条都得看见。
     const tdWhy = document.createElement("td");
     tdWhy.appendChild(
       el("span", {
@@ -1120,24 +1192,30 @@ function renderReview(data) {
         text: sug ? "模型建议" : "规则候选",
       }),
     );
-    const why = cand.rule_reason || cand.reason || "";
-    if (why) tdWhy.appendChild(el("div", { cls: "tiny", text: why }));
-    if (cand.rule_id) {
-      tdWhy.appendChild(
-        el("div", {
-          cls: "tiny",
-          text: `规则：${ruleLabel(cand)}`,
-          attrs: { title: cand.rule_id },
-        }),
-      );
+    for (const c of cands) {
+      const why = c.rule_reason || c.reason || "";
+      if (why) tdWhy.appendChild(el("div", { cls: "tiny", text: why }));
+      if (c.rule_id) {
+        tdWhy.appendChild(
+          el("div", {
+            cls: "tiny",
+            text: `规则：${ruleLabel(c)}`,
+            attrs: { title: c.rule_id },
+          }),
+        );
+      }
     }
     tr.appendChild(tdWhy);
 
     // 建议：规则给的是「需要你判断」，模型给了就一并摆出来（仍然只是参考）
     const tdAdvice = document.createElement("td");
-    tdAdvice.appendChild(adviceTag(cand.advice ? cand : { advice: "review" }));
-    if (cand.recover) {
-      tdAdvice.appendChild(el("div", { cls: "tiny", text: `删了怎么办：${cand.recover}` }));
+    tdAdvice.appendChild(adviceTag(mostCautious(cands)));
+    const recovered = new Set();
+    for (const c of cands) {
+      const text = String(c.recover || "").trim();
+      if (!text || recovered.has(text)) continue;
+      recovered.add(text);
+      tdAdvice.appendChild(el("div", { cls: "tiny", text: `删了怎么办：${text}` }));
     }
     if (sug) {
       const conf = Number(sug.confidence);
@@ -1151,7 +1229,7 @@ function renderReview(data) {
     }
     tr.appendChild(tdAdvice);
 
-    tr.appendChild(el("td", { cls: "num", text: sizeText(cand.size_bytes) }));
+    tr.appendChild(el("td", { cls: "num", text: sizeText(cands.length ? sizeOf(path) : -1) }));
 
     const tdAct = document.createElement("td");
     const sel = el("select", { cls: "act", attrs: { "data-path": path } });
@@ -1176,8 +1254,8 @@ function renderReview(data) {
 
     rows.appendChild(tr);
   }
-  currentCandShown = sortedPaths;
-  refreshCandPicked(sortedPaths);
+  currentCandShown = pagePaths;
+  refreshCandPicked(pagePaths);
 
   // 重复组：单选保留项，其余可一键标 quarantine
   const dups = document.getElementById("dups");
@@ -1200,6 +1278,7 @@ function renderReview(data) {
       cur.action = node.value;
       decisions.set(path, cur);
       syncTargetEnabled(node.closest("tr"));
+      refreshDecisionViews(currentRunData);
     });
   });
   rows.querySelectorAll(".tgt").forEach((node) => {
@@ -1208,6 +1287,7 @@ function renderReview(data) {
       const cur = decisionFor(path);
       cur.target_relpath = node.value;
       decisions.set(path, cur);
+      refreshDecisionViews(currentRunData);
     });
   });
 
@@ -1215,20 +1295,44 @@ function renderReview(data) {
   const candCount = document.getElementById("candCount");
   if (candCount) {
     candCount.textContent = allPaths.length
-      ? `显示 ${shownPaths.length} / 共 ${allPaths.length} 项`
+      ? `本页 ${pagePaths.length} 项 / 筛选匹配 ${shownPaths.length} 项 / 共 ${allPaths.length} 项`
       : "";
   }
-  const candNext = document.getElementById("candNext");
-  if (candNext) {
-    const moving = [...decisions.values()].filter(
-      (d) => paths.has(d.path) && d.action !== "keep",
-    ).length;
-    candNext.textContent = moving
-      ? `已有 ${moving} 项设为隔离 / 归档，去「执行」页才会真正搬走。`
-      : "每行默认「保留不动」；改完决策去「执行」页动手。";
-  }
   // 决策改了、或者采纳了模型建议，执行页的数字和清单都要重画
-  renderExecute(currentRunData);
+  refreshDecisionViews(currentRunData);
+}
+
+/* 本 run 里参与人工决策的全部路径：普通候选 + 重复组 + 只有模型建议的路径。
+   执行清单和「已有 N 项」都必须按这个并集算——只统计普通候选时，
+   「重复组已标隔离」会显示成 0 项，执行按钮还是禁用的。 */
+function reviewedPaths(data) {
+  const out = new Set();
+  for (const c of (data && data.candidates) || []) {
+    for (const p of c.paths || []) out.add(p);
+  }
+  for (const p of Object.keys(currentSuggestions || {})) out.add(p);
+  return out;
+}
+
+function movingDecisions(data) {
+  const scope = reviewedPaths(data);
+  const moving = [];
+  for (const [path, d] of decisions) {
+    if (!scope.has(path) || d.action === "keep") continue;
+    moving.push({ path, action: d.action, target: d.target_relpath || "" });
+  }
+  return moving;
+}
+
+/* 决策变了：执行页清单 / 数字 / 按钮状态一起重画，不等用户切过去才发现是旧的。 */
+function refreshDecisionViews(data) {
+  renderExecute(data);
+  const candNext = document.getElementById("candNext");
+  if (!candNext) return;
+  const n = movingDecisions(data).length;
+  candNext.textContent = n
+    ? `已有 ${n} 项设为隔离 / 归档，去「执行」页才会真正搬走。`
+    : "每行默认「保留不动」；改完决策去「执行」页动手。";
 }
 
 /* --------------------------- 执行页：动手 --------------------------- */
@@ -1277,15 +1381,7 @@ function renderExecute(data) {
   const plan = currentPlan;
   const willMove = plan ? Number(plan.would_quarantine || 0) : null;
 
-  const cands = (data.candidates || []).filter((c) => c.kind !== "duplicate_group");
-  const candPaths = new Set();
-  for (const c of cands) for (const p of c.paths || []) candPaths.add(p);
-  const moving = [];
-  for (const [path, d] of decisions) {
-    if (!candPaths.has(path)) continue;
-    if (d.action === "keep") continue;
-    moving.push({ path, action: d.action, target: d.target_relpath || "" });
-  }
+  const moving = movingDecisions(data);
   const q = moving.filter((m) => m.action === "quarantine").length;
   const arch = moving.length - q;
 
@@ -1450,7 +1546,9 @@ function dupGroupBox(c) {
       });
     }
     setStatus({ updated_duplicates: paths });
-    loadRun(currentRun);
+    // 只重画候选表与执行页。原先这里调 loadRun，会把用户**尚未保存**的决策
+    // 连同刚写进去的重复组选择一起清掉——服务端还没收到这些改动。
+    renderCandidates(currentRunData);
   };
   box.appendChild(btn);
   return box;
@@ -1542,6 +1640,9 @@ function adoptSuggestions() {
   }
   setStatus({ adopted: items.length, quarantine, archived: items.length - quarantine });
   refreshAdoptHint();
+  // 采纳只改了内存里的决策：执行页的清单、数字、按钮要立刻跟着变，
+  // 否则按钮还停在「没有待执行的决策」。
+  refreshDecisionViews(currentRunData);
 }
 
 /* --------------------------------- 规则 --------------------------------- */
@@ -1801,6 +1902,7 @@ async function loadRuns() {
 
 async function loadRun(runId) {
   const switched = currentRun !== runId;
+  if (switched) { pendingPage = 1; candPage = 1; }
   currentRun = runId;
   currentPlan = null;
   const data = await api(`/api/runs/${runId}`);
@@ -1859,14 +1961,24 @@ function applyCandBulk() {
   for (const path of candPicked) {
     const cur = decisionFor(path);
     cur.action = action;
-    if (action !== "archive") cur.target_relpath = "";
+    if (action !== "archive") {
+      cur.target_relpath = "";
+    } else if (!cur.target_relpath) {
+      // 批量归档按「archive/原相对路径」落位。只按文件名拼的话，勾中的多个
+      // index.js / notes.txt 会互相顶掉，后端只能报「目标已存在」并跳过。
+      cur.target_relpath = `archive/${path}`;
+    }
     decisions.set(path, cur);
     n += 1;
   }
   const label = DECISION_LABELS[action] || action;
-  setStatus(`已把 ${n} 项设为「${label}」（只改决策，未动任何文件）。`);
-  candPicked.clear();
-  renderReview(currentRunData);
+  // 已选可能包含别的页、或已被筛选条件隐藏的行：动作确实作用到它们身上，
+  // 报数时必须说明，否则「我只看着 5 行，怎么改了 40 行」。
+  const hidden = [...candPicked].filter((p) => !currentCandShown.includes(p)).length;
+  setStatus(
+    `已把 ${n} 项设为「${label}」${hidden ? `（其中 ${hidden} 项不在当前页）` : ""}（只改决策，未动任何文件）。`,
+  );
+  renderCandidates(currentRunData);
 }
 
 async function previewDecisions() {
@@ -1964,6 +2076,19 @@ document.getElementById("applyRulesBtn").onclick = () =>
 document.getElementById("gotoExecuteBtn").onclick = () => showTab("execute");
 document.getElementById("gotoExecuteBtn2").onclick = () => showTab("execute");
 
+document.getElementById("pendingPrev").onclick = () => {
+  if (currentRunData && pendingPage > 1) { pendingPage--; renderPending(currentRunData); }
+};
+document.getElementById("pendingNextPage").onclick = () => {
+  if (currentRunData) { pendingPage++; renderPending(currentRunData); }
+};
+document.getElementById("candPrev").onclick = () => {
+  if (currentRunData && candPage > 1) { candPage--; renderCandidates(currentRunData); }
+};
+document.getElementById("candNextPage").onclick = () => {
+  if (currentRunData) { candPage++; renderCandidates(currentRunData); }
+};
+
 document.getElementById("pendingAll").onchange = (e) => {
   const all = (currentRunData && currentRunData.pending_auto_hits) || [];
   for (const h of all) {
@@ -1978,27 +2103,62 @@ document.getElementById("candAll").onchange = (e) => {
     if (e.target.checked) candPicked.add(p);
     else candPicked.delete(p);
   }
-  renderReview(currentRunData);
+  refreshCandPicked(currentCandShown);
 };
 
 document.getElementById("candBulkBtn").onclick = () => applyCandBulk();
+document.getElementById("candSelectMatching").onclick = () => {
+  for (const path of currentCandMatching) candPicked.add(path);
+  if (currentRunData) renderCandidates(currentRunData);
+};
+document.getElementById("candClearPicked").onclick = () => {
+  candPicked.clear();
+  if (currentRunData) renderCandidates(currentRunData);
+};
+document.getElementById("candAdoptSelected").onclick = () => {
+  let adopted = 0;
+  let skipped = 0;
+  for (const path of candPicked) {
+    const sug = currentSuggestions[path];
+    if (!sug || !["keep", "quarantine", "archive"].includes(sug.action) || decisions.has(path) ||
+        (sug.action === "archive" && !sug.suggested_path)) {
+      skipped++;
+      continue;
+    }
+    decisions.set(path, { path, action: sug.action, target_relpath: sug.suggested_path || "", note: "adopted ai suggestion" });
+    adopted++;
+  }
+  setStatus(`已按模型建议设置 ${adopted} 项，跳过 ${skipped} 项（无可用建议、已有决策或归档目标缺失）；未执行文件操作。`);
+  if (currentRunData) renderCandidates(currentRunData);
+};
+for (const [id, key] of [["candRule", "rule"], ["candAi", "ai"], ["candDecision", "decision"]]) {
+  document.getElementById(id).onchange = (e) => {
+    candFilter[key] = e.target.value;
+    candPage = 1;
+    if (currentRunData) renderCandidates(currentRunData);
+  };
+}
 
 /* 审阅页筛选：只改显示，不改判定。执行范围永远是全部命中（勾了保留的除外），
    否则「筛了 3 项却搬走 30 项」会像丢了东西。 */
 document.getElementById("pendingAdvice").onchange = (e) => {
   pendingFilter.advice = e.target.value;
+  pendingPage = 1;
   if (currentRunData) renderPending(currentRunData);
 };
 document.getElementById("pendingSearch").oninput = (e) => {
   pendingFilter.q = e.target.value.trim().toLowerCase();
+  pendingPage = 1;
   if (currentRunData) renderPending(currentRunData);
 };
 document.getElementById("candSearch").oninput = (e) => {
   candFilter.q = e.target.value.trim().toLowerCase();
-  if (currentRunData) renderReview(currentRunData);
+  candPage = 1;
+  if (currentRunData) renderCandidates(currentRunData);
 };
 document.getElementById("pendingGroup").onchange = (e) => {
   pendingGrouped = e.target.checked;
+  pendingPage = 1;
   if (currentRunData) renderPending(currentRunData);
 };
 
@@ -2013,6 +2173,7 @@ for (const th of document.querySelectorAll("#tab-review th.sortable")) {
       pendingSort.key = key;
       pendingSort.dir = SORT_DEFAULT_DIR[key] || 1;
     }
+    pendingPage = 1;
     if (currentRunData) renderPending(currentRunData);
   });
 }
@@ -2030,7 +2191,7 @@ function keepBatch(kind) {
     // 「只保留需要判断的」：把拿不准的留下，明确可清的照常执行。
     // 这是最常用的一键——用户不必逐条去认哪些该留。
     keptPaths.clear();
-    for (const h of hits) if (h.advice === "review") keptPaths.add(h.path);
+    for (const h of hits) if (adviceKind(h) === "review") keptPaths.add(h.path);
   }
   renderPending(currentRunData);
   setStatus(
@@ -2111,14 +2272,45 @@ document.getElementById("statusClose").onclick = () => {
 };
 document.getElementById("gotoQuarantineBtn").onclick = () => showTab("quarantine");
 
-/* 模型分析（等价于 dirtidy analyze）。未在设置页启用时后端会返回 400，原样展示。 */
+/* 模型分析（等价于 dirtidy analyze）。
+   默认只分析「规则处理完还剩下的候选」：已表态、已隔离/直删的路径不再送出去。
+   先取一份范围预览让用户确认，再提交——批量外发不能点了才知道发了什么。 */
 document.getElementById("analyzeBtn").onclick = async () => {
   if (!currentRun) return setStatus("还没有选中 run");
   const btn = document.getElementById("analyzeBtn");
   btn.disabled = true;
-  setStatus("模型分析中…");
   try {
-    setStatus(await api(`/api/runs/${currentRun}/analyze`, { method: "POST" }));
+    const preview = await api(`/api/runs/${currentRun}/analyze/preview`);
+    if (!preview.enabled || !preview.configured) {
+      return setStatus("模型分析未启用：先在「设置」页打开开关并保存配置。", { error: true });
+    }
+    if (!preview.leftover) {
+      return setStatus(
+        `没有遗留项可分析：本轮候选 ${preview.candidates} 项，已表态 ${preview.decided} 项、` +
+          `已隔离或删除 ${preview.removed} 项。规则这一轮已经处理完了。`,
+      );
+    }
+    const sample = (preview.sample || []).slice(0, 5).map((p) => `  ${p}`).join("\n");
+    const ok = confirm(
+      `模型分析范围（只看遗留项）\n` +
+        `· 本轮候选 ${preview.candidates} 项，其中已表态 ${preview.decided} 项、已搬走 ${preview.removed} 项不再发送\n` +
+        `· 本次送模型：${preview.leftover} 项${preview.truncated ? `（超过单次上限 ${preview.max_targets}，只分析前 ${preview.will_analyze} 项）` : ""}\n` +
+        (sample ? `· 例如：\n${sample}\n` : "") +
+        `\n分析结果只作为参考写回审阅页，不会自动搬动或删除文件。继续？`,
+    );
+    if (!ok) return setStatus("已取消模型分析。");
+    setStatus("模型分析中…");
+    const meta = await api(`/api/runs/${currentRun}/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: "leftover" }),
+    });
+    setStatus(
+      `模型分析完成：提交 ${meta.targets ?? "?"} 项` +
+        `${meta.truncated ? "（已达单次上限，其余未提交）" : ""}` +
+        `${meta.unsent ? `（${meta.unsent} 项不是普通文件或已不存在，未发送）` : ""}，` +
+        `得到 ${meta.suggestions ?? 0} 条建议。建议只作参考，仍需人工决定。`,
+    );
     await loadRun(currentRun);
   } catch (e) {
     setStatus(e, { error: true });

@@ -44,8 +44,8 @@ ADVICE_LABELS: Final[dict[str, str]] = {
 
 # 一句话解释「凭什么这么建议」。用户不看规则源码也能懂。
 ADVICE_HINTS: Final[dict[str, str]] = {
-    ADVICE_SAFE_CLEAN: "重建成本为零，删了不影响使用",
-    ADVICE_CLEAN: "能重建，但要重新安装或编译一次",
+    ADVICE_SAFE_CLEAN: "规则标记为可清理；请确认当前用途及恢复方式",
+    ADVICE_CLEAN: "规则认为通常可重建；请确认重建成本和当前用途",
     ADVICE_REVIEW: "说不准还有没有用，需要你看一眼",
     ADVICE_PROTECTED: "受保护，永远不会自动动它",
 }

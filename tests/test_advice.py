@@ -93,7 +93,7 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(default_root=dest))
 
 
-def test_run_api_answers_what_it_is_and_should_i_delete(client: TestClient) -> None:
+def test_run_api_answers_what_it_is_and_should_i_delete(client: TestClient, tmp_path: Path, monkeypatch) -> None:
     """列表要能回答两个问题：「这是什么」「要不要删」。"""
     run_id = client.post("/api/scan", json={"quick": False, "workers": 2}).json()["run_id"]
     data = client.get(f"/api/runs/{run_id}").json()
@@ -116,6 +116,30 @@ def test_run_api_answers_what_it_is_and_should_i_delete(client: TestClient) -> N
     for c in data["candidates"]:
         assert c["advice"] == "review"
         assert c["rule_reason"], f"{c['rule_id']} 的候选缺中文说明"
+
+    # 同一请求内相同路径只计算一次；下一次请求必须重新统计，不能留下过期尺寸。
+    from dirtidy.web import app as web_app
+
+    target = tmp_path / "size-test"
+    target.mkdir()
+    (target / "file").write_text("abc", encoding="utf-8")
+    calls = 0
+    original = web_app.tree_size
+
+    def counted(path: Path) -> int:
+        nonlocal calls
+        calls += 1
+        return original(path)
+
+    monkeypatch.setattr(web_app, "tree_size", counted)
+    cache: dict[str, int] = {}
+    first = [{"path": "size-test"}, {"paths": ["size-test"]}]
+    web_app._attach_advice(first, root=tmp_path, rules={}, purge_ids=set(), size_cache=cache)
+    assert calls == 1 and [e["size_bytes"] for e in first] == [3, 3]
+    (target / "file").write_text("abcdef", encoding="utf-8")
+    second = [{"path": "size-test"}]
+    web_app._attach_advice(second, root=tmp_path, rules={}, purge_ids=set())
+    assert calls == 2 and second[0]["size_bytes"] == 6
 
 
 def test_advice_falls_back_when_rule_pack_missing(tmp_path: Path) -> None:
