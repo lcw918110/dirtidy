@@ -598,52 +598,69 @@ def delete_by_composer_ids(
     *,
     delete_headers: bool,
 ) -> dict[str, int]:
-    """按会话 id 批量删除正文与元数据。"""
+    """按会话 id 批量删除正文与元数据。
+
+    **每条会话四层必须同生共死**：bubble / checkpoint / composerData / header
+    原先分四次 ``commit``，中途被杀（Ctrl-C、断电、WAL 锁超时）就会留下
+    「正文删了一半、索引还挂着」的半删会话——Cursor 列表里还在，点开却打不开，
+    看起来像清理程序把会话弄坏了。现在按批单事务提交：要么整批全删，要么全回滚。
+
+    批大小同时限制锁窗口：一次 200 条会话，删完立刻提交。
+    """
     stats = {"bubble": 0, "checkpoint": 0, "composerData": 0, "headers": 0}
     if not ids:
         return stats
 
     bubble, checkpoint, composer_data = _sql_extract_cid_exprs()
-    cur.execute("DROP TABLE IF EXISTS _cc_targets")
-    cur.execute("CREATE TEMP TABLE _cc_targets (cid TEXT PRIMARY KEY)")
-    cur.executemany("INSERT OR IGNORE INTO _cc_targets(cid) VALUES (?)", ((c,) for c in ids))
+    batch = 200
+    for start in range(0, len(ids), batch):
+        chunk = ids[start : start + batch]
+        cur.execute("DROP TABLE IF EXISTS _cc_targets")
+        cur.execute("CREATE TEMP TABLE _cc_targets (cid TEXT PRIMARY KEY)")
+        cur.executemany("INSERT OR IGNORE INTO _cc_targets(cid) VALUES (?)", ((c,) for c in chunk))
 
-    cur.execute(
-        f"""
-        DELETE FROM cursorDiskKV
-        WHERE key LIKE 'bubbleId:%'
-          AND instr(substr(key, {_PREFIX_BUBBLE + 1}), ':') > 0
-          AND {bubble} IN (SELECT cid FROM _cc_targets)
-        """
-    )
-    stats["bubble"] = cur.rowcount
-    con.commit()
+        try:
+            cur.execute(
+                f"""
+                DELETE FROM cursorDiskKV
+                WHERE key LIKE 'bubbleId:%'
+                  AND instr(substr(key, {_PREFIX_BUBBLE + 1}), ':') > 0
+                  AND {bubble} IN (SELECT cid FROM _cc_targets)
+                """
+            )
+            stats["bubble"] += cur.rowcount
 
-    cur.execute(
-        f"""
-        DELETE FROM cursorDiskKV
-        WHERE key LIKE 'checkpointId:%'
-          AND instr(substr(key, {_PREFIX_CHECKPOINT + 1}), ':') > 0
-          AND {checkpoint} IN (SELECT cid FROM _cc_targets)
-        """
-    )
-    stats["checkpoint"] = cur.rowcount
-    con.commit()
+            cur.execute(
+                f"""
+                DELETE FROM cursorDiskKV
+                WHERE key LIKE 'checkpointId:%'
+                  AND instr(substr(key, {_PREFIX_CHECKPOINT + 1}), ':') > 0
+                  AND {checkpoint} IN (SELECT cid FROM _cc_targets)
+                """
+            )
+            stats["checkpoint"] += cur.rowcount
 
-    cur.execute(
-        f"""
-        DELETE FROM cursorDiskKV
-        WHERE key LIKE 'composerData:%'
-          AND {composer_data} IN (SELECT cid FROM _cc_targets)
-        """
-    )
-    stats["composerData"] = cur.rowcount
-    con.commit()
+            cur.execute(
+                f"""
+                DELETE FROM cursorDiskKV
+                WHERE key LIKE 'composerData:%'
+                  AND {composer_data} IN (SELECT cid FROM _cc_targets)
+                """
+            )
+            stats["composerData"] += cur.rowcount
 
-    if delete_headers:
-        cur.execute("DELETE FROM composerHeaders WHERE composerId IN (SELECT cid FROM _cc_targets)")
-        stats["headers"] = cur.rowcount
-        con.commit()
+            if delete_headers:
+                cur.execute(
+                    "DELETE FROM composerHeaders WHERE composerId IN (SELECT cid FROM _cc_targets)"
+                )
+                stats["headers"] += cur.rowcount
+
+            con.commit()
+        except BaseException:
+            # 整批回滚：宁可一条都没删，也不要留下半删会话。
+            con.rollback()
+            cur.execute("DROP TABLE IF EXISTS _cc_targets")
+            raise
 
     cur.execute("DROP TABLE IF EXISTS _cc_targets")
     return stats
@@ -937,6 +954,24 @@ def analyze(
             referenced = collect_referenced_hashes(cur)
             plan = plan_blob_cleanup(cur, referenced, measure_bytes=measure_blob_bytes)
             report.blob = plan.summary()
+
+        # 空间到底被谁占着：活库、中转残留、冷备份各算一遍。原先后台只报活库，
+        # 「pre-cleanup 75 GB 还躺在旁边」这件事没人看得见。
+        inv = storage_inventory(db)
+        live_bytes = next(
+            (i["bytes"] for i in inv["files"] if str(i["path"]).endswith("/state.vscdb")),
+            report.db_bytes,
+        )
+        report.notes.append(
+            f"磁盘：活库 {human_bytes(live_bytes)}"
+            f"，冷备份 {len(inv['backups'])} 份，合计 {human_bytes(int(inv['total_bytes']))}"
+        )
+        if int(inv["stale_bytes"]):
+            report.notes.append(
+                f"另有中转残留 {human_bytes(int(inv['stale_bytes']))}"
+                "（state.vscdb.pre-cleanup*）：那是 VACUUM 换库时的旧副本。"
+                "确认新库能正常打开后可手动删除；本程序不代删——它是你最后一份完整数据。"
+            )
     finally:
         con.close()
 
@@ -986,6 +1021,12 @@ def clean(
         db=str(db),
         db_bytes=db.stat().st_size,
         backup_dir=str(backup),
+    )
+    # 说明作用边界：本程序只改 state.vscdb 里的会话行。用户手册与诊断交接都问过
+    # 「会不会动 AgentStores / 逐字稿」——写进报告，比写在文档里更不容易被忽略。
+    report.notes.append(
+        "作用范围：只改 state.vscdb（cursorDiskKV / composerHeaders）；"
+        "不碰 AgentStore、逐字稿目录、会话检索库"
     )
 
     audit = _audit_log_path(db, backup)
@@ -1106,6 +1147,297 @@ def clean(
     report.notes.append(f"审计日志：{audit}")
     _audit_append(audit, "done", elapsed_s=round(report.elapsed_s, 1))
     return report
+
+
+# ---------------------------------------------------------------------------
+# 只读诊断：一条会话在 Cursor 里「挂不上」时，缺的是哪一层
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SessionDiagnosis:
+    """一条会话的分层体检结果。只读，不改库，也不推测「能不能删」。
+
+    为什么要分层：Cursor 的会话不止一处数据。删掉其中一层，界面往往还显示
+    标题和正文（header、composerData、bubble 都在），但会话已经挂不上——
+    报错是 `Agent host session not found`，而不是「数据缺失」。只看会话表
+    看不出问题，必须把这几层分别核对：
+
+    1. `composerHeaders`：会话索引（列表里有没有它）
+    2. `composerData:<cid>`：会话元数据
+    3. `bubbleId:<cid>:*`：对话正文
+    4. `checkpointId:<cid>:*`：检查点（回退 / 恢复）
+    5. 正文引用的 `agentKv:blob:*`：agent 运行时对象（还原时的实际内容）
+    6. `AgentStores/<cid>/mount.json`：Agent Host 的挂载状态
+    7. `~/.cursor/projects/*/agent-transcripts/<cid>/*.jsonl`：逐字稿
+    """
+
+    cid: str
+    header: bool = False
+    composer_data: bool = False
+    bubbles: int = 0
+    checkpoints: int = 0
+    blob_refs: int = 0
+    blob_missing: int = 0
+    agent_store: bool = False
+    agent_store_mount: bool = False
+    transcript: str = ""
+    verdict: str = ""
+    hint: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "cid": self.cid,
+            "header": self.header,
+            "composer_data": self.composer_data,
+            "bubbles": self.bubbles,
+            "checkpoints": self.checkpoints,
+            "blob_refs": self.blob_refs,
+            "blob_missing": self.blob_missing,
+            "agent_store": self.agent_store,
+            "agent_store_mount": self.agent_store_mount,
+            "transcript": self.transcript,
+            "verdict": self.verdict,
+            "hint": self.hint,
+        }
+
+
+def _cursor_support_dir(cursor_support: Path | None = None) -> Path:
+    """Cursor 的 Application Support 根目录（可用参数覆盖，便于测试）。"""
+    if cursor_support is not None:
+        return cursor_support
+    return Path.home() / "Library" / "Application Support" / "Cursor"
+
+
+def _find_transcript(cid: str, transcript_root: Path | None = None) -> str:
+    """逐字稿路径；找不到就返回空串。
+
+    挂在 `~/.cursor/projects/<slug>/agent-transcripts/<cid>/` 下，目录名不可预测，
+    所以按 cid 反查。只 glob 一层 projects，不做全盘扫描。
+    """
+    base = (transcript_root or Path.home() / ".cursor") / "projects"
+    try:
+        hits = sorted(base.glob(f"*/agent-transcripts/{cid}/*.jsonl"))
+    except OSError:
+        return ""
+    return str(hits[0]) if hits else ""
+
+
+#: 真正的 blob 引用形态。**不能拿「任意 64 位 hex」当引用**：
+#: 真机实测同一条会话里 `composer.content.<hash>`（内容 id，另一套命名空间）
+#: 出现 959 次，而真正的 blob 引用只有个位数。按裸哈希统计会把内容 id 当成
+#: 丢失的 blob，报出一堆假缺失。
+_BLOB_REF_RES = (
+    re.compile(r"agentKv:blob:([0-9a-f]{64})"),
+    # `...BlobIdHex":"<hash>"` / `"blobId":"<hash>"` 这类字段
+    re.compile(r"(?:BlobId|blobId|BlobIdHex)[^0-9a-f]{0,4}([0-9a-f]{64})"),
+)
+
+#: 明确不是 blob 的命名空间前缀（命中则不计数）。
+_NOT_BLOB_PREFIXES = ("composer.content.", "composer.contentState.")
+
+
+def _blob_refs_in_text(text: str) -> set[str]:
+    """从一段 value 里挑出**真正的** blob 引用哈希。
+
+    只认两种证据：显式的 `agentKv:blob:<hash>`，以及 `BlobIdHex` 一类字段值。
+    单纯出现 64 位 hex 不算——`composer.content.<hash>` 是内容 id，把它当 blob
+    就会误报「运行时对象缺失」。
+    """
+    found: set[str] = set()
+    for pattern in _BLOB_REF_RES:
+        for m in pattern.finditer(text):
+            found.add(m.group(1))
+    for prefix in _NOT_BLOB_PREFIXES:
+        for m in re.finditer(re.escape(prefix) + r"([0-9a-f]{64})", text):
+            found.discard(m.group(1))
+    return found
+
+
+def _hash_refs(cur: sqlite3.Cursor, cid: str) -> set[str]:
+    """该会话正文里引用到的 blob 哈希（只读这条会话的行）。"""
+    refs: set[str] = set()
+    bubble_prefix = f"bubbleId:{cid}:"
+    rows = cur.execute(
+        "SELECT value FROM cursorDiskKV WHERE key = ? OR (key >= ? AND key < ?)",
+        (f"composerData:{cid}", bubble_prefix, bubble_prefix + "\uffff"),
+    )
+    for (value,) in rows:
+        try:
+            refs.update(_blob_refs_in_text(_decode(value)))
+        except (TypeError, UnicodeDecodeError):
+            continue
+    return refs
+
+
+def _missing_blobs(cur: sqlite3.Cursor, refs: Sequence[str]) -> list[str]:
+    """引用了但库里不存在的 blob。分批 `key IN (...)`，走主键索引。"""
+    missing: list[str] = []
+    chunk = 400
+    for i in range(0, len(refs), chunk):
+        part = list(refs[i : i + chunk])
+        keys = [BLOB_PREFIX + h for h in part]
+        marks = ",".join("?" * len(keys))
+        found = {
+            str(r[0])[BLOB_PREFIX_LEN:]
+            for r in cur.execute(
+                f"SELECT key FROM cursorDiskKV WHERE key IN ({marks})", keys
+            )
+        }
+        missing.extend(h for h in part if h not in found)
+    return missing
+
+
+def diagnose_session(
+    db: Path,
+    cid: str,
+    *,
+    cursor_support: Path | None = None,
+    transcript_root: Path | None = None,
+) -> SessionDiagnosis:
+    """分层核对一条会话，判断它是否还完整。**只读，不删任何东西。**
+
+    结论只有四类，措辞对应「用户会看到什么」：
+
+    - `ok`：七层齐全，能正常打开
+    - `missing_runtime`：正文在、但引用的 agent 运行时对象缺了 → 界面还在，
+      点开却挂不上（`Agent host session not found`）
+    - `no_checkpoint`：缺检查点 → 能看，但不能回退 / 恢复
+    - `gone`：会话索引与正文都没了（清理过或从未存在）
+
+    任一层的数量为 0 都可能是「本来就没有」，所以只把「引用了却缺失」判为
+    残缺；不拿「没有 checkpoint」直接当损坏，除非索引和正文都在。
+    """
+    if not db.is_file():
+        raise CursorCleanupError(f"找不到数据库：{db}")
+
+    con = open_readonly(db)
+    cur = con.cursor()
+    try:
+        diag = SessionDiagnosis(cid=cid)
+        diag.header = (
+            cur.execute(
+                "SELECT 1 FROM composerHeaders WHERE composerId = ?", (cid,)
+            ).fetchone()
+            is not None
+        )
+        diag.composer_data = (
+            cur.execute(
+                "SELECT 1 FROM cursorDiskKV WHERE key = ?", (f"composerData:{cid}",)
+            ).fetchone()
+            is not None
+        )
+        bubble_prefix = f"bubbleId:{cid}:"
+        diag.bubbles = int(
+            cur.execute(
+                "SELECT COUNT(*) FROM cursorDiskKV WHERE key >= ? AND key < ?",
+                (bubble_prefix, bubble_prefix + "\uffff"),
+            ).fetchone()[0]
+        )
+        ckpt_prefix = f"checkpointId:{cid}:"
+        diag.checkpoints = int(
+            cur.execute(
+                "SELECT COUNT(*) FROM cursorDiskKV WHERE key >= ? AND key < ?",
+                (ckpt_prefix, ckpt_prefix + "\uffff"),
+            ).fetchone()[0]
+        )
+
+        refs = _hash_refs(cur, cid)
+        diag.blob_refs = len(refs)
+        if refs:
+            diag.blob_missing = len(_missing_blobs(cur, sorted(refs)))
+
+        store_dir = (
+            _cursor_support_dir(cursor_support) / "AgentStores" / "cursor_agent_stores" / cid
+        )
+        # 真机结构：`<cid>/{files,.sync}`，挂载文件是 `.sync/mount.json`。
+        # 只认 `<cid>/mount.json` 会永远判 false，等于这层白查。
+        diag.agent_store = store_dir.is_dir()
+        diag.agent_store_mount = (store_dir / ".sync" / "mount.json").is_file()
+        diag.transcript = _find_transcript(cid, transcript_root)
+
+        if not diag.header and not diag.composer_data and diag.bubbles == 0:
+            diag.verdict = "gone"
+            diag.hint = "这条会话在库里已经没有索引和正文：清理过，或从未存在。"
+        elif diag.blob_missing:
+            diag.verdict = "missing_runtime"
+            diag.hint = (
+                f"正文还在（{diag.bubbles} 条气泡），但它引用的 {diag.blob_missing} "
+                f"个 agent 运行时对象已不在库里。界面会显示会话，点开却挂不上"
+                "（Agent host session not found）。这不是删正文造成的，正文删了"
+                "连标题都不会剩。"
+            )
+        elif not diag.agent_store or not diag.agent_store_mount:
+            diag.verdict = "no_host_state"
+            diag.hint = (
+                "正文、检查点、运行时对象都在，但 Agent Host 在 AgentStores 下没有这条"
+                "会话的挂载记录。这种情况点开会报 `Agent host session not found`，"
+                "但它不是删库造成的——库里该有的都在，缺的是 host 侧的会话目录/挂载文件。"
+            )
+        elif diag.checkpoints == 0 and (diag.header or diag.bubbles):
+            diag.verdict = "no_checkpoint"
+            diag.hint = "能读，但没有检查点：无法回退到某一轮，也无法从检查点恢复。"
+        else:
+            diag.verdict = "ok"
+            diag.hint = "七层齐全：索引、元数据、正文、检查点、运行时对象、AgentStore、逐字稿都在。"
+        return diag
+    finally:
+        con.close()
+
+
+#: 已知会与活库争空间、但**不是**本程序产物的文件（只报告，不删）。
+_DISK_SIBLINGS = (
+    "state.vscdb",
+    "state.vscdb-wal",
+    "state.vscdb-shm",
+    "state.vscdb.pre-cleanup",
+    "state.vscdb.pre-cleanup-wal",
+    "state.vscdb.pre-cleanup-shm",
+    "state.vscdb.vacuumed",
+)
+
+
+def storage_inventory(db: Path) -> dict[str, Any]:
+    """活库、中转残留与冷备份各占多少。只读。
+
+    存在的意义：用户在诊断里问过「为什么 75 GB 的 pre-cleanup 还在活库旁边」。
+    清理程序不主动删它（那是用户的最后一份完整数据），但必须如实报出来，
+    否则「占了 176 GB」这件事永远没人看见。
+    """
+    gs = db.parent
+    files: list[dict[str, Any]] = []
+    for name in _DISK_SIBLINGS:
+        p = gs / name
+        try:
+            if p.is_file():
+                files.append({"path": str(p), "bytes": p.stat().st_size})
+        except OSError:
+            continue
+
+    backups: list[dict[str, Any]] = []
+    try:
+        for p in sorted(gs.glob("CursorStateBackup-*")):
+            if not p.is_dir():
+                continue
+            size = 0
+            for f in p.rglob("*"):
+                try:
+                    if f.is_file():
+                        size += f.stat().st_size
+                except OSError:
+                    continue
+            backups.append({"path": str(p), "bytes": size})
+    except OSError:
+        pass
+
+    total = sum(int(i["bytes"]) for i in files) + sum(int(i["bytes"]) for i in backups)
+    stale = [i for i in files if ".pre-cleanup" in str(i["path"])]
+    return {
+        "files": files,
+        "backups": backups,
+        "total_bytes": total,
+        "stale_bytes": sum(int(i["bytes"]) for i in stale),
+    }
 
 
 def iter_table_names(db: Path) -> Iterator[str]:

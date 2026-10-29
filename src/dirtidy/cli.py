@@ -331,11 +331,34 @@ def cmd_cursor_cleanup(args: argparse.Namespace) -> int:
         analyze,
         clean,
         cursor_running,
+        diagnose_session,
         run_cursor_cleanup_schedule,
+        storage_inventory,
     )
 
     db = Path(args.db).expanduser() if args.db else DEFAULT_DB
     try:
+        if args.diagnose:
+            # 只读体检：不问 Cursor 是否在跑，也不备份、不写审计。
+            # 它的用途是回答「这条会话为什么挂不上」，不是清理。
+            if args.apply:
+                print("--diagnose 只读，不能与 --apply 同时使用。", file=sys.stderr)
+                return 2
+            sessions = [diagnose_session(db, cid.strip()) for cid in args.diagnose]
+            inv = storage_inventory(db)
+            print(
+                json.dumps(
+                    {
+                        "db": str(db),
+                        "sessions": [d.to_dict() for d in sessions],
+                        "disk": inv,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
+
         if args.schedule_hours is not None:
             if args.schedule_hours <= 0:
                 print("--schedule-hours 必须 > 0。", file=sys.stderr)
@@ -595,6 +618,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="确认语",
         help=f"兼容旧参数（旧确认语「{BLOB_CONFIRM_PHRASE_CLI_HELP}」）；不再授权删除共享 blob",
+    )
+    s.add_argument(
+        "--diagnose",
+        action="append",
+        default=None,
+        metavar="会话ID",
+        help=(
+            "只读体检：分层核对指定会话（可重复），报告缺哪一层、会不会在 Cursor 里挂不上；"
+            "不改库、不要求先退出 Cursor"
+        ),
     )
     s.add_argument("--no-vacuum", action="store_true", help="跳过 VACUUM（删除快，但文件体积暂不缩小）")
     s.add_argument(

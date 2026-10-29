@@ -2,8 +2,10 @@
 """工作区卫生检查：找出开发期掉在仓库根目录的垃圾文件。
 
 为什么需要它（2026-10-29）：
-    沙箱执行层在命令失败、被拦或超时的时候，会在**当前工作目录**留下一个探测
-    文件：8 字符随机名（字母数字下划线）、权限 0600、内容固定 4 字节 `blat`。
+    CPython 的 `tempfile` 在选临时目录时会逐个候选目录写一个探测文件（8 字符
+    随机名、权限 0600），写完立刻删掉；沙箱的安全策略把这次 unlink 拦了下来，
+    文件就留在**每个候选目录**里——最后一个是当前工作目录。除此之外沙箱自己
+    还会在 TMPDIR 下留 `codebuddy-toybox.*` 目录，同样因为删不掉而堆积。
     这类文件不受 .gitignore 约束，也不会自己消失。攒两天就有十几个混进
     `git status`，把真正该看的改动盖住；更糟的是它们看起来像「莫名多出来的
     文件」，每次都要重新判断一遍是不是自己弄坏的。
@@ -27,8 +29,9 @@ import sys
 from pathlib import Path
 
 # 探测文件的指纹：三者同时成立才认定，避免误伤普通的短文件名。
+# 内容有两种：`blat`（沙箱写入的哨兵）与空文件（CPython tempfile 的写权限探测）。
 NAME_RE = re.compile(r"^[a-z0-9_]{8}$")
-MARKER = b"blat"
+MARKERS = (b"blat", b"")
 MAX_SIZE = 64
 
 # 仓库里允许长期存在的本地目录（已被 .gitignore 覆盖），仅作提示，不参与清理。
@@ -67,7 +70,7 @@ def find_residue(root: Path) -> list[Path]:
                 continue
             if st.st_mode & 0o077:  # 只认 0600：普通文件通常 0644
                 continue
-            if path.read_bytes().strip() != MARKER:
+            if path.read_bytes().strip() not in MARKERS:
                 continue
         except OSError:
             continue

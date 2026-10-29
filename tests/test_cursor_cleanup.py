@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -30,10 +31,13 @@ from dirtidy.cursor_cleanup import (
     clean,
     collect_referenced_hashes,
     default_backup_dir,
+    delete_by_composer_ids,
     delete_orphan_blobs,
+    diagnose_session,
     human_bytes,
     list_all_key_prefixes,
     plan_blob_cleanup,
+    storage_inventory,
     verify_database,
 )
 
@@ -824,29 +828,61 @@ def test_recent_sessions_are_fully_preserved(
     assert _database_rows(db) == expected, "保留对象的完整行或原始 value 字节被改动"
 
 
-def test_forbidden_paths_are_never_referenced_in_source() -> None:
+def test_forbidden_paths_are_read_only_in_source() -> None:
     """事故文档硬约束第 5 条：清理范围只许是 `state.vscdb` 及其伴生文件。
 
-    源码层面守卫：`cursor_cleanup.py` 里不许出现对 `agent-transcripts`、
-    `chats`、`blob_storage`、`IndexedDB` 的任何路径拼接或字符串引用。
-    这些是 Cursor 的会话逐字稿与浏览器存储，碰了就丢用户数据。
+    `agent-transcripts` / `chats` / `blob_storage` / `IndexedDB` 是 Cursor 的
+    逐字稿与浏览器存储，**改写或删除它们就是丢用户数据**。
+
+    2026-10-29 起允许「只读提及」：`--diagnose` 要回答「这条会话缺哪一层」，
+    必须能读 AgentStore 与逐字稿的**存在性**，否则只能靠人肉查库。所以守卫
+    从「一个词都不许出现」改成「出现时必须只读」：
+
+    - 该行不得同时带写入 / 删除调用（unlink / rmtree / remove / move / replace /
+      write_text / write_bytes / rmdir）；
+    - 且只允许出现在只读体检相关函数里（`_find_transcript` / `diagnose_session`），
+      防止有人顺手在清理路径上加一句。
     """
     import re as _re
 
     src = Path(__file__).resolve().parent.parent / "src" / "dirtidy" / "cursor_cleanup.py"
     text = src.read_text(encoding="utf-8")
-    # 模块头「事故」一节会提到这些词（作为文档），所以只查**代码行**：
-    # 排除注释与 docstring 的粗略办法是查 Path 拼接/字符串字面量形态。
+    write_calls = (
+        "unlink",
+        "rmtree",
+        "os.remove",
+        "shutil.move",
+        "os.replace",
+        "write_text",
+        "write_bytes",
+        "rmdir",
+        "DELETE FROM",
+    )
+    read_only_funcs = ("_find_transcript", "diagnose_session")
+
+    def _enclosing_func(offset: int) -> str:
+        head = text[:offset]
+        found = ""
+        for m in _re.finditer(r"^def ([a-zA-Z_][\w]*)", head, flags=_re.M):
+            found = m.group(1)
+        return found
+
     for forbidden in ("agent-transcripts", "blob_storage", "IndexedDB", "chats"):
-        # 出现在非注释代码行（不以 # 开头、不在 docstring 里的字符串字面量）
         for m in _re.finditer(rf'["\']([^\n]*{forbidden}[^\n]*)["\']', text):
             line_no = text[: m.start()].count("\n") + 1
             line = text.splitlines()[line_no - 1]
-            stripped = line.strip()
-            # 允许：纯注释行（# 开头）——文档性提及
-            if stripped.startswith("#"):
-                continue
-            pytest.fail(f"cursor_cleanup.py:{line_no} 引用了禁止路径 {forbidden!r}：{line}")
+            if line.strip().startswith("#"):
+                continue  # 文档性提及
+            if any(call in line for call in write_calls):
+                pytest.fail(
+                    f"cursor_cleanup.py:{line_no} 对禁止路径 {forbidden!r} 做了写操作：{line}"
+                )
+            func = _enclosing_func(m.start())
+            if func not in read_only_funcs:
+                pytest.fail(
+                    f"cursor_cleanup.py:{line_no} 在 {func or '<模块级>'} 里引用了禁止路径 "
+                    f"{forbidden!r}：只读体检之外不许出现：{line}"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -958,3 +994,181 @@ def test_cli_schedule_refuses_delete_blobs(tmp_path: Path, monkeypatch: pytest.M
         ]
     )
     assert rc == 2, f"定期模式允许了 --delete-blobs（rc={rc}）"
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-29：会话「挂不上」的分层诊断 + 删除原子性
+# ---------------------------------------------------------------------------
+
+
+def _make_session_db(path: Path, cid: str, *, with_blob: bool, checkpoints: int = 1) -> str:
+    """造一条带正文的会话；`with_blob=False` 时正文引用的 blob 不在库里。
+
+    复刻的是 `Agent host session not found` 那种现场：索引、元数据、气泡、
+    检查点都在，唯独 agent 运行时对象缺了。
+    """
+    digest = "e" * 64
+    con = sqlite3.connect(str(path))
+    cur = con.cursor()
+    cur.execute("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)")
+    cur.execute("CREATE TABLE composerHeaders (composerId TEXT, recency INTEGER)")
+    cur.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB)")
+    cur.execute(
+        "INSERT INTO composerHeaders VALUES (?, ?)", (cid, int(time.time() * 1000))
+    )
+    # 正文同时带：真引用（agentKv:blob:）与诱饵（composer.content.<hash>）。
+    # 后者是内容 id 命名空间，真机同一条会话里出现 959 次——把它当 blob 会误报缺失。
+    body = json.dumps(
+        {
+            "composerId": cid,
+            "state": f"agentKv:blob:{digest}",
+            "decoys": [
+                f"composer.content.{'a' * 64}",
+                f"composer.content.{'b' * 64}",
+            ],
+        }
+    ).encode()
+    cur.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (f"composerData:{cid}", body))
+    cur.execute(
+        "INSERT INTO cursorDiskKV VALUES (?, ?)", (f"bubbleId:{cid}:b1", body)
+    )
+    for i in range(checkpoints):
+        cur.execute(
+            "INSERT INTO cursorDiskKV VALUES (?, ?)", (f"checkpointId:{cid}:c{i}", b"{}")
+        )
+    if with_blob:
+        cur.execute(
+            "INSERT INTO cursorDiskKV VALUES (?, ?)", (f"{BLOB_PREFIX}{digest}", b"payload")
+        )
+    con.commit()
+    con.close()
+    return digest
+
+
+def test_diagnose_flags_missing_runtime_objects_not_missing_body(tmp_path: Path) -> None:
+    """正文齐全、运行时对象缺失 → 判 `missing_runtime`，而不是「没有这条会话」。
+
+    这正是 10-29 那条 Composer 的形态：header / composerData / 5727 条气泡都在，
+    UI 却报 `Agent host session not found`。诊断要把「哪一层缺」说清楚，
+    否则每次出事都只能靠人肉查库、再猜是不是清理程序干的。
+    """
+    cid = "11111111-2222-3333-4444-555555555555"
+    db = tmp_path / "state.vscdb"
+    _make_session_db(db, cid, with_blob=False)
+
+    diag = diagnose_session(
+        db, cid, cursor_support=tmp_path / "support", transcript_root=tmp_path / "dotcursor"
+    )
+
+    assert diag.header and diag.composer_data
+    assert diag.bubbles == 1 and diag.checkpoints == 1
+    assert diag.blob_refs == 1, "composer.content.<hash> 是内容 id，不该算 blob 引用"
+    assert diag.blob_missing == 1
+    assert diag.verdict == "missing_runtime"
+    assert "挂不上" in diag.hint
+
+
+def test_diagnose_says_ok_when_every_layer_present(tmp_path: Path) -> None:
+    """七层齐全时判 `ok`：包括 AgentStore 的 mount.json 与逐字稿。
+
+    只看库会漏判——AgentStore 与逐字稿不在 state.vscdb 里，删库操作也碰不到它们。
+    把它们纳入同一次体检，才能回答「到底是库缺了，还是 host 侧丢了」。
+    """
+    cid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    db = tmp_path / "state.vscdb"
+    _make_session_db(db, cid, with_blob=True)
+
+    support = tmp_path / "support"
+    store = support / "AgentStores" / "cursor_agent_stores" / cid
+    (store / ".sync").mkdir(parents=True)
+    (store / ".sync" / "mount.json").write_text('{"kind":"self"}', encoding="utf-8")
+    transcripts = tmp_path / "dotcursor" / "projects" / "p" / "agent-transcripts" / cid
+    transcripts.mkdir(parents=True)
+    (transcripts / f"{cid}.jsonl").write_text("{}\n", encoding="utf-8")
+
+    diag = diagnose_session(db, cid, cursor_support=support, transcript_root=tmp_path / "dotcursor")
+
+    assert diag.blob_refs == 1, "只该认出 agentKv:blob: 那一条，composer.content 不算"
+    assert diag.blob_missing == 0
+    assert diag.agent_store is True
+    assert diag.agent_store_mount is True
+    assert diag.transcript.endswith(".jsonl")
+    assert diag.verdict == "ok"
+
+
+def test_session_delete_rolls_back_instead_of_leaving_half_deleted(
+    tmp_path: Path,
+) -> None:
+    """四层删除必须同生共死：中途失败要整批回滚，不能留下半删会话。
+
+    原先每删完一层就 `commit()`。杀掉进程（Ctrl-C、断电、WAL 锁超时）就会得到
+    「气泡删了、索引还挂着」的会话：列表里看得见，点开打不开。这里用触发器
+    模拟删 composerData 时失败，断言气泡和检查点仍在。
+    """
+    cid = "99999999-8888-7777-6666-555555555555"
+    db = tmp_path / "state.vscdb"
+    _make_session_db(db, cid, with_blob=True)
+
+    con = sqlite3.connect(str(db))
+    con.execute(
+        """
+        CREATE TRIGGER boom BEFORE DELETE ON cursorDiskKV
+        WHEN old.key LIKE 'composerData:%'
+        BEGIN SELECT RAISE(ABORT, 'boom'); END
+        """
+    )
+    con.commit()
+    cur = con.cursor()
+    with pytest.raises(sqlite3.IntegrityError):
+        delete_by_composer_ids(con, cur, [cid], delete_headers=True)
+
+    left = con.execute(
+        "SELECT COUNT(*) FROM cursorDiskKV WHERE key >= ? AND key < ?",
+        (f"bubbleId:{cid}:", f"bubbleId:{cid}:\uffff"),
+    ).fetchone()[0]
+    headers = con.execute(
+        "SELECT COUNT(*) FROM composerHeaders WHERE composerId = ?", (cid,)
+    ).fetchone()[0]
+    con.close()
+    assert left == 1, "气泡被单独删掉了：失败没有回滚"
+    assert headers == 1, "索引被单独删掉了：失败没有回滚"
+
+
+def test_storage_inventory_reports_stale_pre_cleanup(tmp_path: Path) -> None:
+    """磁盘盘点要报出 pre-cleanup 残留：它和活库并列时等于双份占用。
+
+    诊断交接里问过「75 GB 的 state.vscdb.pre-cleanup 为什么还在活库旁边」。
+    程序不替用户删它（那是最后一份完整数据），但必须报出来。
+    """
+    db = tmp_path / "state.vscdb"
+    db.write_bytes(b"x" * 100)
+    (tmp_path / "state.vscdb.pre-cleanup").write_bytes(b"y" * 300)
+    backup = tmp_path / "CursorStateBackup-20261029-120000"
+    backup.mkdir()
+    (backup / "state.vscdb").write_bytes(b"z" * 50)
+
+    inv = storage_inventory(db)
+
+    assert inv["stale_bytes"] == 300
+    assert inv["total_bytes"] == 100 + 300 + 50
+    assert len(inv["backups"]) == 1
+
+
+def test_diagnose_names_host_side_gap_separately(tmp_path: Path) -> None:
+    """数据全在、只缺 AgentStore 挂载 → 判 `no_host_state`，不要说成「数据缺失」。
+
+    这条区分很关键：库里七层都在、host 侧没有会话目录，用户看到的是
+    `Agent host session not found`。如果诊断把它报成缺正文，就会引导人去恢复
+    备份甚至重跑清理——既没必要，也可能把唯一完好的数据覆盖掉。
+    """
+    cid = "12345678-1234-1234-1234-123456789abc"
+    db = tmp_path / "state.vscdb"
+    _make_session_db(db, cid, with_blob=True)
+
+    diag = diagnose_session(
+        db, cid, cursor_support=tmp_path / "support", transcript_root=tmp_path / "dotcursor"
+    )
+
+    assert diag.blob_missing == 0 and diag.checkpoints == 1
+    assert diag.verdict == "no_host_state"
+    assert "Agent host session not found" in diag.hint
